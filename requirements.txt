@@ -1,0 +1,7 @@
+# Requires Python 3.9+
+streamlit
+pandas
+plotly
+openpyxl
+numpy
+pathlib
