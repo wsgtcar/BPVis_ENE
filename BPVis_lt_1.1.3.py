@@ -500,7 +500,7 @@ with tab1:
             st.write("Enter Project's Basic Informations")
 
             default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
-            default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
+            default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 10000.00
             default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
 
             # NEW: defaults for lat/lon (fallback to your previous hard-coded values)
@@ -1791,4 +1791,5 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
