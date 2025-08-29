@@ -1,5 +1,5 @@
 # Requires Python 3.9+
-streamlit
+streamlit==1.32.0
 pandas
 plotly
 openpyxl
