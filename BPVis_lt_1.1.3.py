@@ -521,15 +521,15 @@ with tab1:
         building_use = st.session_state.get("building_use", default_building_use)
 
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)with st.sidebar.expander("Emission Factors"):
-            st.write("Assign Emission Factors")
-            def_f = preloaded["factors"] if preloaded else {}
-            with st.form("form_emission_factors", clear_on_submit=False):
-                st.number_input("CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f", key="co2_Emissions_Electricity")
-                st.number_input("CO2 Factor Green Electricity", 0.000, 1.000, float(def_f.get("Green Electricity", 0.000)), format="%0.3f", key="co2_Emissions_Green_Electricity")
-                st.number_input("CO2 Factor District Heating", 0.000, 1.000, float(def_f.get("District Heating", 0.260)), format="%0.3f", key="co2_emissions_dh")
-                st.number_input("CO2 Factor District Cooling", 0.000, 1.000, float(def_f.get("District Cooling", 0.280)), format="%0.3f", key="co2_emissions_dc")
-                st.number_input("CO2 Factor Gas", 0.000, 1.000, float(def_f.get("Gas", 0.180)), format="%0.3f", key="co2_emissions_gas")
-                st.form_submit_button("Apply emission factors", use_container_width=True)
+        st.write("Assign Emission Factors")
+        def_f = preloaded["factors"] if preloaded else {}
+        with st.form("form_emission_factors", clear_on_submit=False):
+            st.number_input("CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f", key="co2_Emissions_Electricity")
+            st.number_input("CO2 Factor Green Electricity", 0.000, 1.000, float(def_f.get("Green Electricity", 0.000)), format="%0.3f", key="co2_Emissions_Green_Electricity")
+            st.number_input("CO2 Factor District Heating", 0.000, 1.000, float(def_f.get("District Heating", 0.260)), format="%0.3f", key="co2_emissions_dh")
+            st.number_input("CO2 Factor District Cooling", 0.000, 1.000, float(def_f.get("District Cooling", 0.280)), format="%0.3f", key="co2_emissions_dc")
+            st.number_input("CO2 Factor Gas", 0.000, 1.000, float(def_f.get("Gas", 0.180)), format="%0.3f", key="co2_emissions_gas")
+            st.form_submit_button("Apply emission factors", use_container_width=True)
 
         # resolve applied emission factors for downstream
         _def_f = preloaded["factors"] if preloaded else {}
@@ -1778,6 +1778,7 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
 
 
