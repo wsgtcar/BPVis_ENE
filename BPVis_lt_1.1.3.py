@@ -496,12 +496,12 @@ with tab1:
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
         # ---- Sidebar: project info (prefill from saved if available)with st.sidebar.expander("Project Data"):
-            st.write("Enter Project's Basic Informations")
-            default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
-            default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
-            default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
-            default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
-            default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
+        st.write("Enter Project's Basic Informations")
+        default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
+        default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
+        default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
+        default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
+        default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
 
             with st.form("form_project_data", clear_on_submit=False):
                 st.text_input("Project Name", value=default_name, key="project_name")
@@ -1778,4 +1778,5 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
