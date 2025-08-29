@@ -8,6 +8,13 @@ import numpy as np
 import plotly.colors as pc
 from typing import Optional, Tuple, Dict
 
+
+# --- helper: seed a default into session_state only once
+def _seed_default(key, default):
+    import streamlit as st
+    if key not in st.session_state:
+        st.session_state[key] = default
+
 ### Werner Sobek Green Technologies GmbH. All rights reserved.###
 ### Author: Rodrigo Carvalho ###
 
@@ -94,7 +101,7 @@ st.sidebar.write("### Project Information")
 # Small helper — cached loader
 # (Speeds up reruns while you tweak sidebar inputs)
 # =========================
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False)
 def energy_balance_sheet(file_bytes: bytes) -> pd.DataFrame:
     """Load 'Energy_Balance' sheet and strip '_kWh' suffix from columns."""
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
@@ -274,7 +281,7 @@ def build_project_df_with_building_use(
     )
 
 
-@st.cache_data(show_spinner=False, ttl=600)
+@st.cache_data(show_spinner=False)
 def load_benchmark_data(building_use: str) -> Optional[pd.DataFrame]:
     """Load benchmark data for the specified building use"""
     try:
@@ -496,91 +503,71 @@ with tab1:
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
         # ---- Sidebar: project info (prefill from saved if available)
-        # --- helper: seed defaults only once
-        def _seed_default(key, default):
-            if key not in st.session_state:
-                st.session_state[key] = default
-                
-        # ... inside the same place where you currently compute defaults:
-        default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
-        default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
-        default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
-        default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
-        default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
-        
-        # seed session_state once
-        _seed_default("project_name", default_name)
-        _seed_default("project_area", float(default_area))
-        _seed_default("project_latitude", str(default_lat))
-        _seed_default("project_longitude", str(default_lon))
-        _seed_default("building_use", default_building_use)
-        # Seed emission-factor defaults into session_state once
-        _seed_default("co2_factor_electricity", float(def_f.get("Electricity", 0.300)))
-        _seed_default("co2_factor_green_electricity", float(def_f.get("Green Electricity", 0.000)))
-        _seed_default("co2_factor_dh", float(def_f.get("District Heating", 0.260)))
-        _seed_default("co2_factor_dc", float(def_f.get("District Cooling", 0.280)))
-        _seed_default("co2_factor_gas", float(def_f.get("Gas", 0.180)))
-
-        
-        # now define widgets WITHOUT value=..., only key=...
         with st.sidebar.expander("Project Data"):
             st.write("Enter Project's Basic Informations")
-        
+
+            default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
+            default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
+            default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
+
+            # NEW: defaults for lat/lon (fallback to your previous hard-coded values)
+            default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
+            default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
+
+            # keep title reactive via session_state
             project_name = st.text_input("Project Name", key="project_name")
-
             project_area = st.number_input("Project Area", min_value=0.00, key="project_area")
-        
-            latitude = st.text_input("Project Latitude", key="project_latitude")
-            
-            longitude = st.text_input("Project Longitude", key="project_longitude")
-        
-            building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education", "Healthcare", "Laboratory", "Data Center"]
-            building_use = st.selectbox("Building Use", building_use_options, index=building_use_options.index(st.session_state["building_use"]) if st.session_state["building_use"] in building_use_options else 0, key="building_use")
 
+            # FIXED LABEL + use defaults from file if present
+            latitude = st.text_input("Project Latitude", key="project_latitude")
+            longitude = st.text_input("Project Longitude", key="project_longitude")
+
+            # building use dropdown unchanged...
+            building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
+                                    "Leisure", "Healthcare"]
+            building_use_index = building_use_options.index(
+                default_building_use) if default_building_use in building_use_options else 0
+            building_use = st.selectbox("Building Use", building_use_options, key="building_use")
 
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
             st.write("Assign Emission Factors")
             def_f = preloaded["factors"] if preloaded else {}
-            co2_Emissions_Electricity = st.number_input("CO2 Factor Electricity", min_value=0.000, max_value=1.000, format="%0.3f", key="co2_factor_electricity")
-            
+            _seed_default("co2_factor_electricity", float(def_f.get("Electricity", 0.300)))
+            _seed_default("co2_factor_green_electricity", float(def_f.get("Green Electricity", 0.000)))
+            _seed_default("co2_factor_dh", float(def_f.get("District Heating", 0.260)))
+            _seed_default("co2_factor_dc", float(def_f.get("District Cooling", 0.280)))
+            _seed_default("co2_factor_gas", float(def_f.get("Gas", 0.180)))
+            co2_Emissions_Electricity = st.number_input(
+                "CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f"
+            )
             co2_Emissions_Green_Electricity = st.number_input(
-                "CO2 Factor Green Electricity",
-                min_value=0.000, max_value=1.000,
-                format="%0.3f",
-                key="co2_factor_green_electricity"
+                "CO2 Factor Green Electricity", 0.000, 1.000, float(def_f.get("Green Electricity", 0.000)),
+                format="%0.3f"
             )
-            
             co2_emissions_dh = st.number_input(
-                "CO2 Factor District Heating",
-                min_value=0.000, max_value=1.000,
-                format="%0.3f",
-                key="co2_factor_dh"
+                "CO2 Factor District Heating", 0.000, 1.000, float(def_f.get("District Heating", 0.260)), format="%0.3f"
             )
-            
             co2_emissions_dc = st.number_input(
-                "CO2 Factor District Cooling",
-                min_value=0.000, max_value=1.000,
-                format="%0.3f",
-                key="co2_factor_dc"
+                "CO2 Factor District Cooling", 0.000, 1.000, float(def_f.get("District Cooling", 0.280)), format="%0.3f"
             )
-            
             co2_emissions_gas = st.number_input(
-                "CO2 Factor Gas",
-                min_value=0.000, max_value=1.000,
-                format="%0.3f",
-                key="co2_factor_gas"
+                "CO2 Factor Gas", 0.000, 1.000, float(def_f.get("Gas", 0.180)), format="%0.3f"
             )
-
 
         # --- Energy Cost (€/kWh) ---
         with st.sidebar.expander("Energy Tariffs"):
             st.write("Assign energy cost per source (per kWh)")
             default_currency = preloaded["currency"] if (
                         preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
-            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency))
+            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], key="currency_symbol")
 
             def_t = preloaded["tariffs"] if preloaded else {}
+            _seed_default("cost_electricity", float(def_t.get("Electricity", 0.40)))
+            _seed_default("cost_green_electricity", float(def_t.get("Green Electricity", 0.40)))
+            _seed_default("cost_dh", float(def_t.get("District Heating", 0.16)))
+            _seed_default("cost_dc", float(def_t.get("District Cooling", 0.16)))
+            _seed_default("cost_gas", float(def_t.get("Gas", 0.12)))
             cost_electricity = st.number_input(f"Cost Electricity ({currency_symbol}/kWh)", 0.00, 100.00,
                                                float(def_t.get("Electricity", 0.35)),
                                                step=0.01, format="%.2f")
@@ -1821,8 +1808,4 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
-
-
-
-
 
