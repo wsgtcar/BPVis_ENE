@@ -94,7 +94,7 @@ st.sidebar.write("### Project Information")
 # Small helper — cached loader
 # (Speeds up reruns while you tweak sidebar inputs)
 # =========================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=600)
 def energy_balance_sheet(file_bytes: bytes) -> pd.DataFrame:
     """Load 'Energy_Balance' sheet and strip '_kWh' suffix from columns."""
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
@@ -274,7 +274,7 @@ def build_project_df_with_building_use(
     )
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=600)
 def load_benchmark_data(building_use: str) -> Optional[pd.DataFrame]:
     """Load benchmark data for the specified building use"""
     try:
@@ -1791,4 +1791,5 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
