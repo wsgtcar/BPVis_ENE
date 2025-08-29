@@ -8,6 +8,13 @@ import numpy as np
 import plotly.colors as pc
 from typing import Optional, Tuple, Dict
 
+
+# --- helper: seed defaults into session_state on first run
+def _seed_default(key, default):
+    import streamlit as st
+    if key not in st.session_state:
+        st.session_state[key] = default
+
 ### Werner Sobek Green Technologies GmbH. All rights reserved.###
 ### Author: Rodrigo Carvalho ###
 
@@ -16,7 +23,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPvis LT 1.1.3",
+    page_title="WSGT_BPvis LT 1.0.0",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -526,46 +533,75 @@ with tab1:
         with st.sidebar.expander("Emission Factors"):
             st.write("Assign Emission Factors")
             def_f = preloaded["factors"] if preloaded else {}
-            co2_Emissions_Electricity = st.number_input(
-                "CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f"
-            )
-            co2_Emissions_Green_Electricity = st.number_input(
-                "CO2 Factor Green Electricity", 0.000, 1.000, float(def_f.get("Green Electricity", 0.000)),
-                format="%0.3f"
-            )
-            co2_emissions_dh = st.number_input(
-                "CO2 Factor District Heating", 0.000, 1.000, float(def_f.get("District Heating", 0.260)), format="%0.3f"
-            )
-            co2_emissions_dc = st.number_input(
-                "CO2 Factor District Cooling", 0.000, 1.000, float(def_f.get("District Cooling", 0.280)), format="%0.3f"
-            )
-            co2_emissions_gas = st.number_input(
-                "CO2 Factor Gas", 0.000, 1.000, float(def_f.get("Gas", 0.180)), format="%0.3f"
-            )
+            # Seed once: draft + applied
+            _seed_default("draft_co2_factor_electricity", float(def_f.get("Electricity", 0.300)))
+            _seed_default("draft_co2_factor_green_electricity", float(def_f.get("Green Electricity", 0.000)))
+            _seed_default("draft_co2_factor_dh", float(def_f.get("District Heating", 0.260)))
+            _seed_default("draft_co2_factor_dc", float(def_f.get("District Cooling", 0.280)))
+            _seed_default("draft_co2_factor_gas", float(def_f.get("Gas", 0.180)))
+            _seed_default("applied_co2_factor_electricity", st.session_state["draft_co2_factor_electricity"])
+            _seed_default("applied_co2_factor_green_electricity", st.session_state["draft_co2_factor_green_electricity"])
+            _seed_default("applied_co2_factor_dh", st.session_state["draft_co2_factor_dh"])
+            _seed_default("applied_co2_factor_dc", st.session_state["draft_co2_factor_dc"])
+            _seed_default("applied_co2_factor_gas", st.session_state["draft_co2_factor_gas"])
+
+            with st.form("form_emission_factors", clear_on_submit=False):
+                st.number_input("CO2 Factor Electricity", min_value=0.000, max_value=1.000, format="%0.3f", key="draft_co2_factor_electricity")
+                st.number_input("CO2 Factor Green Electricity", min_value=0.000, max_value=1.000, format="%0.3f", key="draft_co2_factor_green_electricity")
+                st.number_input("CO2 Factor District Heating", min_value=0.000, max_value=1.000, format="%0.3f", key="draft_co2_factor_dh")
+                st.number_input("CO2 Factor District Cooling", min_value=0.000, max_value=1.000, format="%0.3f", key="draft_co2_factor_dc")
+                st.number_input("CO2 Factor Gas", min_value=0.000, max_value=1.000, format="%0.3f", key="draft_co2_factor_gas")
+                _apply_ef = st.form_submit_button("Apply emission factors", use_container_width=True)
+            if _apply_ef:
+                st.session_state["applied_co2_factor_electricity"] = st.session_state["draft_co2_factor_electricity"]
+                st.session_state["applied_co2_factor_green_electricity"] = st.session_state["draft_co2_factor_green_electricity"]
+                st.session_state["applied_co2_factor_dh"] = st.session_state["draft_co2_factor_dh"]
+                st.session_state["applied_co2_factor_dc"] = st.session_state["draft_co2_factor_dc"]
+                st.session_state["applied_co2_factor_gas"] = st.session_state["draft_co2_factor_gas"]
+
+        # Resolve current (applied) factors for downstream use
+        co2_Emissions_Electricity = st.session_state["applied_co2_factor_electricity"]
+        co2_Emissions_Green_Electricity = st.session_state["applied_co2_factor_green_electricity"]
+        co2_emissions_dh = st.session_state["applied_co2_factor_dh"]
+        co2_emissions_dc = st.session_state["applied_co2_factor_dc"]
+        co2_emissions_gas = st.session_state["applied_co2_factor_gas"]
 
         # --- Energy Cost (€/kWh) ---
-        with st.sidebar.expander("Energy Tariffs"):
-            st.write("Assign energy cost per source (per kWh)")
-            default_currency = preloaded["currency"] if (
-                        preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
-            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency))
-
+        with st.sidebar.expander("Energy Cost (€/kWh)"):
+            st.write("Assign Energy Cost")
             def_t = preloaded["tariffs"] if preloaded else {}
-            cost_electricity = st.number_input(f"Cost Electricity ({currency_symbol}/kWh)", 0.00, 100.00,
-                                               float(def_t.get("Electricity", 0.35)),
-                                               step=0.01, format="%.2f")
-            cost_green_electricity = st.number_input(f"Cost Green Electricity ({currency_symbol}/kWh)", 0.00, 100.00,
-                                                     float(def_t.get("Green Electricity", 0.40)),
-                                                     step=0.01, format="%.2f")
-            cost_dh = st.number_input(f"Cost District Heating ({currency_symbol}/kWh)", 0.00, 100.00,
-                                      float(def_t.get("District Heating", 0.16)), step=0.01,
-                                      format="%.2f")
-            cost_dc = st.number_input(f"Cost District Cooling ({currency_symbol}/kWh)", 0.00, 100.00,
-                                      float(def_t.get("District Cooling", 0.16)), step=0.01,
-                                      format="%.2f")
-            cost_gas = st.number_input(f"Cost Gas ({currency_symbol}/kWh)", 0.00, 100.00, float(def_t.get("Gas", 0.12)),
-                                       step=0.01,
-                                       format="%.2f")
+            # Seed once: draft + applied tariffs
+            _seed_default("draft_cost_electricity", float(def_t.get("Electricity", 0.40)))
+            _seed_default("draft_cost_green_electricity", float(def_t.get("Green Electricity", 0.40)))
+            _seed_default("draft_cost_dh", float(def_t.get("District Heating", 0.16)))
+            _seed_default("draft_cost_dc", float(def_t.get("District Cooling", 0.16)))
+            _seed_default("draft_cost_gas", float(def_t.get("Gas", 0.12)))
+            _seed_default("applied_cost_electricity", st.session_state["draft_cost_electricity"])
+            _seed_default("applied_cost_green_electricity", st.session_state["draft_cost_green_electricity"])
+            _seed_default("applied_cost_dh", st.session_state["draft_cost_dh"])
+            _seed_default("applied_cost_dc", st.session_state["draft_cost_dc"])
+            _seed_default("applied_cost_gas", st.session_state["draft_cost_gas"])
+
+            with st.form("form_tariffs", clear_on_submit=False):
+                st.number_input(f"Cost Electricity ({currency_symbol}/kWh)", 0.00, 100.00, key="draft_cost_electricity", step=0.01, format="%.2f")
+                st.number_input(f"Cost Green Electricity ({currency_symbol}/kWh)", 0.00, 100.00, key="draft_cost_green_electricity", step=0.01, format="%.2f")
+                st.number_input(f"Cost District Heating ({currency_symbol}/kWh)", 0.00, 100.00, key="draft_cost_dh", step=0.01, format="%.2f")
+                st.number_input(f"Cost District Cooling ({currency_symbol}/kWh)", 0.00, 100.00, key="draft_cost_dc", step=0.01, format="%.2f")
+                st.number_input(f"Cost Gas ({currency_symbol}/kWh)", 0.00, 100.00, key="draft_cost_gas", step=0.01, format="%.2f")
+                _apply_tar = st.form_submit_button("Apply energy costs", use_container_width=True)
+            if _apply_tar:
+                st.session_state["applied_cost_electricity"] = st.session_state["draft_cost_electricity"]
+                st.session_state["applied_cost_green_electricity"] = st.session_state["draft_cost_green_electricity"]
+                st.session_state["applied_cost_dh"] = st.session_state["draft_cost_dh"]
+                st.session_state["applied_cost_dc"] = st.session_state["draft_cost_dc"]
+                st.session_state["applied_cost_gas"] = st.session_state["draft_cost_gas"]
+
+        # Resolve current (applied) tariffs for downstream use
+        cost_electricity = st.session_state["applied_cost_electricity"]
+        cost_green_electricity = st.session_state["applied_cost_green_electricity"]
+        cost_dh = st.session_state["applied_cost_dh"]
+        cost_dc = st.session_state["applied_cost_dc"]
+        cost_gas = st.session_state["applied_cost_gas"]
 
         # ---- Sidebar: map End_Use -> Energy_Source (user-controlled)
         with st.sidebar.expander("Assign Energy Sources"):
@@ -1791,5 +1827,4 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
-
 
