@@ -514,6 +514,13 @@ with tab1:
         _seed_default("project_latitude", str(default_lat))
         _seed_default("project_longitude", str(default_lon))
         _seed_default("building_use", default_building_use)
+        # Seed emission-factor defaults into session_state once
+        _seed_default("co2_factor_electricity", float(def_f.get("Electricity", 0.300)))
+        _seed_default("co2_factor_green_electricity", float(def_f.get("Green Electricity", 0.000)))
+        _seed_default("co2_factor_dh", float(def_f.get("District Heating", 0.260)))
+        _seed_default("co2_factor_dc", float(def_f.get("District Cooling", 0.280)))
+        _seed_default("co2_factor_gas", float(def_f.get("Gas", 0.180)))
+
         
         # now define widgets WITHOUT value=..., only key=...
         with st.sidebar.expander("Project Data"):
@@ -536,21 +543,40 @@ with tab1:
             st.write("Assign Emission Factors")
             def_f = preloaded["factors"] if preloaded else {}
             co2_Emissions_Electricity = st.number_input(
-                "CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f"
+                "CO2 Factor Electricity",
+                min_value=0.000, max_value=1.000,
+                format="%0.3f",
+                key="co2_factor_electricity"
             )
+            
             co2_Emissions_Green_Electricity = st.number_input(
-                "CO2 Factor Green Electricity", 0.000, 1.000, float(def_f.get("Green Electricity", 0.000)),
-                format="%0.3f"
+                "CO2 Factor Green Electricity",
+                min_value=0.000, max_value=1.000,
+                format="%0.3f",
+                key="co2_factor_green_electricity"
             )
+            
             co2_emissions_dh = st.number_input(
-                "CO2 Factor District Heating", 0.000, 1.000, float(def_f.get("District Heating", 0.260)), format="%0.3f"
+                "CO2 Factor District Heating",
+                min_value=0.000, max_value=1.000,
+                format="%0.3f",
+                key="co2_factor_dh"
             )
+            
             co2_emissions_dc = st.number_input(
-                "CO2 Factor District Cooling", 0.000, 1.000, float(def_f.get("District Cooling", 0.280)), format="%0.3f"
+                "CO2 Factor District Cooling",
+                min_value=0.000, max_value=1.000,
+                format="%0.3f",
+                key="co2_factor_dc"
             )
+            
             co2_emissions_gas = st.number_input(
-                "CO2 Factor Gas", 0.000, 1.000, float(def_f.get("Gas", 0.180)), format="%0.3f"
+                "CO2 Factor Gas",
+                min_value=0.000, max_value=1.000,
+                format="%0.3f",
+                key="co2_factor_gas"
             )
+
 
         # --- Energy Cost (€/kWh) ---
         with st.sidebar.expander("Energy Tariffs"):
@@ -1800,6 +1826,7 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
 
 
