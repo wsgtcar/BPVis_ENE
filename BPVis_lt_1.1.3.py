@@ -606,10 +606,10 @@ with tab1:
             if st.button("Save Project", use_container_width=True):
                 # coerce UI strings to floats when possible
                 def _to_float_safe(s):
-                try:
-                    return float(str(s).replace(",", "."))
-                except Exception:
-                    return None
+                    try:
+                        return float(str(s).replace(",", "."))
+                    except Exception:
+                        return None
 
 
                 lat_val = _to_float_safe(latitude)
@@ -1803,4 +1803,5 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
