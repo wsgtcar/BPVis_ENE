@@ -542,12 +542,7 @@ with tab1:
         with st.sidebar.expander("Emission Factors"):
             st.write("Assign Emission Factors")
             def_f = preloaded["factors"] if preloaded else {}
-            co2_Emissions_Electricity = st.number_input(
-                "CO2 Factor Electricity",
-                min_value=0.000, max_value=1.000,
-                format="%0.3f",
-                key="co2_factor_electricity"
-            )
+            co2_Emissions_Electricity = st.number_input("CO2 Factor Electricity", min_value=0.000, max_value=1.000, format="%0.3f", key="co2_factor_electricity")
             
             co2_Emissions_Green_Electricity = st.number_input(
                 "CO2 Factor Green Electricity",
@@ -1826,6 +1821,7 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
 
 
