@@ -503,15 +503,15 @@ with tab1:
         default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
         default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
 
-            with st.form("form_project_data", clear_on_submit=False):
-                st.text_input("Project Name", value=default_name, key="project_name")
-                st.number_input("Project Area", 0.00, value=float(default_area), key="project_area")
-                st.text_input("Project Latitude", value=str(default_lat), key="project_latitude")
-                st.text_input("Project Longitude", value=str(default_lon), key="project_longitude")
-                building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education", "Leisure", "Healthcare"]
-                building_use_index = building_use_options.index(default_building_use) if default_building_use in building_use_options else 0
-                st.selectbox("Building Use", building_use_options, index=building_use_index, key="building_use")
-                st.form_submit_button("Apply project data", use_container_width=True)
+        with st.form("form_project_data", clear_on_submit=False):
+            st.text_input("Project Name", value=default_name, key="project_name")
+            st.number_input("Project Area", 0.00, value=float(default_area), key="project_area")
+            st.text_input("Project Latitude", value=str(default_lat), key="project_latitude")
+            st.text_input("Project Longitude", value=str(default_lon), key="project_longitude")
+            building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education", "Leisure", "Healthcare"]
+            building_use_index = building_use_options.index(default_building_use) if default_building_use in building_use_options else 0
+            st.selectbox("Building Use", building_use_options, index=building_use_index, key="building_use")
+            st.form_submit_button("Apply project data", use_container_width=True)
 
         # resolve applied project variables for downstream
         project_name = st.session_state.get("project_name", default_name)
@@ -1778,5 +1778,6 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
 
