@@ -47,7 +47,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPvis LT 1.0.0",
+    page_title="WSGT_BPvis LT 1.1.3",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -1803,5 +1803,6 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
 
