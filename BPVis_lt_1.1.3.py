@@ -8,6 +8,13 @@ import numpy as np
 import plotly.colors as pc
 from typing import Optional, Tuple, Dict
 
+
+# Helper to set defaults only once
+def _seed_default(key, default):
+    import streamlit as st
+    if key not in st.session_state:
+        st.session_state[key] = default
+
 ### Werner Sobek Green Technologies GmbH. All rights reserved.###
 ### Author: Rodrigo Carvalho ###
 
@@ -526,46 +533,75 @@ with tab1:
         with st.sidebar.expander("Emission Factors"):
             st.write("Assign Emission Factors")
             def_f = preloaded["factors"] if preloaded else {}
-            co2_Emissions_Electricity = st.number_input(
-                "CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f"
-            )
-            co2_Emissions_Green_Electricity = st.number_input(
-                "CO2 Factor Green Electricity", 0.000, 1.000, float(def_f.get("Green Electricity", 0.000)),
-                format="%0.3f"
-            )
-            co2_emissions_dh = st.number_input(
-                "CO2 Factor District Heating", 0.000, 1.000, float(def_f.get("District Heating", 0.260)), format="%0.3f"
-            )
-            co2_emissions_dc = st.number_input(
-                "CO2 Factor District Cooling", 0.000, 1.000, float(def_f.get("District Cooling", 0.280)), format="%0.3f"
-            )
-            co2_emissions_gas = st.number_input(
-                "CO2 Factor Gas", 0.000, 1.000, float(def_f.get("Gas", 0.180)), format="%0.3f"
-            )
+            # Seed defaults ONCE for free text inputs (avoid number_input coercion during typing)
+            _seed_default("co2_elec_txt", f'{float(def_f.get("Electricity", 0.300)):.3f}')
+            _seed_default("co2_green_txt", f'{float(def_f.get("Green Electricity", 0.000)):.3f}')
+            _seed_default("co2_dh_txt", f'{float(def_f.get("District Heating", 0.260)):.3f}')
+            _seed_default("co2_dc_txt", f'{float(def_f.get("District Cooling", 0.280)):.3f}')
+            _seed_default("co2_gas_txt", f'{float(def_f.get("Gas", 0.180)):.3f}')
+
+            with st.form("form_emission_factors_txt", clear_on_submit=False):
+                st.text_input("CO2 Factor Electricity", key="co2_elec_txt")
+                st.text_input("CO2 Factor Green Electricity", key="co2_green_txt")
+                st.text_input("CO2 Factor District Heating", key="co2_dh_txt")
+                st.text_input("CO2 Factor District Cooling", key="co2_dc_txt")
+                st.text_input("CO2 Factor Gas", key="co2_gas_txt")
+                _apply_ef = st.form_submit_button("Apply emission factors", use_container_width=True)
+
+        # Parse/validate emission factors to floats with bounds 0..1
+        def _parse01(key, default):
+            try:
+                v = float(st.session_state.get(key, default))
+                if not (0.0 <= v <= 1.0):
+                    return float(default)
+                return v
+            except Exception:
+                return float(default)
+
+        _def_f = preloaded["factors"] if preloaded else {}
+        co2_Emissions_Electricity = _parse01("co2_elec_txt", float(_def_f.get("Electricity", 0.300)))
+        co2_Emissions_Green_Electricity = _parse01("co2_green_txt", float(_def_f.get("Green Electricity", 0.000)))
+        co2_emissions_dh = _parse01("co2_dh_txt", float(_def_f.get("District Heating", 0.260)))
+        co2_emissions_dc = _parse01("co2_dc_txt", float(_def_f.get("District Cooling", 0.280)))
+        co2_emissions_gas = _parse01("co2_gas_txt", float(_def_f.get("Gas", 0.180)))
 
         # --- Energy Cost (€/kWh) ---
         with st.sidebar.expander("Energy Tariffs"):
             st.write("Assign energy cost per source (per kWh)")
-            default_currency = preloaded["currency"] if (
-                        preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
-            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency))
-
+            default_currency = preloaded["currency"] if (preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
+            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency), key="currency_symbol")
             def_t = preloaded["tariffs"] if preloaded else {}
-            cost_electricity = st.number_input(f"Cost Electricity ({currency_symbol}/kWh)", 0.00, 100.00,
-                                               float(def_t.get("Electricity", 0.35)),
-                                               step=0.01, format="%.2f")
-            cost_green_electricity = st.number_input(f"Cost Green Electricity ({currency_symbol}/kWh)", 0.00, 100.00,
-                                                     float(def_t.get("Green Electricity", 0.40)),
-                                                     step=0.01, format="%.2f")
-            cost_dh = st.number_input(f"Cost District Heating ({currency_symbol}/kWh)", 0.00, 100.00,
-                                      float(def_t.get("District Heating", 0.16)), step=0.01,
-                                      format="%.2f")
-            cost_dc = st.number_input(f"Cost District Cooling ({currency_symbol}/kWh)", 0.00, 100.00,
-                                      float(def_t.get("District Cooling", 0.16)), step=0.01,
-                                      format="%.2f")
-            cost_gas = st.number_input(f"Cost Gas ({currency_symbol}/kWh)", 0.00, 100.00, float(def_t.get("Gas", 0.12)),
-                                       step=0.01,
-                                       format="%.2f")
+            # Seed text defaults once (keep as strings to avoid formatting jitter)
+            _seed_default("cost_elec_txt", f'{float(def_t.get("Electricity", 0.35)):.2f}')
+            _seed_default("cost_green_txt", f'{float(def_t.get("Green Electricity", 0.40)):.2f}')
+            _seed_default("cost_dh_txt", f'{float(def_t.get("District Heating", 0.16)):.2f}')
+            _seed_default("cost_dc_txt", f'{float(def_t.get("District Cooling", 0.16)):.2f}')
+            _seed_default("cost_gas_txt", f'{float(def_t.get("Gas", 0.12)):.2f}')
+
+            with st.form("form_tariffs_txt", clear_on_submit=False):
+                st.text_input(f"Cost Electricity ({currency_symbol}/kWh)", key="cost_elec_txt")
+                st.text_input(f"Cost Green Electricity ({currency_symbol}/kWh)", key="cost_green_txt")
+                st.text_input(f"Cost District Heating ({currency_symbol}/kWh)", key="cost_dh_txt")
+                st.text_input(f"Cost District Cooling ({currency_symbol}/kWh)", key="cost_dc_txt")
+                st.text_input(f"Cost Gas ({currency_symbol}/kWh)", key="cost_gas_txt")
+                _apply_tar = st.form_submit_button("Apply energy costs", use_container_width=True)
+
+        # Parse/validate tariffs to floats with bounds 0..100
+        def _parse_cost(key, default):
+            try:
+                v = float(st.session_state.get(key, default))
+                if not (0.0 <= v <= 100.0):
+                    return float(default)
+                return v
+            except Exception:
+                return float(default)
+
+        _def_t = preloaded["tariffs"] if preloaded else {}
+        cost_electricity = _parse_cost("cost_elec_txt", float(_def_t.get("Electricity", 0.35)))
+        cost_green_electricity = _parse_cost("cost_green_txt", float(_def_t.get("Green Electricity", 0.40)))
+        cost_dh = _parse_cost("cost_dh_txt", float(_def_t.get("District Heating", 0.16)))
+        cost_dc = _parse_cost("cost_dc_txt", float(_def_t.get("District Cooling", 0.16)))
+        cost_gas = _parse_cost("cost_gas_txt", float(_def_t.get("Gas", 0.12)))
 
         # ---- Sidebar: map End_Use -> Energy_Source (user-controlled)
         with st.sidebar.expander("Assign Energy Sources"):
