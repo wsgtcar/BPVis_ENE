@@ -593,26 +593,26 @@ with tab1:
     _all_applied = st.form_submit_button("Apply all settings", use_container_width=True)
 
         
-    # Resolve effective control values after the unified form submit
-    project_name = st.session_state.get("project_name", st.session_state.get("project_name", "Example Building 1"))
-    project_area = st.session_state.get("project_area", 1000.0)
-    latitude = st.session_state.get("project_latitude", "53.54955")
-    longitude = st.session_state.get("project_longitude", "9.9936")
-    building_use = st.session_state.get("building_use", "Office")
-    currency_symbol = st.session_state.get("currency_symbol", "€")
-    co2_Emissions_Electricity = float(st.session_state.get("co2_Emissions_Electricity", 0.300))
-    co2_Emissions_Green_Electricity = float(st.session_state.get("co2_Emissions_Green_Electricity", 0.000))
-    co2_emissions_dh = float(st.session_state.get("co2_emissions_dh", 0.260))
-    co2_emissions_dc = float(st.session_state.get("co2_emissions_dc", 0.280))
-    co2_emissions_gas = float(st.session_state.get("co2_emissions_gas", 0.180))
-    cost_electricity = float(st.session_state.get("cost_electricity", 0.35))
-    cost_green_electricity = float(st.session_state.get("cost_green_electricity", 0.40))
-    cost_dh = float(st.session_state.get("cost_dh", 0.16))
-    cost_dc = float(st.session_state.get("cost_dc", 0.16))
-    cost_gas = float(st.session_state.get("cost_gas", 0.12))
-    # map sources
-    end_uses = df_melted["End_Use"].unique().tolist()
-    mapping_dict = {use: st.session_state.get(f"source_{use}", "Electricity") for use in end_uses}
+        # Resolve effective control values after the unified form submit
+        project_name = st.session_state.get("project_name", st.session_state.get("project_name", "Example Building 1"))
+        project_area = st.session_state.get("project_area", 1000.0)
+        latitude = st.session_state.get("project_latitude", "53.54955")
+        longitude = st.session_state.get("project_longitude", "9.9936")
+        building_use = st.session_state.get("building_use", "Office")
+        currency_symbol = st.session_state.get("currency_symbol", "€")
+        co2_Emissions_Electricity = float(st.session_state.get("co2_Emissions_Electricity", 0.300))
+        co2_Emissions_Green_Electricity = float(st.session_state.get("co2_Emissions_Green_Electricity", 0.000))
+        co2_emissions_dh = float(st.session_state.get("co2_emissions_dh", 0.260))
+        co2_emissions_dc = float(st.session_state.get("co2_emissions_dc", 0.280))
+        co2_emissions_gas = float(st.session_state.get("co2_emissions_gas", 0.180))
+        cost_electricity = float(st.session_state.get("cost_electricity", 0.35))
+        cost_green_electricity = float(st.session_state.get("cost_green_electricity", 0.40))
+        cost_dh = float(st.session_state.get("cost_dh", 0.16))
+        cost_dc = float(st.session_state.get("cost_dc", 0.16))
+        cost_gas = float(st.session_state.get("cost_gas", 0.12))
+        # map sources
+        end_uses = df_melted["End_Use"].unique().tolist()
+        mapping_dict = {use: st.session_state.get(f"source_{use}", "Electricity") for use in end_uses}
 # ---- Save Project button (exports current inputs into the workbook)
     with st.sidebar:
         if st.button("Save Project", use_container_width=True):
@@ -1815,4 +1815,5 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
