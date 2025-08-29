@@ -24,12 +24,13 @@ def _parse_float_locale(s, default):
 
 def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None, help=None):
     txt_key = f"{key}_txt"
-    _seed_default(txt_key, (fmt or "{}").format(default) if fmt else str(default))
+    if txt_key not in st.session_state:
+        st.session_state[txt_key] = (fmt.format(default) if fmt else str(default)) if hasattr(fmt, "format") else (fmt or str(default))
     val = st.text_input(label, key=txt_key, help=help)
     v = _parse_float_locale(val, default)
-    if min_value is not None and v < min_value:
+    if (min_value is not None) and (v < min_value):
         v = min_value
-    if max_value is not None and v > max_value:
+    if (max_value is not None) and (v > max_value):
         v = max_value
     st.session_state[key] = v
     return v
@@ -556,22 +557,12 @@ with tab1:
         with st.sidebar.expander("Emission Factors"):
             st.write("Assign Emission Factors")
             def_f = preloaded["factors"] if preloaded else {}
-            co2_Emissions_Electricity = st.number_input(
-                "CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f"
-            )
-            co2_Emissions_Green_Electricity = st.number_input(
-                "CO2 Factor Green Electricity", 0.000, 1.000, float(def_f.get("Green Electricity", 0.000)),
-                format="%0.3f"
-            )
-            co2_emissions_dh = st.number_input(
-                "CO2 Factor District Heating", 0.000, 1.000, float(def_f.get("District Heating", 0.260)), format="%0.3f"
-            )
-            co2_emissions_dc = st.number_input(
-                "CO2 Factor District Cooling", 0.000, 1.000, float(def_f.get("District Cooling", 0.280)), format="%0.3f"
-            )
-            co2_emissions_gas = st.number_input(
-                "CO2 Factor Gas", 0.000, 1.000, float(def_f.get("Gas", 0.180)), format="%0.3f"
-            )
+            co2_Emissions_Electricity = numeric_input("CO2 Factor Electricity", float(def_f.get("Electricity", 0.300)), key="co2_Emissions_Electricity", min_value=0.0, max_value=1.0, fmt="{:.3f}")
+            co2_Emissions_Green_Electricity = numeric_input("CO2 Factor Green Electricity", float(def_f.get("Green Electricity", 0.000)), key="co2_Emissions_Green_Electricity", min_value=0.0, max_value=1.0, fmt="{:.3f}")
+            co2_emissions_dh = numeric_input("CO2 Factor District Heating", float(def_f.get("District Heating", 0.260)), key="co2_emissions_dh", min_value=0.0, max_value=1.0, fmt="{:.3f}")
+            co2_emissions_dc = numeric_input("CO2 Factor District Cooling", float(def_f.get("District Cooling", 0.280)), key="co2_emissions_dc", min_value=0.0, max_value=1.0, fmt="{:.3f}")
+            co2_emissions_gas = numeric_input("CO2 Factor Gas", float(def_f.get("Gas", 0.180)), key="co2_emissions_gas", min_value=0.0, max_value=1.0, fmt="{:.3f}")
+
 
         # --- Energy Cost (€/kWh) ---
         with st.sidebar.expander("Energy Tariffs"):
@@ -581,21 +572,12 @@ with tab1:
             currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency))
 
             def_t = preloaded["tariffs"] if preloaded else {}
-            cost_electricity = st.number_input(f"Cost Electricity ({currency_symbol}/kWh)", 0.00, 100.00,
-                                               float(def_t.get("Electricity", 0.35)),
-                                               step=0.01, format="%.2f")
-            cost_green_electricity = st.number_input(f"Cost Green Electricity ({currency_symbol}/kWh)", 0.00, 100.00,
-                                                     float(def_t.get("Green Electricity", 0.40)),
-                                                     step=0.01, format="%.2f")
-            cost_dh = st.number_input(f"Cost District Heating ({currency_symbol}/kWh)", 0.00, 100.00,
-                                      float(def_t.get("District Heating", 0.16)), step=0.01,
-                                      format="%.2f")
-            cost_dc = st.number_input(f"Cost District Cooling ({currency_symbol}/kWh)", 0.00, 100.00,
-                                      float(def_t.get("District Cooling", 0.16)), step=0.01,
-                                      format="%.2f")
-            cost_gas = st.number_input(f"Cost Gas ({currency_symbol}/kWh)", 0.00, 100.00, float(def_t.get("Gas", 0.12)),
-                                       step=0.01,
-                                       format="%.2f")
+            cost_electricity = numeric_input(f"Cost Electricity ({currency_symbol}/kWh)", float(def_t.get("Electricity", 0.35)), key="cost_electricity", min_value=0.0, max_value=100.0, fmt="{:.2f}")
+            cost_green_electricity = numeric_input(f"Cost Green Electricity ({currency_symbol}/kWh)", float(def_t.get("Green Electricity", 0.40)), key="cost_green_electricity", min_value=0.0, max_value=100.0, fmt="{:.2f}")
+            cost_dh = numeric_input(f"Cost District Heating ({currency_symbol}/kWh)", float(def_t.get("District Heating", 0.16)), key="cost_dh", min_value=0.0, max_value=100.0, fmt="{:.2f}")
+            cost_dc = numeric_input(f"Cost District Cooling ({currency_symbol}/kWh)", float(def_t.get("District Cooling", 0.16)), key="cost_dc", min_value=0.0, max_value=100.0, fmt="{:.2f}")
+            cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.12)), key="cost_gas", min_value=0.0, max_value=100.0, fmt="{:.2f}")
+
 
         # ---- Sidebar: map End_Use -> Energy_Source (user-controlled)
         with st.sidebar.expander("Assign Energy Sources"):
@@ -1433,7 +1415,7 @@ with tab4:
 
         st.subheader(f"Hours Above Threshold — {selected_load}")
 
-        thr = numeric_input("Heatmap threshold (kW)", float(round(0.8 * peak_load, 1)), key="thr_heatmap")
+        thr = st.number_input("Heatmap threshold (kW)", value=float(round(0.8 * peak_load, 1)), key="thr_heatmap")
         df_bool = df_loads.copy()
         df_bool["exceed"] = (pd.to_numeric(df_bool[selected_load], errors="coerce") > thr).astype(int)
         total_exceedance = df_bool["exceed"].sum()
