@@ -590,7 +590,7 @@ with tab1:
                     )
                     mapping_dict[use] = source
     
-    _all_applied = st.form_submit_button("Apply all settings", use_container_width=True)
+        _all_applied = st.form_submit_button("Apply all settings", use_container_width=True)
 
         
         # Resolve effective control values after the unified form submit
@@ -1815,5 +1815,6 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
 
