@@ -543,8 +543,8 @@ with tab1:
             project_area = numeric_input("Project Area", float(default_area), key="project_area", min_value=0.0)
 
             # FIXED LABEL + use defaults from file if present
-            latitude = st.text_input("Project Latitude", value=str(default_lat), key="project_latitude")
-            longitude = st.text_input("Project Longitude", value=str(default_lon), key="project_longitude")
+            latitude = numeric_input("Project Latitude", float(default_lat), key="project_latitude", min_value=-90.0, max_value=90.0, fmt="{:.6f}")
+            longitude = numeric_input("Project Longitude", float(default_lon), key="project_longitude", min_value=-180.0, max_value=180.0, fmt="{:.6f}")
 
             # building use dropdown unchanged...
             building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
@@ -606,10 +606,10 @@ with tab1:
             if st.button("Save Project", use_container_width=True):
                 # coerce UI strings to floats when possible
                 def _to_float_safe(s):
-                    try:
-                        return float(s)
-                    except Exception:
-                        return None
+                try:
+                    return float(str(s).replace(",", "."))
+                except Exception:
+                    return None
 
 
                 lat_val = _to_float_safe(latitude)
