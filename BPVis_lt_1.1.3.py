@@ -496,31 +496,38 @@ with tab1:
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
         # ---- Sidebar: project info (prefill from saved if available)
+        # --- helper: seed defaults only once
+        def _seed_default(key, default):
+            if key not in st.session_state:
+                st.session_state[key] = default
+        
+        # ... inside the same place where you currently compute defaults:
+        default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
+        default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
+        default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
+        default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
+        default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
+        
+        # seed session_state once
+        _seed_default("project_name", default_name)
+        _seed_default("project_area", float(default_area))
+        _seed_default("project_latitude", str(default_lat))
+        _seed_default("project_longitude", str(default_lon))
+        _seed_default("building_use", default_building_use)
+        
+        # now define widgets WITHOUT value=..., only key=...
         with st.sidebar.expander("Project Data"):
             st.write("Enter Project's Basic Informations")
+        
+            project_name = st.text_input("Project Name", key="project_name")
+            project_area = st.number_input("Project Area", min_value=0.00, key="project_area")
+        
+            latitude = st.text_input("Project Latitude", key="project_latitude")
+            longitude = st.text_input("Project Longitude", key="project_longitude")
+        
+            building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education", "Healthcare", "Laboratory", "Data Center"]
+            building_use = st.selectbox("Building Use", building_use_options, index=building_use_options.index(st.session_state["building_use"]) if st.session_state["building_use"] in building_use_options else 0, key="building_use")
 
-            default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
-            default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
-            default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
-
-            # NEW: defaults for lat/lon (fallback to your previous hard-coded values)
-            default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
-            default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
-
-            # keep title reactive via session_state
-            project_name = st.text_input("Project Name", value=default_name, key="project_name")
-            project_area = st.number_input("Project Area", 0.00, value=float(default_area))
-
-            # FIXED LABEL + use defaults from file if present
-            latitude = st.text_input("Project Latitude", value=str(default_lat), key="project_latitude")
-            longitude = st.text_input("Project Longitude", value=str(default_lon), key="project_longitude")
-
-            # building use dropdown unchanged...
-            building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
-                                    "Leisure", "Healthcare"]
-            building_use_index = building_use_options.index(
-                default_building_use) if default_building_use in building_use_options else 0
-            building_use = st.selectbox("Building Use", building_use_options, index=building_use_index)
 
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
