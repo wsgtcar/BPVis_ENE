@@ -496,53 +496,53 @@ with tab1:
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
         # ---- Sidebar: project info (prefill from saved if available)
-        with st.sidebar.form("all_controls", clear_on_submit=False):
-    with st.sidebar.expander("Project Data"):
-                st.write("Enter Project's Basic Informations")
+    with st.sidebar.form("all_controls", clear_on_submit=False):
+        with st.sidebar.expander("Project Data"):
+                    st.write("Enter Project's Basic Informations")
+        
+                    default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
+                    default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
+                    default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
+        
+                    # NEW: defaults for lat/lon (fallback to your previous hard-coded values)
+                    default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
+                    default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
+        
+                    # keep title reactive via session_state
+                    project_name = st.text_input("Project Name", value=default_name, key="project_name")
+                    project_area = st.number_input("Project Area", 0.00, value=float(default_area))
+        
+                    # FIXED LABEL + use defaults from file if present
+                    latitude = st.text_input("Project Latitude", value=str(default_lat), key="project_latitude")
+                    longitude = st.text_input("Project Longitude", value=str(default_lon), key="project_longitude")
+        
+                    # building use dropdown unchanged...
+                    building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
+                                            "Leisure", "Healthcare"]
+                    building_use_index = building_use_options.index(
+                        default_building_use) if default_building_use in building_use_options else 0
+                    building_use = st.selectbox("Building Use", building_use_options, index=building_use_index)
     
-                default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
-                default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
-                default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
-    
-                # NEW: defaults for lat/lon (fallback to your previous hard-coded values)
-                default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
-                default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
-    
-                # keep title reactive via session_state
-                project_name = st.text_input("Project Name", value=default_name, key="project_name")
-                project_area = st.number_input("Project Area", 0.00, value=float(default_area))
-    
-                # FIXED LABEL + use defaults from file if present
-                latitude = st.text_input("Project Latitude", value=str(default_lat), key="project_latitude")
-                longitude = st.text_input("Project Longitude", value=str(default_lon), key="project_longitude")
-    
-                # building use dropdown unchanged...
-                building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
-                                        "Leisure", "Healthcare"]
-                building_use_index = building_use_options.index(
-                    default_building_use) if default_building_use in building_use_options else 0
-                building_use = st.selectbox("Building Use", building_use_options, index=building_use_index)
-    
-            # ---- Sidebar: emission factors (used in Tab 2, but defined once)
-            with st.sidebar.expander("Emission Factors"):
-                st.write("Assign Emission Factors")
-                def_f = preloaded["factors"] if preloaded else {}
-                co2_Emissions_Electricity = st.number_input(
-                    "CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f"
-                )
-                co2_Emissions_Green_Electricity = st.number_input(
-                    "CO2 Factor Green Electricity", 0.000, 1.000, float(def_f.get("Green Electricity", 0.000)),
-                    format="%0.3f"
-                )
-                co2_emissions_dh = st.number_input(
-                    "CO2 Factor District Heating", 0.000, 1.000, float(def_f.get("District Heating", 0.260)), format="%0.3f"
-                )
-                co2_emissions_dc = st.number_input(
-                    "CO2 Factor District Cooling", 0.000, 1.000, float(def_f.get("District Cooling", 0.280)), format="%0.3f"
-                )
-                co2_emissions_gas = st.number_input(
-                    "CO2 Factor Gas", 0.000, 1.000, float(def_f.get("Gas", 0.180)), format="%0.3f"
-                )
+        # ---- Sidebar: emission factors (used in Tab 2, but defined once)
+        with st.sidebar.expander("Emission Factors"):
+            st.write("Assign Emission Factors")
+            def_f = preloaded["factors"] if preloaded else {}
+            co2_Emissions_Electricity = st.number_input(
+                "CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f"
+            )
+            co2_Emissions_Green_Electricity = st.number_input(
+                "CO2 Factor Green Electricity", 0.000, 1.000, float(def_f.get("Green Electricity", 0.000)),
+                format="%0.3f"
+            )
+            co2_emissions_dh = st.number_input(
+                "CO2 Factor District Heating", 0.000, 1.000, float(def_f.get("District Heating", 0.260)), format="%0.3f"
+            )
+            co2_emissions_dc = st.number_input(
+                "CO2 Factor District Cooling", 0.000, 1.000, float(def_f.get("District Cooling", 0.280)), format="%0.3f"
+            )
+            co2_emissions_gas = st.number_input(
+                "CO2 Factor Gas", 0.000, 1.000, float(def_f.get("Gas", 0.180)), format="%0.3f"
+            )
     
             # --- Energy Cost (€/kWh) ---
             with st.sidebar.expander("Energy Tariffs"):
@@ -593,35 +593,35 @@ with tab1:
     _all_applied = st.form_submit_button("Apply all settings", use_container_width=True)
 
         
-        # Resolve effective control values after the unified form submit
-        project_name = st.session_state.get("project_name", st.session_state.get("project_name", "Example Building 1"))
-        project_area = st.session_state.get("project_area", 1000.0)
-        latitude = st.session_state.get("project_latitude", "53.54955")
-        longitude = st.session_state.get("project_longitude", "9.9936")
-        building_use = st.session_state.get("building_use", "Office")
-        currency_symbol = st.session_state.get("currency_symbol", "€")
-        co2_Emissions_Electricity = float(st.session_state.get("co2_Emissions_Electricity", 0.300))
-        co2_Emissions_Green_Electricity = float(st.session_state.get("co2_Emissions_Green_Electricity", 0.000))
-        co2_emissions_dh = float(st.session_state.get("co2_emissions_dh", 0.260))
-        co2_emissions_dc = float(st.session_state.get("co2_emissions_dc", 0.280))
-        co2_emissions_gas = float(st.session_state.get("co2_emissions_gas", 0.180))
-        cost_electricity = float(st.session_state.get("cost_electricity", 0.35))
-        cost_green_electricity = float(st.session_state.get("cost_green_electricity", 0.40))
-        cost_dh = float(st.session_state.get("cost_dh", 0.16))
-        cost_dc = float(st.session_state.get("cost_dc", 0.16))
-        cost_gas = float(st.session_state.get("cost_gas", 0.12))
-        # map sources
-        end_uses = df_melted["End_Use"].unique().tolist()
-        mapping_dict = {use: st.session_state.get(f"source_{use}", "Electricity") for use in end_uses}
+    # Resolve effective control values after the unified form submit
+    project_name = st.session_state.get("project_name", st.session_state.get("project_name", "Example Building 1"))
+    project_area = st.session_state.get("project_area", 1000.0)
+    latitude = st.session_state.get("project_latitude", "53.54955")
+    longitude = st.session_state.get("project_longitude", "9.9936")
+    building_use = st.session_state.get("building_use", "Office")
+    currency_symbol = st.session_state.get("currency_symbol", "€")
+    co2_Emissions_Electricity = float(st.session_state.get("co2_Emissions_Electricity", 0.300))
+    co2_Emissions_Green_Electricity = float(st.session_state.get("co2_Emissions_Green_Electricity", 0.000))
+    co2_emissions_dh = float(st.session_state.get("co2_emissions_dh", 0.260))
+    co2_emissions_dc = float(st.session_state.get("co2_emissions_dc", 0.280))
+    co2_emissions_gas = float(st.session_state.get("co2_emissions_gas", 0.180))
+    cost_electricity = float(st.session_state.get("cost_electricity", 0.35))
+    cost_green_electricity = float(st.session_state.get("cost_green_electricity", 0.40))
+    cost_dh = float(st.session_state.get("cost_dh", 0.16))
+    cost_dc = float(st.session_state.get("cost_dc", 0.16))
+    cost_gas = float(st.session_state.get("cost_gas", 0.12))
+    # map sources
+    end_uses = df_melted["End_Use"].unique().tolist()
+    mapping_dict = {use: st.session_state.get(f"source_{use}", "Electricity") for use in end_uses}
 # ---- Save Project button (exports current inputs into the workbook)
-        with st.sidebar:
-            if st.button("Save Project", use_container_width=True):
-                # coerce UI strings to floats when possible
-                def _to_float_safe(s):
-                    try:
-                        return float(s)
-                    except Exception:
-                        return None
+    with st.sidebar:
+        if st.button("Save Project", use_container_width=True):
+            # coerce UI strings to floats when possible
+            def _to_float_safe(s):
+                try:
+                    return float(s)
+                except Exception:
+                    return None
 
 
                 lat_val = _to_float_safe(latitude)
