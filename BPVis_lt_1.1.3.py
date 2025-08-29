@@ -8,13 +8,6 @@ import numpy as np
 import plotly.colors as pc
 from typing import Optional, Tuple, Dict
 
-
-# --- helper: seed a default into session_state only once
-def _seed_default(key, default):
-    import streamlit as st
-    if key not in st.session_state:
-        st.session_state[key] = default
-
 ### Werner Sobek Green Technologies GmbH. All rights reserved.###
 ### Author: Rodrigo Carvalho ###
 
@@ -515,29 +508,24 @@ with tab1:
             default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
 
             # keep title reactive via session_state
-            project_name = st.text_input("Project Name", key="project_name")
-            project_area = st.number_input("Project Area", min_value=0.00, key="project_area")
+            project_name = st.text_input("Project Name", value=default_name, key="project_name")
+            project_area = st.number_input("Project Area", 0.00, value=float(default_area))
 
             # FIXED LABEL + use defaults from file if present
-            latitude = st.text_input("Project Latitude", key="project_latitude")
-            longitude = st.text_input("Project Longitude", key="project_longitude")
+            latitude = st.text_input("Project Latitude", value=str(default_lat), key="project_latitude")
+            longitude = st.text_input("Project Longitude", value=str(default_lon), key="project_longitude")
 
             # building use dropdown unchanged...
             building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
                                     "Leisure", "Healthcare"]
             building_use_index = building_use_options.index(
                 default_building_use) if default_building_use in building_use_options else 0
-            building_use = st.selectbox("Building Use", building_use_options, key="building_use")
+            building_use = st.selectbox("Building Use", building_use_options, index=building_use_index)
 
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
             st.write("Assign Emission Factors")
             def_f = preloaded["factors"] if preloaded else {}
-            _seed_default("co2_factor_electricity", float(def_f.get("Electricity", 0.300)))
-            _seed_default("co2_factor_green_electricity", float(def_f.get("Green Electricity", 0.000)))
-            _seed_default("co2_factor_dh", float(def_f.get("District Heating", 0.260)))
-            _seed_default("co2_factor_dc", float(def_f.get("District Cooling", 0.280)))
-            _seed_default("co2_factor_gas", float(def_f.get("Gas", 0.180)))
             co2_Emissions_Electricity = st.number_input(
                 "CO2 Factor Electricity", 0.000, 1.000, float(def_f.get("Electricity", 0.300)), format="%0.3f"
             )
@@ -560,14 +548,9 @@ with tab1:
             st.write("Assign energy cost per source (per kWh)")
             default_currency = preloaded["currency"] if (
                         preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
-            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], key="currency_symbol")
+            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency))
 
             def_t = preloaded["tariffs"] if preloaded else {}
-            _seed_default("cost_electricity", float(def_t.get("Electricity", 0.40)))
-            _seed_default("cost_green_electricity", float(def_t.get("Green Electricity", 0.40)))
-            _seed_default("cost_dh", float(def_t.get("District Heating", 0.16)))
-            _seed_default("cost_dc", float(def_t.get("District Cooling", 0.16)))
-            _seed_default("cost_gas", float(def_t.get("Gas", 0.12)))
             cost_electricity = st.number_input(f"Cost Electricity ({currency_symbol}/kWh)", 0.00, 100.00,
                                                float(def_t.get("Electricity", 0.35)),
                                                step=0.01, format="%.2f")
