@@ -500,7 +500,7 @@ with tab1:
         def _seed_default(key, default):
             if key not in st.session_state:
                 st.session_state[key] = default
-        
+                
         # ... inside the same place where you currently compute defaults:
         default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
         default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
@@ -520,9 +520,11 @@ with tab1:
             st.write("Enter Project's Basic Informations")
         
             project_name = st.text_input("Project Name", key="project_name")
+
             project_area = st.number_input("Project Area", min_value=0.00, key="project_area")
         
             latitude = st.text_input("Project Latitude", key="project_latitude")
+            
             longitude = st.text_input("Project Longitude", key="project_longitude")
         
             building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education", "Healthcare", "Laboratory", "Data Center"]
@@ -1798,5 +1800,6 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
 
