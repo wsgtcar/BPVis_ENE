@@ -1,328 +1,197 @@
-# BPVis LT — Building Performance Visualizer
-**Version:** 0.0.3  
-**Type:** Streamlit dashboard  
-**Scope:** Energy Balance, CO₂ Emissions, Loads Analysis, Energy Cost
+BPVis LT — Building Performance Visualization (v1.1.3 · Optimized)
+BPVis LT is a Streamlit app for exploring a building’s energy balance, CO₂ emissions, energy cost, loads, and benchmarking from a single Excel workbook.
+It lets you map End Uses → Energy Sources, enter CO₂ factors and tariffs, and save your inputs back to the workbook for future sessions.
 
----
+This release is optimized to avoid full-page reruns on every keystroke using forms, st.session_state, and @st.cache_data.
 
-## 1) What this tool does (high level)
-BPVis LT ingests a simple Excel workbook and gives you a clean, repeatable analysis of a building’s performance:
-
-- **Energy Balance** (kWh): monthly + annual, End Use vs Energy Source, EUI (kWh/m²·a), PV coverage
-- **CO₂ Emissions** (kgCO₂): same visuals, using per‑source emission factors
-- **Loads Analysis** (kW / W/m²): heatmaps (doy × hour), monthly totals, peak day profile, duration curve, percentiles, threshold exceedance
-- **Energy Cost** (currency): same visuals, using per‑source cost/kWh (tariffs)
-
-All charts share consistent color palettes and fixed category orders for readability and comparability.
-
----
-
-## 2) Project structure (typical)
-```
-BPVis/
-├─ BPVis_LT.py                    # Streamlit app (main entry point)
-├─ requirements.txt
-├─ README.md                      # this file
-├─ templates/
-│  └─ energy_database_complete_template.xlsx
-└─ assets/
-   └─ WS_Logo.jpg                 # optional branding
-```
-> Your actual filenames may differ slightly; the concepts and blocks below map directly to the code in `BPVis_LT.py`.
-
----
-
-## 3) Running the app
-### 3.1. Install
-```bash
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS/Linux
-source .venv/bin/activate
-
+✨ Features
+Tabs
+Energy Balance: Monthly and annual stacked bars by End Use and by Energy Source; EUI donuts; KPI metrics; PV treated as negative generation.
+CO₂ Emissions: Mirrors Energy Balance but values are computed from user-defined kgCO₂/kWh factors.
+Energy Cost: Mirrors Energy Balance but values use tariffs per kWh in the selected currency (€, $, £).
+Loads Analysis: 2D heatmap by Day-of-Year × Hour; monthly totals; exceedance heatmap; peak-day profile; key percentiles.
+Benchmark: Compares Energy Density (EUI), CO₂ Intensity, and Cost Intensity with thresholds per Building Use from a benchmark workbook (gauge + vertical “label” charts + thresholds table).
+Sidebar input forms (apply-on-click → no constant reruns): Project Data, Emission Factors, Energy Tariffs, Assign Energy Sources.
+Save Project writes/updates configuration sheets in the uploaded workbook:
+Project_Data, Emission_Factors, Energy_Tariffs, EndUse_to_Source
+Benchmarking from templates/benchmark_template.xlsx (one sheet per Building Use). You can also upload a custom benchmark file.
+Consistent colors & category ordering across charts.
+Caching of Excel I/O and transformations for faster UI.
+⚙️ Installation
+Ensure Python 3.9+ (3.10/3.11 recommended).
+Create/activate a virtual environment (optional, recommended).
+Install dependencies:
 pip install -r requirements.txt
-```
+On Streamlit Community Cloud, the platform installs from requirements.txt automatically.
 
-### 3.2. Launch
-```bash
-streamlit run BPVis_LT.py
-```
-Your browser will open to `http://localhost:8501`.
+▶️ Run the App
+From the project directory:
 
----
+streamlit run BPVis_lt_1.1.3_optimized.py
+Open the URL shown in your terminal (usually http://localhost:8501).
 
-## 4) Data model — Excel template
-The app expects a workbook with at least these two sheets:
+📦 Input Data Format (Excel)
+BPVis LT expects an .xlsx with these sheets. You can start from your own workbook or the provided template.
 
-### 4.1. `Energy_Balance`
-- **Columns**
-  - `Month` — text: `January, February, …, December`
-  - One column per **End Use**, with suffix **`_kWh`**:
-    - `Heating_kWh`, `Cooling_kWh`, `Ventilation_kWh`, `Lighting_kWh`,
-      `Equipment_kWh`, `HotWater_kWh`, `Pumps_kWh`, `Other_kWh`, `PV_Generation_kWh`
-- **Semantics**
-  - Values per month (kWh). `PV_Generation_kWh` is **negative** (generation offsets demand).
+1) Energy_Balance (required)
+Wide monthly table. End-Use columns may include a _kWh suffix (it will be stripped automatically).
 
-### 4.2. `Loads_Balance`
-- **Time keys**
-  - `hoy` (hour of year), `doy` (day of year), `day`, `month`, `weekday`, `hour`
-- **End‑use loads** (kW), each with suffix **`_load`**:
-  - `Heating_load`, `Cooling_load`, `Ventilation_load`, `Lighting_load`, `Equipment_load`, `HotWater_load`, `Pumps_load`, `Other_load`, `PV_Generation_load`
-- **Source loads** (kW), also `_load`‑suffixed:
-  - `electricity_load`, `gas_load`, `district_heating_load`, `district_cooling_load`
+Month	Heating_kWh	Cooling_kWh	Ventilation_kWh	Lighting_kWh	Equipment_kWh	HotWater_kWh	Pumps_kWh	Other_kWh	PV_Generation_kWh
+Month values must be English labels: January … December (ordering is enforced).
+PV_Generation should be negative if it offsets demand (so it subtracts in “net” values).
+2) Loads_Balance (optional; required for Loads tab)
+Hourly loads. Load columns end with _load (suffix is stripped).
 
-> The app automatically removes `_kWh`/`_load` suffixes only where needed for display/aggregation; internally it keeps enough structure to locate and chart the correct fields.
+hoy	doy	day	month	weekday	hour	Heating_load	Cooling_load	…	PV_Generation_load
+hoy: hour-of-year (1–8760)
+doy: day-of-year (1–365)
+hour: 0–23
+3) Saved Inputs (created/updated by Save Project button)
+Project_Data (Key, Value) — includes:
+Project_Name, Project_Area, Currency (€, $, £), Building_Use, Project_Latitude, Project_Longitude
+Emission_Factors — columns: Energy_Source, Factor_kgCO2_per_kWh
+Energy_Tariffs — columns: Energy_Source, Tariff_per_kWh
+EndUse_to_Source — columns: End_Use, Energy_Source
+When you upload a file, if these sheets exist, values are pre-loaded into the app; otherwise defaults are used.
 
----
+4) templates/benchmark_template.xlsx (read at runtime)
+One sheet per Building Use (Office, Hospitality, Retail, Residential, Industrial, Education, Leisure, Healthcare, …). Each sheet must contain exactly these columns:
 
-## 5) UI walkthrough (user manual)
-### 5.1. Sidebar
-1. **Download Template** — saves `templates/energy_database_complete_template.xlsx`
-2. **Upload Data** — select your filled template (`.xlsx`)
-3. **Project Data**
-   - *Project Name*: a label for your run
-   - *Project Area (m²)*: used to compute intensities (EUI, kgCO₂/m²·a, cost/m²·a, W/m²)
-4. **Emission Factors** (kgCO₂/kWh) — per Energy Source
-5. **Energy Tariffs** (currency/kWh) — per Energy Source, plus currency selector
-6. **Assign Energy Sources** — for each detected End Use, pick its supply source  
-   *(e.g., map `Heating`→`District Heating`, `Cooling`→`Electricity`, `PV_Generation`→`Electricity`)*
+KPI	Unit	Excellent_Max	Good_Max	Poor_Max
+Energy_Density	kWh/m²·a	50	100	150
+CO2_Intensity	kgCO₂/m²·a	10	20	30
+Cost_Intensity	€/m²·a	15	25	40
+Classification rule (lower is better):
+value ≤ Excellent_Max → Excellent → else if ≤ Good_Max → Good → else if ≤ Poor_Max → Poor → else Very Poor.
 
-### 5.2. Tabs
-- **Energy Balance** — kWh charts, EUI donut, PV coverage & energy KPIs
-- **CO₂ Emissions** — kgCO₂ charts, intensity donut & KPIs
-- **Loads Analysis** — heatmap, monthly totals, KPIs, peak day, duration curve, profiles, exceedance
-- **Energy Cost** — currency charts, intensity donut & KPIs
+🧰 Sidebar Controls (all use forms)
+Project Data
+Project Name, Area (m²), Latitude, Longitude
+Building Use (default: Office; saved to Project_Data)
+Apply Project Data button
+Emission Factors (kgCO₂/kWh)
+Electricity, Green Electricity, District Heating, District Cooling, Gas
+Apply Emission Factors
+Energy Tariffs
+Currency (€, $, £) + per-kWh tariffs for Electricity, Green Electricity, District Heating/Cooling, Gas
+Apply Energy Tariffs
+Assign Energy Sources
+For each End Use (Heating, Cooling, …, PV_Generation), pick an Energy Source from: ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling"]
+Apply Energy Sources
+Save Project
+Writes/updates the four configuration sheets and offers the download of the updated workbook.
+Benchmark Settings
+Upload a custom benchmark_template.xlsx (optional; overrides default for this session).
+Because inputs are in forms, the app does not rerun on every keystroke. Changes take effect after clicking Apply.
 
----
+📊 Visuals & KPI’s
+Energy Balance
+Monthly stacked bar by End Use (barmode="relative"). A dashed line overlays monthly net total (PV subtracts).
+Monthly by Source stacked bar by Energy Source.
+Annual stacked bars (single column) by Use/Source with net total reference line.
+EUI Donuts (per Use, per Source): center shows total EUI (kWh/m²·a).
+KPIs
+Monthly Average Energy Consumption (kWh)
+Total Annual Energy Consumption (kWh) — positive-only, excludes PV
+Net Annual Energy Consumption (kWh) — includes PV
+EUI and Net EUI (kWh/m²·a)
+PV Production (kWh) and PV Coverage (% = |PV EUI| / EUI × 100)
+CO₂ Emissions
+Same visuals as Energy Balance, values in kgCO₂; donuts show kgCO₂/m²·a.
+Energy Cost
+Same visuals, values in selected currency; donuts show currency/m²·a.
+Loads Analysis
+2D heatmap (Day-of-Year × Hour) for selected load.
+Monthly totals bar chart.
+KPIs: total (kWh), max/min (kW), specific loads (W/m²), 95th & 80th percentiles.
+Exceedance heatmap above an adjustable threshold.
+Peak-day profile: hourly line with filled area; title shows date or DOY and daily total.
+Benchmark
+Gauge (speedometer) + vertical band (“energy label”) per KPI: EUI, CO₂ Intensity, Cost Intensity.
+Thresholds table (Excellent / Good / Poor / Very Poor breakpoints) + Project KPIs with class labels.
+🧮 Calculations
+Let:
 
-## 6) Code trace back & block‑by‑block guide
-Below is a detailed explanation of code blocks (names may vary slightly). Each block shows **inputs → process → outputs**.
+A = Project Area (m²)
+kWh_eu_m = monthly energy for a given End Use
+Factor_src = CO₂ factor (kgCO₂/kWh) of an Energy Source
+Tariff_src = cost (currency/kWh) of an Energy Source
+Energy
 
-### 6.1. Page setup & constants
-**Inputs:** none  
-**Process:** `st.set_page_config`, title, branding; define `MONTH_ORDER`, `END_USE_ORDER`, `ENERGY_SOURCE_ORDER`, and the color maps (`color_map`, `color_map_sources`).  
-**Outputs:** UI header; global constants for consistent chart ordering and colors.
+Annual kWh per End Use = ∑ₘ kWh_eu_m
+EUI (kWh/m²·a) = ∑ EndUses max(0, Annual_kWh_eu) / A (PV excluded from EUI total)
+Net EUI = ∑ EndUses (Annual_kWh_eu) / A (PV included; can reduce net)
+CO₂
 
-### 6.2. Cached loaders
-```python
-@st.cache_data
-def load_energy_balance_sheet(file_bytes) -> pd.DataFrame:
-    xls = pd.ExcelFile(io.BytesIO(file_bytes))
-    df = pd.read_excel(xls, sheet_name="Energy_Balance")
-    df.columns = df.columns.str.replace("_kWh", "", regex=False)
-    return df
+kgCO₂ = kWh * Factor_src
+CO₂ Intensity (kgCO₂/m²·a) = ∑ kgCO₂ / A
+Cost
 
-def load_loads_balance(file_bytes) -> pd.DataFrame:
-    xls = pd.ExcelFile(io.BytesIO(file_bytes))
-    df = pd.read_excel(xls, sheet_name="Loads_Balance")
-    # keep `_load` suffix for loads analysis (or strip with .str.replace as needed)
-    return df
-```
-**Inputs:** raw uploaded file bytes  
-**Process:** read the two sheets, optionally strip suffixes (Energy_Balance)  
-**Outputs:** `df` DataFrames for further transforms
+cost = kWh * Tariff_src
+Cost Intensity (currency/m²·a) = ∑ cost / A
+PV Coverage (%) = |PV_EUI| / EUI × 100
 
-### 6.3. Sidebar inputs
-- **Project Data** → `project_name: str`, `project_area: float`
-- **Emission Factors** → `co2_Emissions_Electricity`, `co2_emissions_dh`, `co2_emissions_dc`, `co2_emissions_gas`
-- **Energy Tariffs** → `cost_electricity`, `cost_dh`, `cost_dc`, `cost_gas`, `currency_symbol`
-- **Assign Energy Sources**  
-  **Inputs:** `df_melted["End_Use"].unique()`  
-  **Process:** for each End Use, `st.selectbox(key=f"source_{use}")` and store in `mapping_dict`  
-  **Outputs:** `mapping_dict: {End_Use → Energy_Source}` and session_state persistence
+Loads
 
-### 6.4. Energy Balance tab
-**Data prep**
-```python
-df = load_energy_balance_sheet(uploaded_file.getvalue())
-df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
-df_melted["Energy_Source"] = df_melted["End_Use"].map(mapping_dict)
-```
-- **Inputs:** `df`, `mapping_dict`, `project_area`
-- **Outputs:** `df_melted` with columns `Month, End_Use, kWh, Energy_Source`
+Specific load (W/m²) = kW / A × 1000
+Percentiles computed over hourly W/m² series.
+Benchmark Classes (lower is better):
+Excellent if value ≤ Excellent_Max; else Good if ≤ Good_Max; else Poor if ≤ Poor_Max; else Very Poor.
 
-**Monthly net line overlay**
-```python
-monthly_totals = (df_melted.groupby("Month", as_index=False)["kWh"].sum())
-# categorize/sort Month; create px.bar; add px.line(trace) with dashed style
-```
-- **Inputs:** `df_melted`
-- **Outputs:** `monthly_chart` (stacked bars by End Use + net line)
+🎨 Colors and Ordering
+End Uses
 
-**Monthly by source (clean hovers)**
-```python
-monthly_by_source = df_melted.groupby(["Month","Energy_Source"], as_index=False)["kWh"].sum()
-monthly_chart_source = px.bar(monthly_by_source, ...)
-```
-- **Outputs:** `monthly_chart_source`
+Heating: #c02419
+Cooling: #5a73a5
+Ventilation: #42b38d
+Lighting: #d3b402
+Equipment: #833fd1
+HotWater: #ff9a0a
+Pumps: #06b6d1
+Other: #d0448c
+PV_Generation: #a9c724
+Energy Sources
 
-**Annual totals & intensities**
-```python
-totals = df_melted.groupby("End_Use", as_index=False)["kWh"].sum()
-totals["Per Use"] = "Total"
-totals["kWh_per_m2"] = (totals["kWh"] / project_area).round(1)
+Electricity: #42b360
+Green Electricity: #64c423
+Gas: #c9d302
+District Heating: #ec6939
+District Cooling: #5a5ea5
+Category Ordering
 
-eui       = totals.loc[totals["kWh_per_m2"] > 0, "kWh_per_m2"].sum()
-net_eui   = totals["kWh_per_m2"].sum()
-net_energy= totals["kWh"].sum()                  # includes PV
-```
-- **Outputs:** `totals`, `eui`, `net_eui`, `net_energy`
-
-**Annual charts**
-- End Use: stacked bar + dashed `add_hline(y=net_energy)` + annotation
-- Source: stacked bar from `totals_per_source = df_melted.groupby("Energy_Source")["kWh"].sum()`
-
-**Intensity donuts (kWh/m²·a)**
-```python
-energy_intensity_chart = px.pie(totals, names="End_Use", values="kWh_per_m2", hole=0.5, ...)
-# center annotation = total EUI (consumption-only)
-```
-- **Outputs:** two donut charts (End Use / Source), with `textinfo="value+percent"` and center label
-
-**KPIs & PV coverage**
-```python
-pv_value    = totals.set_index("End_Use").loc["PV_Generation","kWh_per_m2"]
-pv_coverage = abs(pv_value / eui) * 100
-monthly_avr = totals["kWh"].sum() / 12
-total_energy= totals.loc[totals["kWh"] > 0, "kWh"].sum()
-```
-- **Outputs:** Streamlit `st.metric` widgets
-
-### 6.5. CO₂ Emissions tab (mirrors Energy)
-**Inputs:** `df_melted`, `mapping_dict`, emission factors, `project_area`  
-**Process:**
-```python
-factor_map = {
-    "Electricity": co2_Emissions_Electricity,
-    "Green Electricity": co2_Emissions_Green_Electricity,
-    "Gas": co2_emissions_gas,
-    "District Heating": co2_emissions_dh,
-    "District Cooling": co2_emissions_dc,
-}
-df_co2 = df_melted.assign(
-  CO2_factor_kg_per_kWh = lambda d: d["Energy_Source"].map(factor_map).fillna(0.0),
-  kgCO2 = lambda d: d["kWh"] * d["CO2_factor_kg_per_kWh"]  # PV (negative kWh) => negative kgCO2 (offset)
-)
-```
-**Outputs:** Charts identical to Energy tab but for `kgCO2`; pies show `kgCO2_per_m2`; KPIs for monthly avg, annual total, intensity total.
-
-### 6.6. Loads Analysis tab
-**Inputs:** `df_loads = load_loads_balance(...)` (keeps `_load` suffix), `project_area`, `selected_load`  
-**Blocks:**
-- **2D Heatmap** (doy × hour; `px.density_heatmap(z=selected_load, histfunc="avg" or "sum")`)
-- **Monthly totals bar** (group by `month`, calendar order, value labels)
-- **KPIs** (total, min/max kW, specific max/min W/m², 95th/80th percentiles)
-- **Peak day profile** (find `doy` with max daily sum; plot `hour` line+markers; optional area fill)
-- **Load duration curve** (sorted descending values vs % of hours)
-- **Profiles by Month/Weekday** (average daily shape by group)
-- **Threshold exceedance heatmap** (count hours > threshold per (doy,hour))
-
-**Outputs:** plotly figures and metrics for operational insight.
-
-### 6.7. Energy Cost tab (mirrors CO₂)
-**Inputs:** `df_melted`, `mapping_dict`, `project_area`, tariffs from sidebar, `currency_symbol`  
-**Process:**
-```python
-cost_map = {
-  "Electricity": cost_electricity,
-  "Gas": cost_gas,
-  "District Heating": cost_dh,
-  "District Cooling": cost_dc,
-  "Green Electricity": cost_green_electricity,
-}
-df_cost = df_melted.assign(
-  cost_per_kWh = lambda d: d["Energy_Source"].map(cost_map).fillna(0.0),
-  cost = lambda d: d["kWh"] * d["cost_per_kWh"]  # PV (negative) => negative cost (saves money)
-)
-```
-**Outputs:** Monthly/annual charts by End Use & Source; donuts of `cost_per_m2`; KPIs for monthly avg, annual total, and total cost intensity.
-
----
-
-## 7) Inputs & outputs (reference tables)
-
-### 7.1. Mapping (sidebar “Assign Energy Sources”)
-- **Input:** `End_Use` list derived from uploaded file
-- **Output:** `mapping_dict: dict[str, str]` (e.g., `{"Heating": "District Heating"}`)
-
-### 7.2. Energy tab
-- **Input:** `df_melted[Month, End_Use, kWh, Energy_Source]`, `project_area`
-- **Output:**
-  - **Charts:** Monthly (End Use + net line), Monthly (Source), Annual (End Use + net line), Annual (Source), EUI pies (End Use/Source)
-  - **Metrics:** Monthly avg kWh, Total annual (consumption-only), Net annual, EUI, Net EUI, PV Coverage
-
-### 7.3. CO₂ tab
-- **Input:** Energy tab + emission `factor_map`
-- **Output:**
-  - **Charts:** Monthly/Annual per End Use & Source in `kgCO2`
-  - **Pies:** `kgCO2_per_m2`
-  - **Metrics:** Monthly avg CO₂, Total annual CO₂, Total CO₂ intensity
-
-### 7.4. Loads tab
-- **Input:** `df_loads` with `_load` columns, `project_area`, `selected_load`
-- **Output:**
-  - **Charts:** 2D heatmap, monthly bar, peak‑day profile, duration curve, profiles by month/weekday, exceedance heatmap
-  - **Metrics:** totals, min/max, percentiles, specific loads
-
-### 7.5. Cost tab
-- **Input:** Energy tab + `cost_map`, `currency_symbol`
-- **Output:**
-  - **Charts:** Monthly/Annual cost by End Use & Source; cost intensity pies
-  - **Metrics:** Monthly avg cost, Total annual cost, Cost intensity total; per‑source cost intensities
-
----
-
-## 8) Color & category control
-- **Colors:** fixed `color_map` for End Uses, `color_map_sources` for Energy Sources
-- **Orders:** `MONTH_ORDER` + explicit `category_orders` in all PX figures to avoid random legend/axis reorders
-- **Text labels:** `text_auto`, `textfont_size`, and `textfont_color` set for clarity
-
----
-
-## 9) PV handling
-- **Energy:** negative kWh lowers net totals
-- **CO₂:** negative kWh × positive factor ⇒ negative kgCO₂ (offset)
-- **Cost:** negative kWh × positive cost ⇒ negative currency (savings)
-- **Best practice:** map `PV_Generation` → `Electricity` in the sidebar; this offsets electricity emissions/costs.
-
----
-
-## 10) Performance & robustness
-- **Caching:** `@st.cache_data` for Excel loading to speed up UI changes
-- **Type safety:** numeric coercion (`pd.to_numeric(..., errors="coerce")`) before math
-- **Zero‑division guards:** e.g., PV coverage if `eui == 0`
-- **Missing PV:** index checks before accessing `PV_Generation`
-
----
-
-## 11) Common pitfalls & fixes
-- **Wrong month order** → ensure exact names; set `category_orders={"Month": MONTH_ORDER}`
-- **Legend title tweaks** → `fig.update_layout(legend=dict(title=dict(text="")))`
-- **Annotation errors** → put only annotation fields in `annotations=[...]`; never legend keys
-- **KeyError on indexing** → don’t use Series values as index labels; use `.sort_values` or `.isin`
-
----
-
-## 12) Extensibility (future‑proof ideas)
-- Export all computed tables (CSV/XLSX)
-- Filters (End Uses / Sources) that also update KPIs
-- Toggles: show **net vs. consumption‑only** lines
-- Validation panel (missing months, non‑numeric cells, PV sanity checks)
-- Scenario compare (A/B cost or factor sets)
-
----
-
-## 13) Glossary
-- **End Use** — functional demand (Heating, Cooling, Lighting, …)
-- **Energy Source** — supply type (Electricity, Gas, District Heating, District Cooling)
-- **EUI** — Energy Use Intensity (kWh/m²·a), consumption‑only
-- **CO₂ intensity** — kgCO₂/m²·a
-- **Net** — includes PV offsets
-- **Peak day** — day with max daily sum of a selected load
-
----
-
-## 14) License
-© Werner Sobek Green Technologies GmbH. All rights reserved.  
-(Replace with your preferred license if needed.)
+Months: January … December
+End Uses: Heating, Cooling, Ventilation, Lighting, Equipment, HotWater, Pumps, Other, PV_Generation
+Sources: Electricity, Green Electricity, Gas, District Heating, District Cooling
+⚡ Performance
+Forms prevent reruns while typing; changes apply on Apply buttons.
+@st.cache_data caches Excel loading and wide→long transforms.
+st.session_state holds the applied values across reruns.
+Tips:
+Keep only necessary sheets/columns in large files.
+Ensure numeric columns are numeric (no stray text).
+Clear cache via the Streamlit menu if needed.
+🛠 Troubleshooting
+Page reruns while typing → Use the Apply buttons; do not expect instant updates.
+Wrong month order → Month names must match exactly; the app enforces the order.
+Benchmark not found → Add templates/benchmark_template.xlsx or upload via Benchmark Settings.
+PV positive → To subtract from demand, PV should be negative in Energy_Balance.
+Green Electricity missing → Ensure it exists in Emission Factors & Tariffs if you preload from a workbook.
+Save Project disabled → You must upload a workbook first.
+🗂 Project Structure (suggested)
+.
+├── BPVis_lt_1.1.3_optimized.py
+├── requirements.txt
+├── templates/
+│   └── benchmark_template.xlsx
+├── data/                     # optional: place your workbooks here
+└── README.md
+🧾 Changelog
+v1.1.3 (Optimized)
+Input forms (Apply buttons) + session_state → no reruns on every keystroke.
+Caching for Excel I/O and transformations.
+Benchmark tab with gauge + vertical “label” charts; sheet-per-building-use benchmark file.
+Save Project writes/updates Project_Data, Emission_Factors, Energy_Tariffs, EndUse_to_Source.
+Green Electricity included across factors, tariffs, mapping, and charts.
+All visuals, KPIs, and color schemes retained.
+📬 Feedback / Ideas
+Open an issue or PR with improvements. Common asks: new building uses in the benchmark, exporting images, custom color palettes, or additional KPIs.
