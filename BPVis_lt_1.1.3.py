@@ -47,7 +47,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPvis ENE 1.1.3",
+    page_title="WSGT_BPVis_ENE 1.1.3",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -97,7 +97,7 @@ if "project_name" not in st.session_state:
 # Sidebar — template download & file upload
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
-st.sidebar.write("## BPVis LT")
+st.sidebar.write("## BPVis ENE")
 st.sidebar.write("Version 1.1.3")
 
 st.sidebar.markdown("### Download Template")
@@ -1803,6 +1803,7 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
 
 
