@@ -118,7 +118,7 @@ st.sidebar.write("### Upload Data")
 uploaded_file = st.sidebar.file_uploader("Upload Excel File", type="xlsx")
 
 st.sidebar.markdown("---")
-st.sidebar.write("### Project Information")
+st.sidebar.markdown("### Project Information")
 
 
 # =========================
@@ -1803,6 +1803,7 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
 
 
 
