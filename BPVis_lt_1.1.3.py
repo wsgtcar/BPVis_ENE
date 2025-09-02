@@ -768,9 +768,14 @@ with tab1:
         )
         annual_chart_per_source.update_traces(textfont_size=14, textfont_color="white")
 
+        totals_clean = totals[
+            (totals["End_Use"] != "PV_Generation") &
+            (totals["kWh_per_m2"] > 0)
+            ]
+
         # ---- Donuts (EUI shares)
         energy_intensity_chart = px.pie(
-            totals,
+            totals_clean,
             names="End_Use",
             values="kWh_per_m2",
             color="End_Use",
@@ -996,9 +1001,13 @@ with tab2:
         )
         annual_chart_co2_source.update_traces(textfont_size=14, textfont_color="white")
 
+        totals_co2_use_clean = totals_co2_use[
+            (totals_co2_use["End_Use"] != "PV_Generation") &
+            (totals_co2_use["kgCO2_per_m2"] > 0)
+            ]
         # Donuts: CO₂ intensity shares
         co2_intensity_pie_use = px.pie(
-            totals_co2_use,
+            totals_co2_use_clean,
             names="End_Use",
             values="kgCO2_per_m2",
             color="End_Use",
@@ -1228,8 +1237,13 @@ with tab3:
         annual_chart_cost_source.update_traces(textfont_size=14, textfont_color="white")
 
         # ---------- Donuts: Cost intensity (currency/m²·a) ----------
+
+        totals_cost_use_clean = totals_cost_use[
+            (totals_cost_use["End_Use"] != "PV_Generation") &
+            (totals_cost_use["cost_per_m2"] > 0)
+            ]
         cost_intensity_pie_use = px.pie(
-            totals_cost_use,
+            totals_cost_use_clean,
             names="End_Use",
             values="cost_per_m2",
             color="End_Use",
@@ -1237,8 +1251,7 @@ with tab3:
             hole=0.5,
             height=800,
             category_orders={
-                "End_Use": ["Heating", "Cooling", "Ventilation", "Lighting", "Equipment", "HotWater", "Pumps", "Other",
-                            "PV_Generation"]}
+                "End_Use": ["Heating", "Cooling", "Ventilation", "Lighting", "Equipment", "HotWater", "Pumps", "Other"]}
         )
         cost_intensity_pie_use.update_traces(textinfo="value+percent", textfont_size=18, textfont_color="white")
 
@@ -1803,10 +1816,3 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
-
-
-
-
-
-
-
