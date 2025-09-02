@@ -769,9 +769,7 @@ with tab1:
         annual_chart_per_source.update_traces(textfont_size=14, textfont_color="white")
 
         totals_clean = totals[
-            (totals["End_Use"] != "PV_Generation") &
-            (totals["kWh_per_m2"] > 0)
-            ]
+            (totals["End_Use"] != "PV_Generation")]
 
         # ---- Donuts (EUI shares)
         energy_intensity_chart = px.pie(
@@ -825,10 +823,10 @@ with tab1:
         # ---- Layout: charts and KPIs (kept identical)
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.subheader("Monthly Energy Demand")
+            st.subheader("Monthly Energy")
             st.plotly_chart(monthly_chart, use_container_width=True)
         with col2:
-            st.subheader("Annual Energy Demand")
+            st.subheader("Annual Energy")
             st.plotly_chart(annual_chart, use_container_width=True)
 
         # KPI calculations (kept identical logic)
@@ -1002,9 +1000,8 @@ with tab2:
         annual_chart_co2_source.update_traces(textfont_size=14, textfont_color="white")
 
         totals_co2_use_clean = totals_co2_use[
-            (totals_co2_use["End_Use"] != "PV_Generation") &
-            (totals_co2_use["kgCO2_per_m2"] > 0)
-            ]
+            (totals_co2_use["End_Use"] != "PV_Generation")]
+
         # Donuts: CO₂ intensity shares
         co2_intensity_pie_use = px.pie(
             totals_co2_use_clean,
@@ -1239,9 +1236,8 @@ with tab3:
         # ---------- Donuts: Cost intensity (currency/m²·a) ----------
 
         totals_cost_use_clean = totals_cost_use[
-            (totals_cost_use["End_Use"] != "PV_Generation") &
-            (totals_cost_use["cost_per_m2"] > 0)
-            ]
+            (totals_cost_use["End_Use"] != "PV_Generation")]
+
         cost_intensity_pie_use = px.pie(
             totals_cost_use_clean,
             names="End_Use",
