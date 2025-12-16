@@ -684,10 +684,41 @@ if uploaded_file:
         "file_bytes": file_bytes,
     }
 
-    # --- NEW: seed the title from file if available (only once)
-    if preloaded.get("name") and not st.session_state.get("_project_name_set_from_file"):
-        st.session_state["project_name"] = preloaded["name"]
-        st.session_state["_project_name_set_from_file"] = True
+        # --- Seed Project Data from file on each new upload (token-based)
+    #     This keeps Project Data global (not scenario-dependent) and ensures it reloads correctly from the workbook.
+    wb_token = f"{uploaded_file.name}|{len(file_bytes)}"
+    if st.session_state.get("_loaded_workbook_token") != wb_token:
+        if preloaded.get("name"):
+            st.session_state["project_name"] = str(preloaded["name"])
+
+        if preloaded.get("area") is not None:
+            try:
+                st.session_state["project_area"] = float(preloaded["area"])
+                st.session_state["project_area_txt"] = str(float(preloaded["area"]))
+            except Exception:
+                pass
+
+        if preloaded.get("lat") is not None:
+            try:
+                st.session_state["project_latitude"] = float(preloaded["lat"])
+                st.session_state["project_latitude_txt"] = f"{float(preloaded['lat']):.6f}"
+            except Exception:
+                pass
+
+        if preloaded.get("lon") is not None:
+            try:
+                st.session_state["project_longitude"] = float(preloaded["lon"])
+                st.session_state["project_longitude_txt"] = f"{float(preloaded['lon']):.6f}"
+            except Exception:
+                pass
+
+        if preloaded.get("building_use"):
+            st.session_state["building_use"] = str(preloaded["building_use"])
+
+        if preloaded.get("currency") in ["€", "$", "£"]:
+            st.session_state["currency_symbol"] = str(preloaded["currency"])
+
+        st.session_state["_loaded_workbook_token"] = wb_token
 
 # =========================
 # Header (moved here so it can use preloaded name)
@@ -844,7 +875,7 @@ with tab1:
                                     "Leisure", "Healthcare"]
             building_use_index = building_use_options.index(
                 default_building_use) if default_building_use in building_use_options else 0
-            building_use = st.selectbox("Building Use", building_use_options, index=building_use_index)
+            building_use = st.selectbox("Building Use", building_use_options, index=building_use_index, key="building_use")
 
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
@@ -869,7 +900,7 @@ with tab1:
             st.write("Assign energy cost per source (per kWh)")
             default_currency = preloaded["currency"] if (
                     preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
-            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency))
+            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency), key="currency_symbol")
 
             def_t = preloaded["tariffs"] if preloaded else {}
             cost_electricity = numeric_input(f"Cost Electricity ({currency_symbol}/kWh)",
@@ -1255,32 +1286,51 @@ with tab6:
 
                 df_s = df_base.copy()
                 df_s["Efficiency_Factor"] = df_s["End_Use"].map(lambda u: float(eff.get(u, 1.0))).fillna(1.0)
-                df_s["kWh"] = df_s["kWh"] / df_s["Efficiency_Factor"]
+
+                # Apply efficiency factors (kWh is divided by factor)
+                df_s["kWh_factored"] = df_s["kWh"] / df_s["Efficiency_Factor"]
+
+                # Enforce sign convention for net calculations:
+                # - PV_Generation is always treated as a negative credit (generation)
+                # - All other end uses are treated as consumption only (clip negatives to 0)
+                pv_mask = df_s["End_Use"] == "PV_Generation"
+                df_s["kWh_signed"] = df_s["kWh_factored"]
+                df_s.loc[pv_mask, "kWh_signed"] = -df_s.loc[pv_mask, "kWh_factored"].abs()
+                df_s.loc[~pv_mask, "kWh_signed"] = df_s.loc[~pv_mask, "kWh_factored"].clip(lower=0.0)
+
                 df_s["Energy_Source"] = df_s["End_Use"].map(lambda u: str(mapping.get(u, "Electricity")))
 
-                # Annual energy (net includes PV, gross is consumption only)
-                totals_use = df_s.groupby("End_Use", as_index=False)["kWh"].sum()
-                net_kwh = float(totals_use["kWh"].sum())
+                # Annual energy (net includes PV as a negative contribution)
+                totals_use = df_s.groupby("End_Use", as_index=False)["kWh_signed"].sum()
+                net_kwh = float(totals_use["kWh_signed"].sum())
                 gross_kwh = float(
-                    totals_use.loc[(totals_use["End_Use"] != "PV_Generation") & (totals_use["kWh"] > 0), "kWh"].sum())
-                pv_kwh = float(abs(totals_use.loc[totals_use["End_Use"] == "PV_Generation", "kWh"].sum()))
+                    totals_use.loc[
+                        (totals_use["End_Use"] != "PV_Generation") & (totals_use["kWh_signed"] > 0),
+                        "kWh_signed"
+                    ].sum()
+                )
+                pv_kwh = float(abs(totals_use.loc[totals_use["End_Use"] == "PV_Generation", "kWh_signed"].sum()))
 
-                # CO2 and cost on consumption only (exclude PV_Generation and negative values)
-                df_cons = df_s[(df_s["End_Use"] != "PV_Generation") & (df_s["kWh"] > 0)].copy()
-                df_cons["co2_factor"] = df_cons["Energy_Source"].map(lambda s: float(factors.get(s, 0.0))).fillna(0.0)
-                df_cons["tariff"] = df_cons["Energy_Source"].map(lambda s: float(tariffs.get(s, 0.0))).fillna(0.0)
-                co2_kg = float((df_cons["kWh"] * df_cons["co2_factor"]).sum())
-                cost_val = float((df_cons["kWh"] * df_cons["tariff"]).sum())
-                # Per-source breakdown (consumption only) for scenario comparison charts (intensities)
+                # Net CO2 and net cost (including PV credit as signed kWh)
+                df_net = df_s.copy()
+                df_net["co2_factor"] = df_net["Energy_Source"].map(lambda s: float(factors.get(s, 0.0))).fillna(0.0)
+                df_net["tariff"] = df_net["Energy_Source"].map(lambda s: float(tariffs.get(s, 0.0))).fillna(0.0)
+
+                co2_kg = float((df_net["kWh_signed"] * df_net["co2_factor"]).sum())
+                cost_val = float((df_net["kWh_signed"] * df_net["tariff"]).sum())
+
+                # Per-source breakdown (net, including PV) for scenario comparison charts (intensities)
                 if _area and _area > 0:
-                    df_src = df_cons.copy()
-                    df_src["cost"] = df_src["kWh"] * df_src["tariff"]
-                    df_src["co2_kg"] = df_src["kWh"] * df_src["co2_factor"]
+                    df_src = df_net.copy()
+                    df_src["cost"] = df_src["kWh_signed"] * df_src["tariff"]
+                    df_src["co2_kg"] = df_src["kWh_signed"] * df_src["co2_factor"]
+
                     grp = df_src.groupby("Energy_Source", as_index=False).agg(
-                        kWh=("kWh", "sum"),
+                        kWh=("kWh_signed", "sum"),
                         cost=("cost", "sum"),
                         co2_kg=("co2_kg", "sum"),
                     )
+
                     for _, r in grp.iterrows():
                         src = r["Energy_Source"]
                         energy_rows.append({
@@ -1300,35 +1350,39 @@ with tab6:
                         })
 
                 rows.append({
-                    "Scenario": name,
+                    "Scenario": str(name),
                     "Net Energy (kWh/a)": net_kwh,
                     "Gross Consumption (kWh/a)": gross_kwh,
                     "PV Generation (kWh/a)": pv_kwh,
-                    "CO2 (t/a)": co2_kg / 1000.0,
-                    f"Cost ({_curr}/a)": cost_val,
+                    "Net CO2 (t/a)": co2_kg / 1000.0,
+                    f"Net Cost ({_curr}/a)": cost_val,
                     "Net EUI (kWh/m²·a)": (net_kwh / _area) if _area else np.nan,
                     "Gross EUI (kWh/m²·a)": (gross_kwh / _area) if _area else np.nan,
                 })
 
-            df_cmp = pd.DataFrame(rows).sort_values("Scenario")
+            scenario_order = [str(s) for s in scenarios.keys()]
+            df_cmp = pd.DataFrame(rows)
+            df_cmp["Scenario"] = df_cmp["Scenario"].astype(str)
+            df_cmp["Scenario"] = pd.Categorical(df_cmp["Scenario"], categories=scenario_order, ordered=True)
+            df_cmp = df_cmp.sort_values("Scenario", kind="stable").reset_index(drop=True)
             st.dataframe(df_cmp, use_container_width=True)
 
             # Scenario comparison charts (factored values, stacked by Energy Source)
             if not _area or _area <= 0:
                 st.warning("Project Area must be greater than 0 to show per m² scenario charts.")
             else:
-                scenario_order = [str(s) for s in df_cmp["Scenario"].tolist()]
+                # scenario_order is defined above from scenarios (categorical x-axis)
 
                 # 1) End Energy /m² (factored) by energy source
                 df_energy_src = pd.DataFrame(energy_rows)
                 if not df_energy_src.empty:
-                    df_energy_src["Scenario"] = df_energy_src["Scenario"].astype(str)
+                    df_energy_src["Scenario"] = pd.Categorical(df_energy_src["Scenario"].astype(str), categories=scenario_order, ordered=True)
                     fig_end_energy = px.bar(
                         df_energy_src,
                         x="Scenario",
                         y="End Energy (kWh/m²·a)",
                         color="Energy_Source",
-                        barmode="stack",
+                        barmode="relative",
                         title="End Energy /m² (factored) by Energy Source and Scenario",
                         category_orders={"Scenario": scenario_order},
                         color_discrete_map=color_map_sources,
@@ -1338,19 +1392,20 @@ with tab6:
                         yaxis_title="kWh/m²·a",
                         legend_title_text="Energy Source",
                     )
+                    fig_end_energy.update_xaxes(type="category")
                     st.plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
 
                 # 2) Energy Cost /m² (factored) by energy source
                 cost_col = f"Cost ({_curr}/m²·a)"
                 df_cost_src = pd.DataFrame(cost_rows)
                 if not df_cost_src.empty and cost_col in df_cost_src.columns:
-                    df_cost_src["Scenario"] = df_cost_src["Scenario"].astype(str)
+                    df_cost_src["Scenario"] = pd.Categorical(df_cost_src["Scenario"].astype(str), categories=scenario_order, ordered=True)
                     fig_cost = px.bar(
                         df_cost_src,
                         x="Scenario",
                         y=cost_col,
                         color="Energy_Source",
-                        barmode="stack",
+                        barmode="relative",
                         title=f"Energy Cost /m² (factored) by Energy Source and Scenario [{_curr}]",
                         category_orders={"Scenario": scenario_order},
                         color_discrete_map=color_map_sources,
@@ -1360,18 +1415,19 @@ with tab6:
                         yaxis_title=f"{_curr}/m²·a",
                         legend_title_text="Energy Source",
                     )
+                    fig_cost.update_xaxes(type="category")
                     st.plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
 
                 # 3) Energy Emissions /m² (factored) by energy source
                 df_emis_src = pd.DataFrame(emissions_rows)
                 if not df_emis_src.empty:
-                    df_emis_src["Scenario"] = df_emis_src["Scenario"].astype(str)
+                    df_emis_src["Scenario"] = pd.Categorical(df_emis_src["Scenario"].astype(str), categories=scenario_order, ordered=True)
                     fig_emis = px.bar(
                         df_emis_src,
                         x="Scenario",
                         y="Emissions (kgCO₂e/m²·a)",
                         color="Energy_Source",
-                        barmode="stack",
+                        barmode="relative",
                         title="Energy Emissions /m² (factored) by Energy Source and Scenario",
                         category_orders={"Scenario": scenario_order},
                         color_discrete_map=color_map_sources,
@@ -1381,6 +1437,7 @@ with tab6:
                         yaxis_title="kgCO₂e/m²·a",
                         legend_title_text="Energy Source",
                     )
+                    fig_emis.update_xaxes(type="category")
                     st.plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
 
     if not uploaded_file:
