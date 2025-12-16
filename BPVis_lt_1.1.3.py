@@ -5,10 +5,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+
 # --- Robust numeric input helpers (dot/comma tolerant, no spinner behavior)
 def _seed_default(key, default):
     if key not in st.session_state:
         st.session_state[key] = default
+
 
 def _parse_float_locale(s, default):
     try:
@@ -22,10 +24,12 @@ def _parse_float_locale(s, default):
     except Exception:
         return float(default)
 
+
 def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None, help=None):
     txt_key = f"{key}_txt"
     if txt_key not in st.session_state:
-        st.session_state[txt_key] = (fmt.format(default) if fmt else str(default)) if hasattr(fmt, "format") else (fmt or str(default))
+        st.session_state[txt_key] = (fmt.format(default) if fmt else str(default)) if hasattr(fmt, "format") else (
+                    fmt or str(default))
     val = st.text_input(label, key=txt_key, help=help)
     v = _parse_float_locale(val, default)
     if (min_value is not None) and (v < min_value):
@@ -34,6 +38,7 @@ def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None,
         v = max_value
     st.session_state[key] = v
     return v
+
 
 import numpy as np
 import plotly.colors as pc
@@ -47,7 +52,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.1.3",
+    page_title="WSGT_BPVis_ENE 1.1.4",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -149,6 +154,7 @@ SHEET_PROJECT = "Project_Data"
 SHEET_FACTORS = "Emission_Factors"
 SHEET_TARIFFS = "Energy_Tariffs"
 SHEET_MAPPING = "EndUse_to_Source"
+SHEET_EFFICIENCY = "Efficiency_Factors"
 
 
 def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame]]:
@@ -160,6 +166,7 @@ def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame
         "factors": sheets.get(SHEET_FACTORS),
         "tariffs": sheets.get(SHEET_TARIFFS),
         "mapping": sheets.get(SHEET_MAPPING),
+        "efficiency": sheets.get(SHEET_EFFICIENCY),
         "all_sheets": sheets,  # keep to preserve everything when writing back
     }
 
@@ -213,6 +220,25 @@ def parse_mapping_df(df: Optional[pd.DataFrame]) -> Dict[str, str]:
     return out
 
 
+def parse_efficiency_df(df: Optional[pd.DataFrame]) -> Dict[str, float]:
+    out = {}
+    if df is not None and {"End_Use", "Efficiency_Factor"}.issubset(df.columns):
+        for _, row in df.iterrows():
+            eu = str(row["End_Use"])
+            try:
+                out[eu] = float(row["Efficiency_Factor"])
+            except Exception:
+                pass
+    return out
+
+
+def build_efficiency_df(end_uses) -> pd.DataFrame:
+    rows = []
+    for use in end_uses:
+        rows.append({"End_Use": use, "Efficiency_Factor": st.session_state.get(f"eff_{use}", 1.0)})
+    return pd.DataFrame(rows)
+
+
 def build_project_df(project_name: str, project_area: float, currency_symbol: str) -> pd.DataFrame:
     return pd.DataFrame(
         {"Key": ["Project_Name", "Project_Area", "Currency"],
@@ -248,7 +274,7 @@ def build_mapping_df(end_uses) -> pd.DataFrame:
 # =========================
 
 def parse_project_df_with_building_use(
-    df: Optional[pd.DataFrame]
+        df: Optional[pd.DataFrame]
 ) -> Tuple[Optional[str], Optional[float], Optional[str], Optional[str], Optional[float], Optional[float]]:
     """Parse Project_Data sheet (name, area, currency, building use, latitude, longitude)."""
     if df is None or not {"Key", "Value"}.issubset(df.columns):
@@ -275,12 +301,12 @@ def parse_project_df_with_building_use(
 
 
 def build_project_df_with_building_use(
-    project_name: str,
-    project_area: float,
-    currency_symbol: str,
-    building_use: str,
-    latitude: Optional[float],
-    longitude: Optional[float],
+        project_name: str,
+        project_area: float,
+        currency_symbol: str,
+        building_use: str,
+        latitude: Optional[float],
+        longitude: Optional[float],
 ) -> pd.DataFrame:
     """Build the Project_Data sheet including lat/long."""
     return pd.DataFrame(
@@ -435,7 +461,8 @@ def write_config_to_excel(original_bytes: bytes,
                           project_df: pd.DataFrame,
                           factors_df: pd.DataFrame,
                           tariffs_df: pd.DataFrame,
-                          mapping_df: pd.DataFrame) -> bytes:
+                          mapping_df: pd.DataFrame,
+                          efficiency_df: pd.DataFrame) -> bytes:
     """Return a new workbook (bytes) with all original sheets + updated config sheets."""
     cfg = read_config_from_excel(original_bytes)
     sheets = cfg["all_sheets"]  # dict[name] -> df
@@ -445,6 +472,7 @@ def write_config_to_excel(original_bytes: bytes,
     sheets[SHEET_FACTORS] = factors_df
     sheets[SHEET_TARIFFS] = tariffs_df
     sheets[SHEET_MAPPING] = mapping_df
+    sheets[SHEET_EFFICIENCY] = efficiency_df
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -470,9 +498,10 @@ if uploaded_file:
     saved_factors = parse_factors_df(cfg_saved["factors"])
     saved_tariffs = parse_tariffs_df(cfg_saved["tariffs"])
     saved_mapping_df = cfg_saved["mapping"]
+    saved_efficiency = parse_efficiency_df(cfg_saved.get("efficiency"))
     has_any_saved = any([
         saved_name, saved_area, saved_currency, saved_building_use, bool(saved_factors), bool(saved_tariffs),
-        saved_mapping_df is not None
+        bool(saved_efficiency), saved_mapping_df is not None
     ])
     if has_any_saved:
         st.sidebar.success("Saved project settings found in this workbook; preloading values.")
@@ -489,6 +518,7 @@ if uploaded_file:
         "factors": saved_factors,
         "tariffs": saved_tariffs,
         "mapping_df": saved_mapping_df,
+        "efficiency": saved_efficiency,
         "file_bytes": file_bytes,
     }
 
@@ -512,8 +542,8 @@ st.title(st.session_state["project_name"])
 # =========================
 # Tabs
 # =========================
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["Energy Balance", "CO2 Emissions", "Energy Cost", "Loads Analysis", "Benchmark"])
+tab1, tab1_factors, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Energy Balance", "Energy Balance with Factors", "CO2 Emissions", "Energy Cost", "Loads Analysis", "Benchmark"])
 
 # =========================
 # Tab 1 — Energy Balance (Energy Balance Tab)
@@ -543,8 +573,10 @@ with tab1:
             project_area = numeric_input("Project Area", float(default_area), key="project_area", min_value=0.0)
 
             # FIXED LABEL + use defaults from file if present
-            latitude = numeric_input("Project Latitude", float(default_lat), key="project_latitude", min_value=-90.0, max_value=90.0, fmt="{:.6f}")
-            longitude = numeric_input("Project Longitude", float(default_lon), key="project_longitude", min_value=-180.0, max_value=180.0, fmt="{:.6f}")
+            latitude = numeric_input("Project Latitude", float(default_lat), key="project_latitude", min_value=-90.0,
+                                     max_value=90.0, fmt="{:.6f}")
+            longitude = numeric_input("Project Longitude", float(default_lon), key="project_longitude",
+                                      min_value=-180.0, max_value=180.0, fmt="{:.6f}")
 
             # building use dropdown unchanged...
             building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
@@ -557,27 +589,57 @@ with tab1:
         with st.sidebar.expander("Emission Factors"):
             st.write("Assign Emission Factors")
             def_f = preloaded["factors"] if preloaded else {}
-            co2_Emissions_Electricity = numeric_input("CO2 Factor Electricity", float(def_f.get("Electricity", 0.300)), key="co2_Emissions_Electricity", min_value=0.0, max_value=1.0, fmt="{:.3f}")
-            co2_Emissions_Green_Electricity = numeric_input("CO2 Factor Green Electricity", float(def_f.get("Green Electricity", 0.000)), key="co2_Emissions_Green_Electricity", min_value=0.0, max_value=1.0, fmt="{:.3f}")
-            co2_emissions_dh = numeric_input("CO2 Factor District Heating", float(def_f.get("District Heating", 0.260)), key="co2_emissions_dh", min_value=0.0, max_value=1.0, fmt="{:.3f}")
-            co2_emissions_dc = numeric_input("CO2 Factor District Cooling", float(def_f.get("District Cooling", 0.280)), key="co2_emissions_dc", min_value=0.0, max_value=1.0, fmt="{:.3f}")
-            co2_emissions_gas = numeric_input("CO2 Factor Gas", float(def_f.get("Gas", 0.180)), key="co2_emissions_gas", min_value=0.0, max_value=1.0, fmt="{:.3f}")
-
+            co2_Emissions_Electricity = numeric_input("CO2 Factor Electricity", float(def_f.get("Electricity", 0.300)),
+                                                      key="co2_Emissions_Electricity", min_value=0.0, max_value=1.0,
+                                                      fmt="{:.3f}")
+            co2_Emissions_Green_Electricity = numeric_input("CO2 Factor Green Electricity",
+                                                            float(def_f.get("Green Electricity", 0.000)),
+                                                            key="co2_Emissions_Green_Electricity", min_value=0.0,
+                                                            max_value=1.0, fmt="{:.3f}")
+            co2_emissions_dh = numeric_input("CO2 Factor District Heating", float(def_f.get("District Heating", 0.260)),
+                                             key="co2_emissions_dh", min_value=0.0, max_value=1.0, fmt="{:.3f}")
+            co2_emissions_dc = numeric_input("CO2 Factor District Cooling", float(def_f.get("District Cooling", 0.280)),
+                                             key="co2_emissions_dc", min_value=0.0, max_value=1.0, fmt="{:.3f}")
+            co2_emissions_gas = numeric_input("CO2 Factor Gas", float(def_f.get("Gas", 0.180)), key="co2_emissions_gas",
+                                              min_value=0.0, max_value=1.0, fmt="{:.3f}")
 
         # --- Energy Cost (€/kWh) ---
         with st.sidebar.expander("Energy Tariffs"):
             st.write("Assign energy cost per source (per kWh)")
             default_currency = preloaded["currency"] if (
-                        preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
+                    preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
             currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency))
 
             def_t = preloaded["tariffs"] if preloaded else {}
-            cost_electricity = numeric_input(f"Cost Electricity ({currency_symbol}/kWh)", float(def_t.get("Electricity", 0.35)), key="cost_electricity", min_value=0.0, max_value=100.0, fmt="{:.2f}")
-            cost_green_electricity = numeric_input(f"Cost Green Electricity ({currency_symbol}/kWh)", float(def_t.get("Green Electricity", 0.40)), key="cost_green_electricity", min_value=0.0, max_value=100.0, fmt="{:.2f}")
-            cost_dh = numeric_input(f"Cost District Heating ({currency_symbol}/kWh)", float(def_t.get("District Heating", 0.16)), key="cost_dh", min_value=0.0, max_value=100.0, fmt="{:.2f}")
-            cost_dc = numeric_input(f"Cost District Cooling ({currency_symbol}/kWh)", float(def_t.get("District Cooling", 0.16)), key="cost_dc", min_value=0.0, max_value=100.0, fmt="{:.2f}")
-            cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.12)), key="cost_gas", min_value=0.0, max_value=100.0, fmt="{:.2f}")
+            cost_electricity = numeric_input(f"Cost Electricity ({currency_symbol}/kWh)",
+                                             float(def_t.get("Electricity", 0.35)), key="cost_electricity",
+                                             min_value=0.0, max_value=100.0, fmt="{:.2f}")
+            cost_green_electricity = numeric_input(f"Cost Green Electricity ({currency_symbol}/kWh)",
+                                                   float(def_t.get("Green Electricity", 0.40)),
+                                                   key="cost_green_electricity", min_value=0.0, max_value=100.0,
+                                                   fmt="{:.2f}")
+            cost_dh = numeric_input(f"Cost District Heating ({currency_symbol}/kWh)",
+                                    float(def_t.get("District Heating", 0.16)), key="cost_dh", min_value=0.0,
+                                    max_value=100.0, fmt="{:.2f}")
+            cost_dc = numeric_input(f"Cost District Cooling ({currency_symbol}/kWh)",
+                                    float(def_t.get("District Cooling", 0.16)), key="cost_dc", min_value=0.0,
+                                    max_value=100.0, fmt="{:.2f}")
+            cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.12)), key="cost_gas",
+                                     min_value=0.0, max_value=100.0, fmt="{:.2f}")
 
+        # ---- Sidebar: efficiency factors per End_Use (used in 'Energy Balance with Factors' tab)
+        with st.sidebar.expander("Efficiency Factors"):
+            st.write("Assign efficiency factors per End Use (dimensionless; kWh is divided by factor)")
+            def_eff = preloaded["efficiency"] if (preloaded and preloaded.get("efficiency")) else {}
+            for use in df_melted["End_Use"].unique().tolist():
+                numeric_input(
+                    f"Efficiency Factor {use}",
+                    float(def_eff.get(use, 1.0)),
+                    key=f"eff_{use}",
+                    min_value=0.001,
+                    max_value=1000.0,
+                    fmt="{:.3f}",
+                )
 
         # ---- Sidebar: map End_Use -> Energy_Source (user-controlled)
         with st.sidebar.expander("Assign Energy Sources"):
@@ -586,7 +648,7 @@ with tab1:
 
             # If we have a saved mapping sheet, parse it to set defaults:
             saved_mapping = parse_mapping_df(preloaded["mapping_df"]) if (
-                        preloaded and preloaded["mapping_df"] is not None) else {}
+                    preloaded and preloaded["mapping_df"] is not None) else {}
 
             mapping_dict = {}
             st.sidebar.markdown("---")
@@ -628,9 +690,10 @@ with tab1:
                                               co2_emissions_dh, co2_emissions_dc, co2_emissions_gas)
                 tariffs_df = build_tariffs_df(cost_electricity, cost_green_electricity, cost_dh, cost_dc, cost_gas)
                 mapping_df = build_mapping_df(end_uses)
+                efficiency_df = build_efficiency_df(end_uses)
 
                 updated_bytes = write_config_to_excel(preloaded["file_bytes"], project_df, factors_df, tariffs_df,
-                                                      mapping_df)
+                                                      mapping_df, efficiency_df)
 
                 st.success("Project settings saved to workbook.")
                 st.download_button(
@@ -714,7 +777,6 @@ with tab1:
         )
         monthly_chart_source.update_layout(showlegend=False)
         monthly_chart_source.update_traces(textfont_size=14, textfont_color="white")
-
 
         st.write("## Energy Balance (per End Use)")
 
@@ -875,6 +937,242 @@ with tab1:
         st.write("### ← Please upload data on sidebar")
 
 # =========================
+# Tab 1b — Energy Balance with Factors (Energy Balance with Factors Tab)
+# =========================
+with tab1_factors:
+    if uploaded_file:
+        # ---- Load data
+        df_eff = energy_balance_sheet(uploaded_file.getvalue())
+
+        # ---- Wide->Long transform for plotting and grouping
+        df_melted_eff = df_eff.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
+
+        # ---- Apply per-End_Use efficiency factors (kWh is divided by factor)
+        eff_map = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted_eff["End_Use"].unique()}
+        df_melted_eff["Efficiency_Factor"] = df_melted_eff["End_Use"].map(eff_map).fillna(1.0)
+        df_melted_eff["kWh"] = df_melted_eff["kWh"] / df_melted_eff["Efficiency_Factor"]
+
+        # ---- Ensure Energy_Source exists (same mapping as Tab 1)
+        df_melted_eff["Energy_Source"] = df_melted_eff["End_Use"].map(
+            {k: st.session_state.get(f"source_{k}", "Electricity") for k in df_melted_eff["End_Use"].unique()}
+        )
+
+        project_area_eff = float(st.session_state.get("project_area", 1000.0))
+
+        # ---- Monthly net totals (used for overlay line)
+        monthly_totals_eff = (
+            df_melted_eff.groupby("Month", as_index=False)["kWh"].sum()
+            .assign(Month=lambda d: pd.Categorical(d["Month"], categories=MONTH_ORDER, ordered=True))
+            .sort_values("Month", kind="stable")
+            .reset_index(drop=True)
+        )
+
+        # ---- Monthly bar per End_Use (stacked, pos/neg relative) + net line overlay
+        monthly_chart_eff = px.bar(
+            df_melted_eff,
+            x="Month",
+            y="kWh",
+            color="End_Use",
+            barmode="relative",
+            color_discrete_map=color_map,
+            height=800,
+            category_orders={"Month": MONTH_ORDER},
+            text_auto=".0f",
+        )
+        monthly_chart_eff.update_traces(textfont_size=14, textfont_color="white")
+
+        line_monthly_net_eff = px.line(
+            monthly_totals_eff, x="Month", y="kWh", markers=True, labels={"kWh": "Net total"}
+        )
+        for tr in line_monthly_net_eff.data:
+            tr.name = "Net total"
+            tr.line.width = 5
+            tr.line.color = "black"
+            tr.line.dash = "dash"
+            tr.marker.size = 12
+            monthly_chart_eff.add_trace(tr)
+        monthly_chart_eff.update_layout(showlegend=False)
+
+        # ---- Monthly bar per Energy_Source (aggregate first for correct hover totals)
+        monthly_by_source_eff = (
+            df_melted_eff.groupby(["Month", "Energy_Source"], as_index=False)["kWh"].sum()
+        )
+        monthly_by_source_eff["Month"] = pd.Categorical(
+            monthly_by_source_eff["Month"], categories=MONTH_ORDER, ordered=True
+        )
+        monthly_chart_source_eff = px.bar(
+            monthly_by_source_eff,
+            x="Month",
+            y="kWh",
+            color="Energy_Source",
+            barmode="relative",
+            color_discrete_map=color_map_sources,
+            height=800,
+            category_orders={"Month": MONTH_ORDER},
+            text_auto=".0f",
+        )
+        monthly_chart_source_eff.update_layout(showlegend=False)
+        monthly_chart_source_eff.update_traces(textfont_size=14, textfont_color="white")
+
+        st.write("## Energy Balance with Factors (per End Use)")
+
+        # ---- Annual totals per End_Use and per Energy_Source (+ intensities)
+        totals_eff = df_melted_eff.groupby("End_Use", as_index=False)["kWh"].sum()
+        totals_eff["Per Use"] = "Total"
+        totals_eff["kWh_per_m2"] = (totals_eff["kWh"] / project_area_eff).round(1)
+
+        # KPI helpers
+        eui_eff = totals_eff.loc[totals_eff["kWh_per_m2"] > 0, "kWh_per_m2"].sum()
+        net_energy_eff = totals_eff["kWh"].sum()
+        net_eui_eff = totals_eff["kWh_per_m2"].sum()
+
+        totals_per_source_eff = df_melted_eff.groupby("Energy_Source", as_index=False)["kWh"].sum()
+        totals_per_source_eff["Per Source"] = "total_per_source"
+        totals_per_source_eff["kWh_per_m2_per_source"] = (totals_per_source_eff["kWh"] / project_area_eff).round(1)
+
+        # ---- Annual stacked bars (per End_Use + reference line)
+        annual_chart_eff = px.bar(
+            totals_eff,
+            x="Per Use",
+            y="kWh",
+            color="End_Use",
+            barmode="relative",
+            color_discrete_map=color_map,
+            height=800,
+            category_orders={"End_Use": END_USE_ORDER},
+            text_auto=".0f",
+        )
+        annual_chart_eff.add_hline(y=net_energy_eff, line_width=4, line_dash="dash", line_color="black")
+        annual_chart_eff.add_annotation(
+            x=0.5, xref="paper",
+            y=net_energy_eff, yref="y",
+            text=f"{net_energy_eff:,.0f} kWh",
+            showarrow=False, yshift=12,
+            font=dict(size=16, color="white"),
+        )
+        annual_chart_eff.update_traces(textfont_size=14, textfont_color="white")
+
+        # ---- Annual stacked bars (per Energy_Source)
+        annual_chart_per_source_eff = px.bar(
+            totals_per_source_eff,
+            x="Per Source",
+            y="kWh",
+            color="Energy_Source",
+            barmode="relative",
+            color_discrete_map=color_map_sources,
+            height=800,
+            category_orders={"Energy_Source": ENERGY_SOURCE_ORDER},
+            text_auto=".0f",
+        )
+        annual_chart_per_source_eff.update_traces(textfont_size=14, textfont_color="white")
+
+        totals_eff_clean = totals_eff[(totals_eff["End_Use"] != "PV_Generation")]
+
+        # ---- Donuts (EUI shares)
+        energy_intensity_chart_eff = px.pie(
+            totals_eff_clean,
+            names="End_Use",
+            values="kWh_per_m2",
+            color="End_Use",
+            color_discrete_map=color_map,
+            hole=0.5,
+            height=800,
+            category_orders={"End_Use": END_USE_ORDER},
+        )
+        energy_intensity_chart_eff.update_layout(
+            annotations=[dict(
+                text=f"{eui_eff:,.1f}<br>kWh/m²·a",
+                x=0.5, y=0.5, xref="paper", yref="paper",
+                showarrow=False,
+                font=dict(size=50, color="black"),
+            )],
+            showlegend=True,
+        )
+        energy_intensity_chart_eff.update_traces(textinfo="value+percent", textfont_size=18, textfont_color="white")
+
+        energy_intensity_chart_per_source_eff = px.pie(
+            totals_per_source_eff,
+            names="Energy_Source",
+            values="kWh_per_m2_per_source",
+            color="Energy_Source",
+            color_discrete_map=color_map_sources,
+            hole=0.5,
+            height=800,
+            category_orders={"Energy_Source": ENERGY_SOURCE_ORDER},
+        )
+        energy_intensity_chart_per_source_eff.update_layout(
+            annotations=[dict(
+                text=f"{eui_eff:,.1f}<br>kWh/m²·a",
+                x=0.5, y=0.5, xref="paper", yref="paper",
+                showarrow=False,
+                font=dict(size=50, color="black"),
+            )],
+            showlegend=True,
+        )
+        energy_intensity_chart_per_source_eff.update_traces(textinfo="value+percent", textfont_size=18,
+                                                            textfont_color="white")
+
+        # ---- PV coverage (share of PV vs consumption-only EUI)
+        totals_indexed_eff = totals_eff.set_index("End_Use")
+        pv_value_eff = totals_indexed_eff.loc[
+            "PV_Generation", "kWh_per_m2"] if "PV_Generation" in totals_indexed_eff.index else 0.0
+        pv_coverage_eff = abs((pv_value_eff / eui_eff) * 100) if eui_eff != 0 else 0.0
+
+        # ---- Layout: charts and KPIs
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.subheader("Monthly Energy")
+            st.plotly_chart(monthly_chart_eff, use_container_width=True, key="ebf_monthly_enduse")
+        with col2:
+            st.subheader("Annual Energy")
+            st.plotly_chart(annual_chart_eff, use_container_width=True, key="ebf_annual_enduse")
+
+        # KPI calculations (kept identical logic)
+        monthly_avr_eff = (totals_eff["kWh"].sum()) / 12
+        net_total_eff = totals_eff["kWh"].sum()
+        total_energy_eff = totals_eff.loc[totals_eff["kWh"] > 0, "kWh"].sum()
+        pv_total_eff = abs(df_melted_eff.groupby("End_Use")["kWh"].sum().get("PV_Generation", 0.0))
+
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.subheader("Energy Use Intensity (kWh/m2.a)")
+            st.plotly_chart(energy_intensity_chart_eff, use_container_width=True, key="ebf_eui_enduse")
+        with col2:
+            st.subheader("Energy KPI's")
+            st.metric(label="Monthly Average Energy Consumption", value=f"{monthly_avr_eff:,.0f} kWh")
+            st.metric(label="Total Annual Energy Consumption", value=f"{total_energy_eff:,.0f} kWh")
+            st.metric(label="Net Annual Energy Consumption", value=f"{net_total_eff:,.0f} kWh")
+            st.metric(label="EUI", value=f"{eui_eff:,.1f} kWh/m2.a")
+            st.metric(label="Net EUI", value=f"{net_eui_eff:,.1f} kWh/m2.a")
+            st.metric(label="PV Production", value=f"{pv_total_eff:,.1f} kWh")
+            st.metric(label="PV Coverage", value=f"{pv_coverage_eff:,.1f} %")
+
+        st.markdown("---")
+        st.write("## Energy Balance with Factors (per Energy Source)")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.subheader("Monthly Energy Demand")
+            st.plotly_chart(monthly_chart_source_eff, use_container_width=True, key="ebf_monthly_source")
+        with col2:
+            st.subheader("Annual Energy Demand")
+            st.plotly_chart(annual_chart_per_source_eff, use_container_width=True, key="ebf_annual_source")
+
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.subheader("Energy Use Intensity (kWh/m2.a)")
+            st.plotly_chart(energy_intensity_chart_per_source_eff, use_container_width=True, key="ebf_eui_source")
+        with col2:
+            st.subheader("Energy KPI's")
+            for _, row in totals_per_source_eff.iterrows():
+                st.metric(
+                    label=f"EUI - {row['Energy_Source']}",
+                    value=f"{row['kWh_per_m2_per_source']:,.1f} kWh/m².a",
+                )
+
+    if not uploaded_file:
+        st.write("### ← Please upload data on sidebar")
+
+# =========================
 # Tab 2 — CO₂ Emissions (CO2 Emissions Tab)
 # =========================
 with tab2:
@@ -882,6 +1180,11 @@ with tab2:
         # Ensure Energy_Source exists (same mapping as Tab 1)
         df = energy_balance_sheet(uploaded_file.getvalue())
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
+        # ---- Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
+        eff_map = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted["End_Use"].unique()}
+        df_melted["Efficiency_Factor"] = df_melted["End_Use"].map(eff_map).fillna(1.0)
+        df_melted["kWh"] = df_melted["kWh"] / df_melted["Efficiency_Factor"]
+
         df_melted["Energy_Source"] = df_melted["End_Use"].map(
             {k: st.session_state.get(f"source_{k}", "Electricity") for k in df_melted["End_Use"].unique()})
 
@@ -1108,6 +1411,10 @@ with tab3:
         df_cost_base = pd.read_excel(xls, sheet_name="Energy_Balance")
         df_cost_base.columns = df_cost_base.columns.str.replace("_kWh", "", regex=False)
         df_melted_cost = df_cost_base.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
+        # ---- Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
+        eff_map_cost = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted_cost["End_Use"].unique()}
+        df_melted_cost["Efficiency_Factor"] = df_melted_cost["End_Use"].map(eff_map_cost).fillna(1.0)
+        df_melted_cost["kWh"] = df_melted_cost["kWh"] / df_melted_cost["Efficiency_Factor"]
 
         # Reuse the user's End_Use -> Energy_Source mapping from the sidebar
         end_uses_here = df_melted_cost["End_Use"].unique()
@@ -1518,7 +1825,6 @@ with tab4:
         st.plotly_chart(peak_day_fig, use_container_width=True)
         st.caption(f"Daily Total on {date_label}: {peak_total:,.1f}")
 
-
         # --- Load Duration Curve (percentage of hours vs load) ---
         # Ensure numeric and drop NaNs
         ldc_vals = pd.to_numeric(df_loads[selected_load], errors="coerce").dropna()
@@ -1569,6 +1875,11 @@ with tab5:
             # Calculate project KPIs (reuse calculations from other tabs)
             df = energy_balance_sheet(uploaded_file.getvalue())
             df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
+            # ---- Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
+            eff_map_bm = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted["End_Use"].unique()}
+            df_melted["Efficiency_Factor"] = df_melted["End_Use"].map(eff_map_bm).fillna(1.0)
+            df_melted["kWh"] = df_melted["kWh"] / df_melted["Efficiency_Factor"]
+
             df_melted["Energy_Source"] = df_melted["End_Use"].map(
                 {k: st.session_state.get(f"source_{k}", "Electricity") for k in df_melted["End_Use"].unique()})
 
@@ -1639,7 +1950,6 @@ with tab5:
 
             st.write(f"## Benchmark Analysis")
 
-
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
@@ -1659,7 +1969,7 @@ with tab5:
                         "label": [f"project_name"],
                     }
                 )
-                st.metric("Project Location:","", help='User Input on Sidebar')
+                st.metric("Project Location:", "", help='User Input on Sidebar')
                 st.map(data=df, latitude="col1", longitude="col2", height=200, size=500, zoom=10)
 
             st.markdown("---")
@@ -1686,7 +1996,6 @@ with tab5:
 
             with col2:
 
-
                 # Display textual results (Net values)
                 st.write("**Gross Values (without PV):**")
                 for kpi_name, value in project_values_gross.items():
@@ -1698,7 +2007,6 @@ with tab5:
                         if kpi_name == "Energy_Density":
                             st.metric(f"EUI Gross ({category})", f"{value:.1f} kWh/m²·a",
                                       help="Gross energy before accounting for on-site generation")
-
 
                 st.write("**Net Values (with PV):**")
                 for kpi_name, value in project_values.items():
@@ -1757,7 +2065,6 @@ with tab5:
                                       ,
                                       help="Gross emissions before accounting for on-site generation")
 
-
                 st.write("**Net Values (with PV):**")
                 for kpi_name, value in project_values.items():
                     if kpi_name in benchmark_dict:
@@ -1800,7 +2107,6 @@ with tab5:
                     )
                     st.plotly_chart(gauge_fig, use_container_width=True)
 
-
             with col2:
 
                 # Display textual results (Net values)
@@ -1811,7 +2117,6 @@ with tab5:
                         good_thresh = benchmark_dict[kpi_name]["Good_Threshold"]
                         excellent_thresh = benchmark_dict[kpi_name]["Excellent_Threshold"]
                         category = get_benchmark_category(value, good_thresh, excellent_thresh)
-
 
                         if kpi_name == "Energy_Cost":
                             st.metric(f"Cost Gross ({category})", f"{currency_symbol} {value:.2f}/m²·a",
