@@ -4,6 +4,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import json
+from copy import deepcopy
 
 
 # --- Robust numeric input helpers (dot/comma tolerant, no spinner behavior)
@@ -52,7 +54,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.1.4",
+    page_title="WSGT_BPVis_ENE 1.1.5",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -103,7 +105,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.1.4")
+st.sidebar.write("Version 1.1.5")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -155,6 +157,7 @@ SHEET_FACTORS = "Emission_Factors"
 SHEET_TARIFFS = "Energy_Tariffs"
 SHEET_MAPPING = "EndUse_to_Source"
 SHEET_EFFICIENCY = "Efficiency_Factors"
+SHEET_SCENARIOS = "Scenarios"
 
 
 def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame]]:
@@ -167,6 +170,7 @@ def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame
         "tariffs": sheets.get(SHEET_TARIFFS),
         "mapping": sheets.get(SHEET_MAPPING),
         "efficiency": sheets.get(SHEET_EFFICIENCY),
+        "scenarios": sheets.get(SHEET_SCENARIOS),
         "all_sheets": sheets,  # keep to preserve everything when writing back
     }
 
@@ -230,6 +234,160 @@ def parse_efficiency_df(df: Optional[pd.DataFrame]) -> Dict[str, float]:
             except Exception:
                 pass
     return out
+
+
+# =========================
+# NEW — Scenario Manager helpers
+# =========================
+
+def parse_scenarios_sheet(df: Optional[pd.DataFrame]) -> Tuple[Dict[str, dict], Optional[str]]:
+    """Parse Scenarios sheet into dict[name] -> payload and return active scenario name if present."""
+    scenarios: Dict[str, dict] = {}
+    active_name: Optional[str] = None
+    if df is None or df.empty:
+        return scenarios, active_name
+    if "Scenario" not in df.columns:
+        return scenarios, active_name
+
+    has_payload = "PayloadJSON" in df.columns
+    has_active = "Active" in df.columns
+
+    for _, row in df.iterrows():
+        name = str(row.get("Scenario", "")).strip()
+        if not name:
+            continue
+        payload = {}
+        if has_payload:
+            raw = row.get("PayloadJSON", "")
+            try:
+                if pd.notna(raw) and str(raw).strip():
+                    payload = json.loads(str(raw))
+            except Exception:
+                payload = {}
+        scenarios[name] = payload
+
+        if has_active and active_name is None:
+            try:
+                # accept 1/0, True/False
+                if bool(int(row.get("Active", 0))):
+                    active_name = name
+            except Exception:
+                try:
+                    if bool(row.get("Active", False)):
+                        active_name = name
+                except Exception:
+                    pass
+
+    if active_name is None and scenarios:
+        active_name = list(scenarios.keys())[0]
+    return scenarios, active_name
+
+
+def build_scenarios_sheet(scenarios: Dict[str, dict], active_name: Optional[str]) -> pd.DataFrame:
+    rows = []
+    for name, payload in scenarios.items():
+        try:
+            payload_json = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            payload_json = "{}"
+        rows.append({
+            "Scenario": name,
+            "Active": 1 if (active_name is not None and name == active_name) else 0,
+            "PayloadJSON": payload_json,
+        })
+    return pd.DataFrame(rows)
+
+
+def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> dict:
+    """Backwards compatible defaults (single-config sheets -> Base scenario)."""
+    def_f = (preloaded_cfg.get("factors") if preloaded_cfg else {}) or {}
+    def_t = (preloaded_cfg.get("tariffs") if preloaded_cfg else {}) or {}
+    saved_mapping = parse_mapping_df(preloaded_cfg.get("mapping_df")) if (
+                preloaded_cfg and preloaded_cfg.get("mapping_df") is not None) else {}
+    def_eff = (preloaded_cfg.get("efficiency") if preloaded_cfg else {}) or {}
+
+    return {
+        "factors": {
+            "Electricity": float(def_f.get("Electricity", 0.300)),
+            "Green Electricity": float(def_f.get("Green Electricity", 0.000)),
+            "Gas": float(def_f.get("Gas", 0.180)),
+            "District Heating": float(def_f.get("District Heating", 0.260)),
+            "District Cooling": float(def_f.get("District Cooling", 0.280)),
+        },
+        "tariffs": {
+            "Electricity": float(def_t.get("Electricity", 0.35)),
+            "Green Electricity": float(def_t.get("Green Electricity", 0.40)),
+            "Gas": float(def_t.get("Gas", 0.12)),
+            "District Heating": float(def_t.get("District Heating", 0.16)),
+            "District Cooling": float(def_t.get("District Cooling", 0.16)),
+        },
+        "mapping": {use: str(saved_mapping.get(use, "Electricity")) for use in end_uses},
+        "efficiency": {use: float(def_eff.get(use, 1.0)) for use in end_uses},
+        "pv": {"enabled": False, "scale": 1.0},
+    }
+
+
+def capture_scenario_from_widgets(end_uses: list) -> dict:
+    """Capture current sidebar/widget values into a scenario payload."""
+    payload = {
+        "factors": {
+            "Electricity": float(st.session_state.get("co2_Emissions_Electricity", 0.300)),
+            "Green Electricity": float(st.session_state.get("co2_Emissions_Green_Electricity", 0.000)),
+            "Gas": float(st.session_state.get("co2_emissions_gas", 0.180)),
+            "District Heating": float(st.session_state.get("co2_emissions_dh", 0.260)),
+            "District Cooling": float(st.session_state.get("co2_emissions_dc", 0.280)),
+        },
+        "tariffs": {
+            "Electricity": float(st.session_state.get("cost_electricity", 0.35)),
+            "Green Electricity": float(st.session_state.get("cost_green_electricity", 0.40)),
+            "Gas": float(st.session_state.get("cost_gas", 0.12)),
+            "District Heating": float(st.session_state.get("cost_dh", 0.16)),
+            "District Cooling": float(st.session_state.get("cost_dc", 0.16)),
+        },
+        "mapping": {use: str(st.session_state.get(f"source_{use}", "Electricity")) for use in end_uses},
+        "efficiency": {use: float(st.session_state.get(f"eff_{use}", 1.0)) for use in end_uses},
+        "pv": {
+            "enabled": bool(st.session_state.get("pv_sc_enabled", False)),
+            "scale": float(st.session_state.get("pv_scale", 1.0)),
+        },
+    }
+    return payload
+
+
+def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
+    """Seed Streamlit widget state from a scenario payload.
+
+    This must run before widgets are created (or be followed by st.rerun).
+    """
+
+    def _set_num(key: str, value: float, fmt: str):
+        st.session_state[key] = float(value)
+        st.session_state[f"{key}_txt"] = fmt.format(float(value))
+
+    f = payload.get("factors", {})
+    t = payload.get("tariffs", {})
+    m = payload.get("mapping", {})
+    e = payload.get("efficiency", {})
+    pv = payload.get("pv", {})
+
+    _set_num("co2_Emissions_Electricity", float(f.get("Electricity", 0.300)), "{:.3f}")
+    _set_num("co2_Emissions_Green_Electricity", float(f.get("Green Electricity", 0.000)), "{:.3f}")
+    _set_num("co2_emissions_dh", float(f.get("District Heating", 0.260)), "{:.3f}")
+    _set_num("co2_emissions_dc", float(f.get("District Cooling", 0.280)), "{:.3f}")
+    _set_num("co2_emissions_gas", float(f.get("Gas", 0.180)), "{:.3f}")
+
+    _set_num("cost_electricity", float(t.get("Electricity", 0.35)), "{:.2f}")
+    _set_num("cost_green_electricity", float(t.get("Green Electricity", 0.40)), "{:.2f}")
+    _set_num("cost_dh", float(t.get("District Heating", 0.16)), "{:.2f}")
+    _set_num("cost_dc", float(t.get("District Cooling", 0.16)), "{:.2f}")
+    _set_num("cost_gas", float(t.get("Gas", 0.12)), "{:.2f}")
+
+    for use in end_uses:
+        st.session_state[f"source_{use}"] = str(m.get(use, "Electricity"))
+        _set_num(f"eff_{use}", float(e.get(use, 1.0)), "{:.3f}")
+
+    _set_num("pv_scale", float(pv.get("scale", 1.0)), "{:.3f}")
+    st.session_state["pv_sc_enabled"] = bool(pv.get("enabled", False))
 
 
 def build_efficiency_df(end_uses) -> pd.DataFrame:
@@ -462,7 +620,8 @@ def write_config_to_excel(original_bytes: bytes,
                           factors_df: pd.DataFrame,
                           tariffs_df: pd.DataFrame,
                           mapping_df: pd.DataFrame,
-                          efficiency_df: pd.DataFrame) -> bytes:
+                          efficiency_df: pd.DataFrame,
+                          scenarios_df: Optional[pd.DataFrame] = None) -> bytes:
     """Return a new workbook (bytes) with all original sheets + updated config sheets."""
     cfg = read_config_from_excel(original_bytes)
     sheets = cfg["all_sheets"]  # dict[name] -> df
@@ -473,6 +632,8 @@ def write_config_to_excel(original_bytes: bytes,
     sheets[SHEET_TARIFFS] = tariffs_df
     sheets[SHEET_MAPPING] = mapping_df
     sheets[SHEET_EFFICIENCY] = efficiency_df
+    if scenarios_df is not None:
+        sheets[SHEET_SCENARIOS] = scenarios_df
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -519,6 +680,7 @@ if uploaded_file:
         "tariffs": saved_tariffs,
         "mapping_df": saved_mapping_df,
         "efficiency": saved_efficiency,
+        "scenarios_df": cfg_saved.get("scenarios"),
         "file_bytes": file_bytes,
     }
 
@@ -542,8 +704,9 @@ st.title(st.session_state["project_name"])
 # =========================
 # Tabs
 # =========================
-tab1, tab1_factors, tab2, tab3, tab4, tab5 = st.tabs(
-    ["Energy Balance", "Energy Balance with Factors", "CO2 Emissions", "Energy Cost", "Loads Analysis", "Benchmark"])
+tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["Energy Balance", "Energy Balance with Factors", "CO2 Emissions", "Energy Cost", "Loads Analysis", "Benchmark",
+     "Scenarios"])
 
 # =========================
 # Tab 1 — Energy Balance (Energy Balance Tab)
@@ -555,6 +718,104 @@ with tab1:
 
         # ---- Wide->Long transform for plotting and grouping
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
+
+        # ---- Scenario Manager initialization (backwards compatible)
+        end_uses = df_melted["End_Use"].unique().tolist()
+
+        if "scenarios" not in st.session_state:
+            scenarios_from_file, active_from_file = parse_scenarios_sheet(
+                preloaded.get("scenarios_df") if preloaded else None
+            )
+            if scenarios_from_file:
+                st.session_state["scenarios"] = scenarios_from_file
+                st.session_state["active_scenario"] = active_from_file or list(scenarios_from_file.keys())[0]
+            else:
+                st.session_state["scenarios"] = {"Base": default_scenario_payload(end_uses, preloaded)}
+                st.session_state["active_scenario"] = "Base"
+            st.session_state["_prev_active_scenario"] = st.session_state["active_scenario"]
+            load_scenario_into_widgets(st.session_state["scenarios"][st.session_state["active_scenario"]], end_uses)
+
+        # ---- Sidebar: scenario manager UI
+        with st.sidebar.expander("Scenario Manager", expanded=True):
+            scenarios = st.session_state.get("scenarios", {})
+            scenario_names = list(scenarios.keys()) if scenarios else ["Base"]
+
+            # active scenario selector
+            active_idx = scenario_names.index(
+                st.session_state.get("active_scenario", scenario_names[0])) if st.session_state.get(
+                "active_scenario") in scenario_names else 0
+            active_selected = st.selectbox("Active Scenario", scenario_names, index=active_idx, key="active_scenario")
+
+            prev = st.session_state.get("_prev_active_scenario")
+            if prev is None:
+                st.session_state["_prev_active_scenario"] = active_selected
+                prev = active_selected
+
+            if active_selected != prev:
+                # persist current widgets into previous scenario, then load new scenario into widgets
+                if prev in scenarios:
+                    scenarios[prev] = capture_scenario_from_widgets(end_uses)
+                if active_selected in scenarios:
+                    load_scenario_into_widgets(scenarios[active_selected], end_uses)
+                st.session_state["_prev_active_scenario"] = active_selected
+                st.session_state["scenarios"] = scenarios
+                st.rerun()
+
+            # Scenario actions (stacked vertically for clarity)
+            if st.button("New", use_container_width=True, key="scenario_btn_new"):
+                # Save current first
+                scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
+                base_name = "Scenario"
+                n = 1
+                new_name = f"{base_name} {n}"
+                while new_name in scenarios:
+                    n += 1
+                    new_name = f"{base_name} {n}"
+                scenarios[new_name] = default_scenario_payload(end_uses, preloaded)
+                st.session_state["scenarios"] = scenarios
+                st.session_state["active_scenario"] = new_name
+                st.session_state["_prev_active_scenario"] = new_name
+                load_scenario_into_widgets(scenarios[new_name], end_uses)
+                st.rerun()
+
+            if st.button("Duplicate", use_container_width=True, key="scenario_btn_duplicate"):
+                scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
+                base_name = f"{active_selected} Copy"
+                new_name = base_name
+                i = 2
+                while new_name in scenarios:
+                    new_name = f"{base_name} {i}"
+                    i += 1
+                scenarios[new_name] = deepcopy(scenarios[active_selected])
+                st.session_state["scenarios"] = scenarios
+                st.session_state["active_scenario"] = new_name
+                st.session_state["_prev_active_scenario"] = new_name
+                load_scenario_into_widgets(scenarios[new_name], end_uses)
+                st.rerun()
+
+            rename_to = st.text_input("Rename to", value="", key="scenario_rename_to")
+            if st.button("Rename", use_container_width=True, key="scenario_btn_rename"):
+                rename_to_clean = str(rename_to).strip()
+                if rename_to_clean and rename_to_clean not in scenarios:
+                    scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
+                    scenarios[rename_to_clean] = scenarios.pop(active_selected)
+                    st.session_state["scenarios"] = scenarios
+                    st.session_state["active_scenario"] = rename_to_clean
+                    st.session_state["_prev_active_scenario"] = rename_to_clean
+                    load_scenario_into_widgets(scenarios[rename_to_clean], end_uses)
+                    st.rerun()
+
+            if st.button("Delete", use_container_width=True, key="scenario_btn_delete"):
+                if len(scenarios) > 1 and active_selected in scenarios:
+                    scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
+                    scenarios.pop(active_selected, None)
+                    new_active = list(scenarios.keys())[0]
+                    st.session_state["scenarios"] = scenarios
+                    st.session_state["active_scenario"] = new_active
+                    st.session_state["_prev_active_scenario"] = new_active
+                    load_scenario_into_widgets(scenarios[new_active], end_uses)
+                    st.rerun()
+            st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors and PV settings.")
 
         # ---- Sidebar: project info (prefill from saved if available)
         with st.sidebar.expander("Project Data"):
@@ -663,6 +924,10 @@ with tab1:
                 )
                 mapping_dict[use] = source
 
+        # ---- Persist current widget values back into the active scenario (for switching/comparison/save)
+        if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
+            st.session_state["scenarios"][st.session_state["active_scenario"]] = capture_scenario_from_widgets(end_uses)
+
         # ---- Save Project button (exports current inputs into the workbook)
         with st.sidebar:
             if st.button("Save Project", use_container_width=True):
@@ -692,8 +957,16 @@ with tab1:
                 mapping_df = build_mapping_df(end_uses)
                 efficiency_df = build_efficiency_df(end_uses)
 
+                # Scenarios sheet (stores all scenarios; active scenario marked)
+                scenarios_df = None
+                if "scenarios" in st.session_state:
+                    scenarios_df = build_scenarios_sheet(
+                        st.session_state.get("scenarios", {}),
+                        st.session_state.get("active_scenario")
+                    )
+
                 updated_bytes = write_config_to_excel(preloaded["file_bytes"], project_df, factors_df, tariffs_df,
-                                                      mapping_df, efficiency_df)
+                                                      mapping_df, efficiency_df, scenarios_df=scenarios_df)
 
                 st.success("Project settings saved to workbook.")
                 st.download_button(
@@ -932,6 +1205,183 @@ with tab1:
                     label=f"EUI - {row['Energy_Source']}",
                     value=f"{row['kWh_per_m2_per_source']:,.1f} kWh/m².a",
                 )
+
+    if not uploaded_file:
+        st.write("### ← Please upload data on sidebar")
+
+# =========================
+# Tab 6 — Scenarios (Scenario Manager comparison)
+# =========================
+with tab6:
+    if uploaded_file:
+        st.write("## Scenario Comparison")
+
+        # Use the same currency the user selected in the sidebar (fallback to preloaded or €)
+        _curr = None
+        try:
+            _curr = currency_symbol  # set in sidebar 'Energy Tariffs'
+        except Exception:
+            _curr = preloaded.get("currency") if preloaded else None
+        if not _curr:
+            _curr = "€"
+
+        _area = float(st.session_state.get("project_area", 0.0)) if st.session_state.get(
+            "project_area") is not None else 0.0
+        if _area <= 0:
+            try:
+                _area = float(project_area)
+            except Exception:
+                _area = 0.0
+
+        scenarios = st.session_state.get("scenarios", {})
+        if not scenarios:
+            st.info("No scenarios found. Use the Scenario Manager in the sidebar to create scenarios.")
+        else:
+            # Base data (monthly energy balance)
+            df = energy_balance_sheet(uploaded_file.getvalue())
+            df_base = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
+
+            rows = []
+            energy_rows = []  # per-source, per-scenario (factored) end energy intensity
+            cost_rows = []  # per-source, per-scenario (factored) cost intensity
+            emissions_rows = []  # per-source, per-scenario (factored) emissions intensity
+
+            for name, payload in scenarios.items():
+                payload = payload or {}
+                eff = (payload.get("efficiency") or {})
+                mapping = (payload.get("mapping") or {})
+                factors = (payload.get("factors") or {})
+                tariffs = (payload.get("tariffs") or {})
+
+                df_s = df_base.copy()
+                df_s["Efficiency_Factor"] = df_s["End_Use"].map(lambda u: float(eff.get(u, 1.0))).fillna(1.0)
+                df_s["kWh"] = df_s["kWh"] / df_s["Efficiency_Factor"]
+                df_s["Energy_Source"] = df_s["End_Use"].map(lambda u: str(mapping.get(u, "Electricity")))
+
+                # Annual energy (net includes PV, gross is consumption only)
+                totals_use = df_s.groupby("End_Use", as_index=False)["kWh"].sum()
+                net_kwh = float(totals_use["kWh"].sum())
+                gross_kwh = float(
+                    totals_use.loc[(totals_use["End_Use"] != "PV_Generation") & (totals_use["kWh"] > 0), "kWh"].sum())
+                pv_kwh = float(abs(totals_use.loc[totals_use["End_Use"] == "PV_Generation", "kWh"].sum()))
+
+                # CO2 and cost on consumption only (exclude PV_Generation and negative values)
+                df_cons = df_s[(df_s["End_Use"] != "PV_Generation") & (df_s["kWh"] > 0)].copy()
+                df_cons["co2_factor"] = df_cons["Energy_Source"].map(lambda s: float(factors.get(s, 0.0))).fillna(0.0)
+                df_cons["tariff"] = df_cons["Energy_Source"].map(lambda s: float(tariffs.get(s, 0.0))).fillna(0.0)
+                co2_kg = float((df_cons["kWh"] * df_cons["co2_factor"]).sum())
+                cost_val = float((df_cons["kWh"] * df_cons["tariff"]).sum())
+                # Per-source breakdown (consumption only) for scenario comparison charts (intensities)
+                if _area and _area > 0:
+                    df_src = df_cons.copy()
+                    df_src["cost"] = df_src["kWh"] * df_src["tariff"]
+                    df_src["co2_kg"] = df_src["kWh"] * df_src["co2_factor"]
+                    grp = df_src.groupby("Energy_Source", as_index=False).agg(
+                        kWh=("kWh", "sum"),
+                        cost=("cost", "sum"),
+                        co2_kg=("co2_kg", "sum"),
+                    )
+                    for _, r in grp.iterrows():
+                        src = r["Energy_Source"]
+                        energy_rows.append({
+                            "Scenario": str(name),
+                            "Energy_Source": src,
+                            "End Energy (kWh/m²·a)": float(r["kWh"]) / _area,
+                        })
+                        cost_rows.append({
+                            "Scenario": str(name),
+                            "Energy_Source": src,
+                            f"Cost ({_curr}/m²·a)": float(r["cost"]) / _area,
+                        })
+                        emissions_rows.append({
+                            "Scenario": str(name),
+                            "Energy_Source": src,
+                            "Emissions (kgCO₂e/m²·a)": float(r["co2_kg"]) / _area,
+                        })
+
+                rows.append({
+                    "Scenario": name,
+                    "Net Energy (kWh/a)": net_kwh,
+                    "Gross Consumption (kWh/a)": gross_kwh,
+                    "PV Generation (kWh/a)": pv_kwh,
+                    "CO2 (t/a)": co2_kg / 1000.0,
+                    f"Cost ({_curr}/a)": cost_val,
+                    "Net EUI (kWh/m²·a)": (net_kwh / _area) if _area else np.nan,
+                    "Gross EUI (kWh/m²·a)": (gross_kwh / _area) if _area else np.nan,
+                })
+
+            df_cmp = pd.DataFrame(rows).sort_values("Scenario")
+            st.dataframe(df_cmp, use_container_width=True)
+
+            # Scenario comparison charts (factored values, stacked by Energy Source)
+            if not _area or _area <= 0:
+                st.warning("Project Area must be greater than 0 to show per m² scenario charts.")
+            else:
+                scenario_order = [str(s) for s in df_cmp["Scenario"].tolist()]
+
+                # 1) End Energy /m² (factored) by energy source
+                df_energy_src = pd.DataFrame(energy_rows)
+                if not df_energy_src.empty:
+                    df_energy_src["Scenario"] = df_energy_src["Scenario"].astype(str)
+                    fig_end_energy = px.bar(
+                        df_energy_src,
+                        x="Scenario",
+                        y="End Energy (kWh/m²·a)",
+                        color="Energy_Source",
+                        barmode="stack",
+                        title="End Energy /m² (factored) by Energy Source and Scenario",
+                        category_orders={"Scenario": scenario_order},
+                        color_discrete_map=color_map_sources,
+                    )
+                    fig_end_energy.update_layout(
+                        xaxis_title="Scenario",
+                        yaxis_title="kWh/m²·a",
+                        legend_title_text="Energy Source",
+                    )
+                    st.plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
+
+                # 2) Energy Cost /m² (factored) by energy source
+                cost_col = f"Cost ({_curr}/m²·a)"
+                df_cost_src = pd.DataFrame(cost_rows)
+                if not df_cost_src.empty and cost_col in df_cost_src.columns:
+                    df_cost_src["Scenario"] = df_cost_src["Scenario"].astype(str)
+                    fig_cost = px.bar(
+                        df_cost_src,
+                        x="Scenario",
+                        y=cost_col,
+                        color="Energy_Source",
+                        barmode="stack",
+                        title=f"Energy Cost /m² (factored) by Energy Source and Scenario [{_curr}]",
+                        category_orders={"Scenario": scenario_order},
+                        color_discrete_map=color_map_sources,
+                    )
+                    fig_cost.update_layout(
+                        xaxis_title="Scenario",
+                        yaxis_title=f"{_curr}/m²·a",
+                        legend_title_text="Energy Source",
+                    )
+                    st.plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
+
+                # 3) Energy Emissions /m² (factored) by energy source
+                df_emis_src = pd.DataFrame(emissions_rows)
+                if not df_emis_src.empty:
+                    df_emis_src["Scenario"] = df_emis_src["Scenario"].astype(str)
+                    fig_emis = px.bar(
+                        df_emis_src,
+                        x="Scenario",
+                        y="Emissions (kgCO₂e/m²·a)",
+                        color="Energy_Source",
+                        barmode="stack",
+                        title="Energy Emissions /m² (factored) by Energy Source and Scenario",
+                        category_orders={"Scenario": scenario_order},
+                        color_discrete_map=color_map_sources,
+                    )
+                    fig_emis.update_layout(
+                        xaxis_title="Scenario",
+                        yaxis_title="kgCO₂e/m²·a",
+                        legend_title_text="Energy Source",
+                    )
+                    st.plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
@@ -1860,6 +2310,110 @@ with tab4:
         st.subheader(f"Load Duration Curve — {selected_load}")
         st.plotly_chart(ldc_fig, use_container_width=True)
 
+        # -------------------------
+        # PV Self-Consumption (hourly) — uses PV_Generation from Loads_Balance
+        # -------------------------
+        st.subheader("PV Self-Consumption (hourly) — PV_Generation")
+        pv_col = "PV_Generation" if "PV_Generation" in df_loads.columns else None
+        if pv_col is None:
+            st.warning(
+                "No hourly PV generation column 'PV_Generation' found in Loads_Balance. Add it to enable PV self-consumption.")
+        else:
+            pv_enabled = st.checkbox(
+                "Enable PV self-consumption using PV_Generation",
+                value=bool(st.session_state.get("pv_sc_enabled", False)),
+                key="pv_sc_enabled",
+            )
+            pv_scale = numeric_input(
+                "PV scale factor (dimensionless)",
+                float(st.session_state.get("pv_scale", 1.0)),
+                key="pv_scale",
+                min_value=0.0,
+                max_value=1000.0,
+                fmt="{:.3f}",
+                help="Scales the PV_Generation profile (e.g., 0.5 = half size, 2.0 = double size)."
+            )
+
+            # Persist PV settings into the active scenario (without touching other scenario fields)
+            if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state[
+                "scenarios"]:
+                _act = st.session_state.get("active_scenario")
+                _payload = st.session_state["scenarios"].get(_act, {}) or {}
+                if not isinstance(_payload.get("pv"), dict):
+                    _payload["pv"] = {}
+                _payload["pv"]["enabled"] = bool(pv_enabled)
+                _payload["pv"]["scale"] = float(pv_scale)
+                st.session_state["scenarios"][_act] = _payload
+
+            if pv_enabled:
+                load_series = pd.to_numeric(df_loads[selected_load], errors="coerce").fillna(0.0).clip(lower=0.0)
+                pv_series = pd.to_numeric(df_loads[pv_col], errors="coerce").fillna(0.0).clip(lower=0.0) * float(
+                    pv_scale)
+
+                export = np.maximum(pv_series - load_series, 0.0)
+                self_consumed = pv_series - export  # == min(load, pv)
+                grid_import = np.maximum(load_series - pv_series, 0.0)
+
+                pv_total = float(pv_series.sum())
+                load_total = float(load_series.sum())
+                self_total = float(self_consumed.sum())
+                export_total = float(export.sum())
+                import_total = float(grid_import.sum())
+
+                sc_ratio = (self_total / pv_total) if pv_total > 0 else 0.0
+                coverage_ratio = (self_total / load_total) if load_total > 0 else 0.0
+
+                k1, k2, k3, k4, k5, k6 = st.columns(6)
+                k1.metric("PV generation", f"{pv_total:,.0f} kWh")
+                k2.metric("Self-consumed PV", f"{self_total:,.0f} kWh")
+                k3.metric("PV export", f"{export_total:,.0f} kWh")
+                k4.metric("Grid import after PV", f"{import_total:,.0f} kWh")
+                k5.metric("Self-consumption ratio", f"{sc_ratio * 100:,.1f} %")
+                k6.metric("PV coverage of load", f"{coverage_ratio * 100:,.1f} %")
+
+                # Peak-day overlay: load vs PV vs net import
+                pv_day = (df_loads.loc[df_loads["doy"] == peak_doy, ["hour", pv_col]]
+                          .copy())
+                pv_day["hour"] = pd.to_numeric(pv_day["hour"], errors="coerce")
+                pv_day[pv_col] = pd.to_numeric(pv_day[pv_col], errors="coerce").fillna(0.0).clip(lower=0.0) * float(
+                    pv_scale)
+                pv_day = pv_day.sort_values("hour")
+
+                net_day = np.maximum(
+                    pd.to_numeric(day_profile[selected_load], errors="coerce").fillna(0.0).clip(lower=0.0).values
+                    - pv_day[pv_col].values,
+                    0.0
+                )
+
+                fig_pv = go.Figure()
+                fig_pv.add_trace(go.Scatter(x=day_profile["hour"], y=day_profile[selected_load], mode="lines+markers",
+                                            name="Load", line=dict(color=bar_color, width=6)))
+                fig_pv.add_trace(go.Scatter(x=pv_day["hour"], y=pv_day[pv_col], mode="lines+markers",
+                                            name="PV",
+                                            line=dict(color=color_map.get("PV_Generation", "#a9c724"), width=5,
+                                                      dash="dash")))
+                fig_pv.add_trace(go.Scatter(x=day_profile["hour"], y=net_day, mode="lines",
+                                            name="Net import", line=dict(color="black", width=5)))
+                fig_pv.update_layout(
+                    title=f"PV Matching on Peak Day — {selected_load} | {date_label}",
+                    xaxis_title="Hour of Day",
+                    yaxis_title="kW",
+                    xaxis=dict(dtick=1),
+                    height=700,
+                )
+                st.plotly_chart(fig_pv, use_container_width=True,
+                                key=f"pv_match_peak_{st.session_state.get('active_scenario', '')}_{selected_load}")
+
+                # Annual split: load covered by PV vs grid import
+                split_df = pd.DataFrame({
+                    "Component": ["Covered by PV (self-consumed)", "Grid import"],
+                    "kWh": [self_total, import_total]
+                })
+                split_fig = px.pie(split_df, names="Component", values="kWh",
+                                   title="Annual Electricity Supply Split (selected load)")
+                st.plotly_chart(split_fig, use_container_width=True,
+                                key=f"pv_split_{st.session_state.get('active_scenario', '')}_{selected_load}")
+
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
 
@@ -2153,4 +2707,3 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
-
