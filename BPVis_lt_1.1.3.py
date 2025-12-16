@@ -1518,6 +1518,42 @@ with tab4:
         st.plotly_chart(peak_day_fig, use_container_width=True)
         st.caption(f"Daily Total on {date_label}: {peak_total:,.1f}")
 
+
+        # --- Load Duration Curve (percentage of hours vs load) ---
+        # Ensure numeric and drop NaNs
+        ldc_vals = pd.to_numeric(df_loads[selected_load], errors="coerce").dropna()
+
+        # Sort descending (exceedance)
+        ldc_sorted = ldc_vals.sort_values(ascending=False).reset_index(drop=True)
+
+        # Percentage of hours (0–100%)
+        ldc_pct = (np.arange(1, len(ldc_sorted) + 1) / len(ldc_sorted)) * 100
+
+        ldc_df = pd.DataFrame({
+            "Percentage of Hours (%)": ldc_pct,
+            f"{selected_load} (kW)": ldc_sorted.values
+        })
+
+        ldc_fig = px.line(
+            ldc_df,
+            x="Percentage of Hours (%)",
+            y=f"{selected_load} (kW)",
+            title=f"Load Duration Curve — {selected_load}"
+        )
+        ldc_fig.update_traces(line=dict(width=6, color=bar_color))
+        r, g, b = pc.hex_to_rgb(bar_color)
+        ldc_fig.update_traces(fill="tozeroy", fillcolor=f"rgba({r},{g},{b},0.25)")
+        ldc_fig.update_layout(
+            xaxis_title="Percentage of Hours (%)",
+            yaxis_title=f"{selected_load} (kW)",
+            xaxis=dict(range=[0, 100], dtick=10, ticksuffix="%"),
+            height=700,
+            showlegend=False
+        )
+
+        st.subheader(f"Load Duration Curve — {selected_load}")
+        st.plotly_chart(ldc_fig, use_container_width=True)
+
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
 
