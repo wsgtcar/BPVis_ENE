@@ -1020,10 +1020,19 @@ with tab1:
             default_year = st.session_state.get("project_year")
             if default_year is None:
                 default_year = preloaded.get("year") if (preloaded and preloaded.get("year") is not None) else 2025
-            project_year = numeric_input("Year", float(default_year), key="project_year", min_value=2020.0, max_value=2050.0, fmt="{:.0f}")
-            # enforce integer year
-            st.session_state["project_year"] = int(round(float(project_year)))
-            st.session_state["project_year_txt"] = str(st.session_state["project_year"])
+
+            # Year must be an integer. Use number_input (not the custom text-based numeric_input)
+            # to avoid modifying a widget-bound *_txt key after instantiation.
+            project_year = st.number_input(
+                "Year",
+                value=int(default_year),
+                min_value=2020,
+                max_value=2050,
+                step=1,
+                format="%d",
+                key="project_year",
+            )
+
 
             latitude = numeric_input(
                 "Project Latitude",
