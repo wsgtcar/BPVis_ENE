@@ -43,7 +43,7 @@ def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None,
 
 
 import numpy as np
-import plotly.colors as pc
+import plotly.colors as pcolors
 from typing import Optional, Tuple, Dict
 
 ### Werner Sobek Green Technologies GmbH. All rights reserved.###
@@ -2863,7 +2863,7 @@ with tab4:
             showlegend=False
         )
 
-        r, g, b = pc.hex_to_rgb(bar_color)
+        r, g, b = pcolors.hex_to_rgb(bar_color)
         peak_day_fig.update_traces(marker_color=bar_color, fill="tozeroy",
                                    fillcolor=f"rgba({r},{g},{b},0.25)")
 
@@ -2893,7 +2893,7 @@ with tab4:
             title=f"Load Duration Curve — {selected_load}"
         )
         ldc_fig.update_traces(line=dict(width=6, color=bar_color))
-        r, g, b = pc.hex_to_rgb(bar_color)
+        r, g, b = pcolors.hex_to_rgb(bar_color)
         ldc_fig.update_traces(fill="tozeroy", fillcolor=f"rgba({r},{g},{b},0.25)")
         ldc_fig.update_layout(
             xaxis_title="Percentage of Hours (%)",
