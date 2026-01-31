@@ -68,7 +68,7 @@ END_USE_ORDER = [
     "Heating", "Cooling", "Ventilation", "Lighting",
     "Equipment", "HotWater", "Pumps", "Other", "PV_Generation"
 ]
-ENERGY_SOURCE_ORDER = ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling"]
+ENERGY_SOURCE_ORDER = ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling", "Biomass"]
 
 # Color maps (keep appearance identical to your current version)
 color_map = {
@@ -86,6 +86,7 @@ color_map = {
     "Gas": "#c9d302",
     "District Heating": "#ec6939",
     "District Cooling": "#5a5ea5",
+    "Biomass": "#8b5a2b",
     # negative values will still be this color
 }
 color_map_sources = {
@@ -94,6 +95,7 @@ color_map_sources = {
     "Gas": "#c9d302",
     "District Heating": "#ec6939",
     "District Cooling": "#5a5ea5",
+    "Biomass": "#8b5a2b",
 }
 
 # --- NEW: ensure a default project name exists before rendering the title
@@ -313,6 +315,7 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
             "Gas": float(def_f.get("Gas", 0.180)),
             "District Heating": float(def_f.get("District Heating", 0.260)),
             "District Cooling": float(def_f.get("District Cooling", 0.280)),
+            "Biomass": float(def_f.get("Biomass", 0.000)),
         },
         "tariffs": {
             "Electricity": float(def_t.get("Electricity", 0.35)),
@@ -320,6 +323,7 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
             "Gas": float(def_t.get("Gas", 0.12)),
             "District Heating": float(def_t.get("District Heating", 0.16)),
             "District Cooling": float(def_t.get("District Cooling", 0.16)),
+            "Biomass": float(def_t.get("Biomass", 0.10)),
         },
         "mapping": {use: str(saved_mapping.get(use, "Electricity")) for use in end_uses},
         "efficiency": {use: float(def_eff.get(use, 1.0)) for use in end_uses},
@@ -336,6 +340,7 @@ def capture_scenario_from_widgets(end_uses: list) -> dict:
             "Gas": float(st.session_state.get("co2_emissions_gas", 0.180)),
             "District Heating": float(st.session_state.get("co2_emissions_dh", 0.260)),
             "District Cooling": float(st.session_state.get("co2_emissions_dc", 0.280)),
+            "Biomass": float(st.session_state.get("co2_emissions_biomass", 0.000)),
         },
         "tariffs": {
             "Electricity": float(st.session_state.get("cost_electricity", 0.35)),
@@ -343,6 +348,7 @@ def capture_scenario_from_widgets(end_uses: list) -> dict:
             "Gas": float(st.session_state.get("cost_gas", 0.12)),
             "District Heating": float(st.session_state.get("cost_dh", 0.16)),
             "District Cooling": float(st.session_state.get("cost_dc", 0.16)),
+            "Biomass": float(st.session_state.get("cost_biomass", 0.10)),
         },
         "mapping": {use: str(st.session_state.get(f"source_{use}", "Electricity")) for use in end_uses},
         "efficiency": {use: float(st.session_state.get(f"eff_{use}", 1.0)) for use in end_uses},
@@ -375,12 +381,14 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
     _set_num("co2_emissions_dh", float(f.get("District Heating", 0.260)), "{:.3f}")
     _set_num("co2_emissions_dc", float(f.get("District Cooling", 0.280)), "{:.3f}")
     _set_num("co2_emissions_gas", float(f.get("Gas", 0.180)), "{:.3f}")
+    _set_num("co2_emissions_biomass", float(f.get("Biomass", 0.000)), "{:.3f}")
 
     _set_num("cost_electricity", float(t.get("Electricity", 0.35)), "{:.2f}")
     _set_num("cost_green_electricity", float(t.get("Green Electricity", 0.40)), "{:.2f}")
     _set_num("cost_dh", float(t.get("District Heating", 0.16)), "{:.2f}")
     _set_num("cost_dc", float(t.get("District Cooling", 0.16)), "{:.2f}")
     _set_num("cost_gas", float(t.get("Gas", 0.12)), "{:.2f}")
+    _set_num("cost_biomass", float(t.get("Biomass", 0.10)), "{:.2f}")
 
     for use in end_uses:
         st.session_state[f"source_{use}"] = str(m.get(use, "Electricity"))
@@ -404,19 +412,34 @@ def build_project_df(project_name: str, project_area: float, currency_symbol: st
     )
 
 
-def build_factors_df(co2_elec: float, co2_green: float, co2_dh: float, co2_dc: float, co2_gas: float) -> pd.DataFrame:
+def build_factors_df(
+        co2_elec: float,
+        co2_green: float,
+        co2_dh: float,
+        co2_dc: float,
+        co2_gas: float,
+        co2_biomass: float,
+) -> pd.DataFrame:
+    """Build Emission_Factors sheet."""
     # Keep a clear mapping independent of ENERGY_SOURCE_ORDER variable ordering
     return pd.DataFrame({
-        "Energy_Source": ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling"],
-        "Factor_kgCO2_per_kWh": [co2_elec, co2_green, co2_gas, co2_dh, co2_dc]
+        "Energy_Source": ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling", "Biomass"],
+        "Factor_kgCO2_per_kWh": [co2_elec, co2_green, co2_gas, co2_dh, co2_dc, co2_biomass],
     })
 
 
-def build_tariffs_df(cost_elec: float, cost_green: float, cost_dh: float, cost_dc: float,
-                     cost_gas: float) -> pd.DataFrame:
+def build_tariffs_df(
+        cost_elec: float,
+        cost_green: float,
+        cost_dh: float,
+        cost_dc: float,
+        cost_gas: float,
+        cost_biomass: float,
+) -> pd.DataFrame:
+    """Build Energy_Tariffs sheet."""
     return pd.DataFrame({
-        "Energy_Source": ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling"],
-        "Tariff_per_kWh": [cost_elec, cost_green, cost_gas, cost_dh, cost_dc]
+        "Energy_Source": ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling", "Biomass"],
+        "Tariff_per_kWh": [cost_elec, cost_green, cost_gas, cost_dh, cost_dc, cost_biomass],
     })
 
 
@@ -433,10 +456,15 @@ def build_mapping_df(end_uses) -> pd.DataFrame:
 
 def parse_project_df_with_building_use(
         df: Optional[pd.DataFrame]
-) -> Tuple[Optional[str], Optional[float], Optional[str], Optional[str], Optional[float], Optional[float]]:
-    """Parse Project_Data sheet (name, area, currency, building use, latitude, longitude)."""
+) -> Tuple[Optional[str], Optional[float], Optional[str], Optional[str], Optional[float], Optional[float], Optional[int]]:
+    """Parse Project_Data sheet (name, area, currency, building use, latitude, longitude, year).
+
+    Backwards compatible:
+      - accepts missing Year
+      - accepts either 'Year' or 'Project_Year'
+    """
     if df is None or not {"Key", "Value"}.issubset(df.columns):
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     kv = dict(zip(df["Key"].astype(str), df["Value"]))
 
@@ -444,18 +472,28 @@ def parse_project_df_with_building_use(
     currency = kv.get("Currency")
     building_use = kv.get("Building_Use")
 
-    # coerce to floats where possible
     def _to_float(x):
         try:
             return float(x) if x is not None and str(x).strip() != "" else None
         except Exception:
             return None
 
+    def _to_int(x):
+        try:
+            if x is None or str(x).strip() == "":
+                return None
+            return int(float(str(x).replace(",", ".")))
+        except Exception:
+            return None
+
     area = _to_float(kv.get("Project_Area"))
     latitude_saved = _to_float(kv.get("Project_Latitude"))
     longitude_saved = _to_float(kv.get("Project_Longitude"))
+    year_saved = _to_int(kv.get("Year"))
+    if year_saved is None:
+        year_saved = _to_int(kv.get("Project_Year"))
 
-    return name, area, currency, building_use, latitude_saved, longitude_saved
+    return name, area, currency, building_use, latitude_saved, longitude_saved, year_saved
 
 
 def build_project_df_with_building_use(
@@ -465,8 +503,9 @@ def build_project_df_with_building_use(
         building_use: str,
         latitude: Optional[float],
         longitude: Optional[float],
+        year: Optional[int],
 ) -> pd.DataFrame:
-    """Build the Project_Data sheet including lat/long."""
+    """Build the Project_Data sheet including lat/long and year."""
     return pd.DataFrame(
         {
             "Key": [
@@ -476,6 +515,7 @@ def build_project_df_with_building_use(
                 "Building_Use",
                 "Project_Latitude",
                 "Project_Longitude",
+                "Year",
             ],
             "Value": [
                 project_name,
@@ -484,6 +524,7 @@ def build_project_df_with_building_use(
                 building_use,
                 latitude,
                 longitude,
+                year,
             ],
         }
     )
@@ -645,6 +686,89 @@ def write_config_to_excel(original_bytes: bytes,
     return buf.getvalue()
 
 
+
+# =========================
+# CRREM (Germany) — data loader & helpers
+# =========================
+
+CRREM_DATA_CANDIDATES = [
+    Path("templates/CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx"),
+    Path("CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx"),
+    Path("data/CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx"),
+]
+
+
+@st.cache_data(show_spinner=False)
+def load_crrem_de_dataset() -> Optional[dict]:
+    """Load the compact CRREM DE extract workbook (pathways + DE grid EF series).
+
+    Returns None if the file is not found.
+    """
+    path = None
+    for p in CRREM_DATA_CANDIDATES:
+        try:
+            if p.exists():
+                path = p
+                break
+        except Exception:
+            continue
+
+    if path is None:
+        return None
+
+    try:
+        property_types = pd.read_excel(path, sheet_name="PROPERTY_TYPES")
+        pathways_carbon = pd.read_excel(path, sheet_name="PATHWAYS_CARBON_DE")
+        pathways_eui = pd.read_excel(path, sheet_name="PATHWAYS_EUI_DE")
+        ef = pd.read_excel(path, sheet_name="EMISSION_FACTORS_DE")
+    except Exception:
+        return None
+
+    # Germany electricity EF (kgCO2e/kWh) time-series
+    ef_grid = (
+        ef.loc[ef["energy_carrier"].astype(str) == "grid_electricity", ["year", "kgco2e_per_kwh"]]
+        .dropna()
+        .astype({"year": int, "kgco2e_per_kwh": float})
+        .set_index("year")["kgco2e_per_kwh"]
+        .sort_index()
+    )
+    if ef_grid.empty:
+        return None
+
+    return {
+        "path": str(path),
+        "property_types": property_types,
+        "pathways_carbon": pathways_carbon,
+        "pathways_eui": pathways_eui,
+        "ef_grid": ef_grid,
+    }
+
+
+def _clamp_year_to_series(year: int, s: pd.Series) -> int:
+    y_min, y_max = int(s.index.min()), int(s.index.max())
+    return int(max(y_min, min(y_max, int(year))))
+
+
+def compute_decarb_multiplier(ef_grid: pd.Series, base_year: int, years: list) -> pd.Series:
+    """Return multiplier m(year) = EF_grid(year) / EF_grid(base_year)."""
+    base_year_c = _clamp_year_to_series(base_year, ef_grid)
+    denom = float(ef_grid.loc[base_year_c])
+    if denom == 0:
+        return pd.Series({int(y): 1.0 for y in years})
+    return ef_grid.reindex([int(y) for y in years]).astype(float) / denom
+
+
+def find_stranding_year(asset: pd.Series, limit: pd.Series) -> Optional[int]:
+    """First year where asset exceeds limit (strictly >)."""
+    df = pd.DataFrame({"asset": asset, "limit": limit}).dropna()
+    if df.empty:
+        return None
+    over = df["asset"] > df["limit"]
+    if not over.any():
+        return None
+    return int(df.index[over].min())
+
+
 # =========================
 # Preload any saved configuration (if an Excel is uploaded)
 # =========================
@@ -653,7 +777,7 @@ if uploaded_file:
     file_bytes = uploaded_file.getvalue()
     cfg_saved = read_config_from_excel(file_bytes)
 
-    saved_name, saved_area, saved_currency, saved_building_use, saved_lat, saved_lon = \
+    saved_name, saved_area, saved_currency, saved_building_use, saved_lat, saved_lon, saved_year = \
         parse_project_df_with_building_use(cfg_saved["project"])
 
     saved_factors = parse_factors_df(cfg_saved["factors"])
@@ -676,6 +800,7 @@ if uploaded_file:
         "building_use": saved_building_use,
         "lat": saved_lat,
         "lon": saved_lon,
+        "year": saved_year,
         "factors": saved_factors,
         "tariffs": saved_tariffs,
         "mapping_df": saved_mapping_df,
@@ -712,6 +837,20 @@ if uploaded_file:
             except Exception:
                 pass
 
+        if preloaded.get("year") is not None:
+            try:
+                st.session_state["project_year"] = int(float(preloaded["year"]))
+                st.session_state["project_year_txt"] = str(int(float(preloaded["year"])))
+            except Exception:
+                pass
+
+        if preloaded.get("year") is not None:
+            try:
+                st.session_state["project_year"] = int(float(preloaded["year"]))
+                st.session_state["project_year_txt"] = str(int(float(preloaded["year"])))
+            except Exception:
+                pass
+
         if preloaded.get("building_use"):
             st.session_state["building_use"] = str(preloaded["building_use"])
 
@@ -735,9 +874,9 @@ st.title(st.session_state["project_name"])
 # =========================
 # Tabs
 # =========================
-tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
     ["Energy Balance", "Energy Balance with Factors", "CO2 Emissions", "Energy Cost", "Loads Analysis", "Benchmark",
-     "Scenarios"])
+     "CRREM-Analysis", "Scenarios"])
 
 # =========================
 # Tab 1 — Energy Balance (Energy Balance Tab)
@@ -878,6 +1017,14 @@ with tab1:
             project_name = st.text_input("Project Name", value=str(default_name), key="project_name")
             project_area = numeric_input("Project Area", float(default_area), key="project_area", min_value=0.0)
 
+            default_year = st.session_state.get("project_year")
+            if default_year is None:
+                default_year = preloaded.get("year") if (preloaded and preloaded.get("year") is not None) else 2025
+            project_year = numeric_input("Year", float(default_year), key="project_year", min_value=2020.0, max_value=2050.0, fmt="{:.0f}")
+            # enforce integer year
+            st.session_state["project_year"] = int(round(float(project_year)))
+            st.session_state["project_year_txt"] = str(st.session_state["project_year"])
+
             latitude = numeric_input(
                 "Project Latitude",
                 float(default_lat),
@@ -919,6 +1066,8 @@ with tab1:
                                              key="co2_emissions_dc", min_value=0.0, max_value=1.0, fmt="{:.3f}")
             co2_emissions_gas = numeric_input("CO2 Factor Gas", float(def_f.get("Gas", 0.180)), key="co2_emissions_gas",
                                               min_value=0.0, max_value=1.0, fmt="{:.3f}")
+            co2_emissions_biomass = numeric_input("CO2 Factor Biomass", float(def_f.get("Biomass", 0.000)), key="co2_emissions_biomass",
+                                                  min_value=0.0, max_value=5.0, fmt="{:.3f}")
 
         # --- Energy Cost (€/kWh) ---
         with st.sidebar.expander("Energy Tariffs"):
@@ -943,6 +1092,8 @@ with tab1:
                                     max_value=100.0, fmt="{:.2f}")
             cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.12)), key="cost_gas",
                                      min_value=0.0, max_value=100.0, fmt="{:.2f}")
+            cost_biomass = numeric_input(f"Cost Biomass ({currency_symbol}/kWh)", float(def_t.get("Biomass", 0.10)), key="cost_biomass",
+                                         min_value=0.0, max_value=100.0, fmt="{:.2f}")
 
         # ---- Sidebar: efficiency factors per End_Use (used in 'Energy Balance with Factors' tab)
         with st.sidebar.expander("Efficiency Factors"):
@@ -1005,11 +1156,25 @@ with tab1:
                     building_use,
                     lat_val,
                     lon_val,
+                    int(st.session_state.get("project_year", 2025)),
                 )
 
-                factors_df = build_factors_df(co2_Emissions_Electricity, co2_Emissions_Green_Electricity,
-                                              co2_emissions_dh, co2_emissions_dc, co2_emissions_gas)
-                tariffs_df = build_tariffs_df(cost_electricity, cost_green_electricity, cost_dh, cost_dc, cost_gas)
+                factors_df = build_factors_df(
+                    co2_Emissions_Electricity,
+                    co2_Emissions_Green_Electricity,
+                    co2_emissions_dh,
+                    co2_emissions_dc,
+                    co2_emissions_gas,
+                    co2_emissions_biomass,
+                )
+                tariffs_df = build_tariffs_df(
+                    cost_electricity,
+                    cost_green_electricity,
+                    cost_dh,
+                    cost_dc,
+                    cost_gas,
+                    cost_biomass,
+                )
                 mapping_df = build_mapping_df(end_uses)
                 efficiency_df = build_efficiency_df(end_uses)
 
@@ -1268,7 +1433,272 @@ with tab1:
 # =========================
 # Tab 6 — Scenarios (Scenario Manager comparison)
 # =========================
+
+# =========================
+# Tab 6 — CRREM-Analysis
+# =========================
 with tab6:
+    if uploaded_file:
+        st.write("## CRREM-Analysis (Germany)")
+
+        crrem = load_crrem_de_dataset()
+        if crrem is None:
+            st.warning(
+                "CRREM dataset not found. Place 'CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx' in the app root or in the 'templates/' folder."
+            )
+        else:
+            # --- Controls
+            target_label = st.selectbox(
+                "Target (temperature pathway)",
+                ["1.5°C", "2°C"],
+                index=0,
+                key="crrem_target_select",
+            )
+            target_id = "1.5C" if target_label.startswith("1.5") else "2C"
+
+            pt_df = crrem["property_types"].copy()
+            use_options = pt_df["app_use"].dropna().astype(str).tolist()
+            # keep Mixed Use last (if present)
+            if "Mixed Use" in use_options:
+                use_options = [u for u in use_options if u != "Mixed Use"] + ["Mixed Use"]
+
+            # Default CRREM use based on the app's Building Use (best-effort mapping)
+            if "crrem_use_type" not in st.session_state or st.session_state.get("crrem_use_type") not in use_options:
+                bu = str(st.session_state.get("building_use", "Office"))
+                bu_map = {
+                    "Office": "Office",
+                    "Retail": "Retail, High Street",
+                    "Residential": "Residential",
+                    "Healthcare": "Healthcare",
+                    "Hospitality": "Hotel",
+                    "Industrial": "Industrial, Distribution Warehouse",
+                    "Leisure": "Lodging, Leisure & Recreation",
+                    "Education": "Office",
+                }
+                st.session_state["crrem_use_type"] = bu_map.get(bu, "Office")
+
+            crrem_use = st.selectbox(
+                "CRREM Use Type",
+                use_options,
+                index=use_options.index(st.session_state["crrem_use_type"]) if st.session_state["crrem_use_type"] in use_options else 0,
+                key="crrem_use_type",
+            )
+
+            mixed_components = None
+            if crrem_use == "Mixed Use":
+                st.caption("Define area shares per use-type (must sum to 100%).")
+                if "crrem_mixed_use_df" not in st.session_state:
+                    st.session_state["crrem_mixed_use_df"] = pd.DataFrame({
+                        "Use Type": ["Office", "Retail, High Street"],
+                        "Area Share %": [50.0, 50.0],
+                    })
+                editor_kwargs = {
+                    "num_rows": "dynamic",
+                    "use_container_width": True,
+                    "key": "crrem_mixed_use_editor",
+                }
+                if hasattr(st, "column_config"):
+                    editor_kwargs["column_config"] = {
+                        "Use Type": st.column_config.SelectboxColumn(
+                            "Use Type",
+                            options=[u for u in use_options if u != "Mixed Use"],
+                            required=True,
+                        ),
+                        "Area Share %": st.column_config.NumberColumn(
+                            "Area Share %",
+                            min_value=0.0,
+                            max_value=100.0,
+                            step=1.0,
+                            format="%.1f",
+                        ),
+                    }
+
+                mixed_df = st.data_editor(
+                    st.session_state["crrem_mixed_use_df"],
+                    **editor_kwargs,
+                )
+                st.session_state["crrem_mixed_use_df"] = mixed_df
+
+                total_share = float(mixed_df["Area Share %"].fillna(0.0).sum()) if not mixed_df.empty else 0.0
+                if abs(total_share - 100.0) > 0.5:
+                    st.warning(f"Mixed use shares sum to {total_share:.1f}%. Adjust to 100% for CRREM blending.")
+                # build components list (exclude empty/zero)
+                mixed_components = [
+                    (str(r["Use Type"]), float(r["Area Share %"]))
+                    for _, r in mixed_df.iterrows()
+                    if str(r.get("Use Type", "")).strip() and float(r.get("Area Share %", 0.0) or 0.0) > 0.0
+                ]
+
+            # --- Project and scenario inputs
+            project_area_val = float(st.session_state.get("project_area", 0.0) or 0.0)
+            if project_area_val <= 0:
+                st.error("Project Area must be greater than 0 to run CRREM analysis.")
+            else:
+                project_year_val = int(st.session_state.get("project_year", 2025))
+                # Use annual energy from the uploaded Energy_Balance sheet, adjusted by the active scenario:
+                df_crrem = energy_balance_sheet(uploaded_file.getvalue())
+                df_crrem_m = df_crrem.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
+
+                # Apply efficiency factors (scenario-specific)
+                eff_map_crrem = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_crrem_m["End_Use"].unique()}
+                df_crrem_m["Efficiency_Factor"] = df_crrem_m["End_Use"].map(eff_map_crrem).fillna(1.0)
+                df_crrem_m["kWh_adj"] = df_crrem_m["kWh"] / df_crrem_m["Efficiency_Factor"]
+
+                # Apply PV sizing toggle/scale (scenario-specific)
+                pv_enabled = bool(st.session_state.get("pv_sc_enabled", False))
+                pv_scale = float(st.session_state.get("pv_scale", 1.0))
+                pv_mask = df_crrem_m["End_Use"].astype(str) == "PV_Generation"
+                if pv_mask.any():
+                    if pv_enabled:
+                        df_crrem_m.loc[pv_mask, "kWh_adj"] = df_crrem_m.loc[pv_mask, "kWh_adj"] * pv_scale
+                    else:
+                        df_crrem_m.loc[pv_mask, "kWh_adj"] = 0.0
+                    # Enforce PV as an electricity offset (negative)
+                    df_crrem_m.loc[pv_mask, "kWh_adj"] = -df_crrem_m.loc[pv_mask, "kWh_adj"].abs()
+
+                # Energy source mapping (scenario-specific)
+                src_map_crrem = {u: st.session_state.get(f"source_{u}", "Electricity") for u in df_crrem_m["End_Use"].unique()}
+                df_crrem_m["Energy_Source"] = df_crrem_m["End_Use"].map(src_map_crrem).fillna("Electricity")
+                # normalize unknown sources
+                df_crrem_m.loc[~df_crrem_m["Energy_Source"].isin(ENERGY_SOURCE_ORDER), "Energy_Source"] = "Electricity"
+                # PV always offsets Electricity
+                df_crrem_m.loc[pv_mask, "Energy_Source"] = "Electricity"
+
+                # Annual kWh per source (net, PV included as negative electricity)
+                annual_kwh_by_source = df_crrem_m.groupby("Energy_Source", as_index=True)["kWh_adj"].sum()
+
+                # CRREM EUI is consumption-only (exclude PV_Generation)
+                annual_consumption_kwh = df_crrem_m.loc[~pv_mask, "kWh_adj"].sum()
+                eui_asset = float(annual_consumption_kwh) / project_area_val
+
+                # Base (user) emission factors at project_year
+                base_factors = {
+                    "Electricity": float(st.session_state.get("co2_Emissions_Electricity", 0.0)),
+                    "Green Electricity": 0.0,  # forced to 0 per project rule
+                    "Gas": float(st.session_state.get("co2_emissions_gas", 0.0)),
+                    "District Heating": float(st.session_state.get("co2_emissions_dh", 0.0)),
+                    "District Cooling": float(st.session_state.get("co2_emissions_dc", 0.0)),
+                    "Biomass": float(st.session_state.get("co2_emissions_biomass", 0.0)),
+                }
+
+                # Decarbonization multiplier based on CRREM DE grid electricity EF series
+                ef_grid = crrem["ef_grid"]
+                # analysis horizon (scenario: start at project year; cap at CRREM data horizon)
+                min_year = int(max(ef_grid.index.min(), 2020))
+                max_year = int(min(ef_grid.index.max(), 2050))
+                start_year = max(int(project_year_val), min_year)
+                years = list(range(start_year, max_year + 1))
+
+                m = compute_decarb_multiplier(ef_grid, int(project_year_val), years)
+
+                # Net annual emissions (kgCO2e) in the base year, excluding Green Electricity (EF=0)
+                emissions_base = 0.0
+                for src, kwh in annual_kwh_by_source.items():
+                    if str(src) == "Green Electricity":
+                        continue
+                    emissions_base += float(kwh) * float(base_factors.get(str(src), 0.0))
+
+                emissions_series = pd.Series({y: float(emissions_base) * float(m.loc[y]) for y in years})
+                carbon_asset = emissions_series / project_area_val  # kgCO2e/m²·yr
+                eui_asset_series = pd.Series({y: float(eui_asset) for y in years})
+
+                # --- CRREM limits (pathways)
+                pc = crrem["pathways_carbon"].copy()
+                pe = crrem["pathways_eui"].copy()
+
+                pc_t = pc.loc[pc["target"].astype(str) == target_id]
+                pe_t = pe.loc[pe["target"].astype(str) == target_id]
+
+                carbon_pivot = pc_t.pivot_table(index="year", columns="property_type_code", values="kgco2e_per_m2_yr")
+                eui_pivot = pe_t.pivot_table(index="year", columns="property_type_code", values="kwh_per_m2_yr")
+
+                # Restrict to available years and analysis horizon
+                years_avail = [y for y in years if (y in carbon_pivot.index and y in eui_pivot.index)]
+                carbon_asset = carbon_asset.reindex(years_avail)
+                eui_asset_series = eui_asset_series.reindex(years_avail)
+
+                if crrem_use != "Mixed Use":
+                    code_row = pt_df.loc[pt_df["app_use"].astype(str) == str(crrem_use)]
+                    if code_row.empty:
+                        st.error("Selected CRREM use-type not found in dataset.")
+                    else:
+                        p_code = str(code_row.iloc[0]["crrem_code"])
+                        carbon_limit = carbon_pivot[p_code].reindex(years_avail)
+                        eui_limit = eui_pivot[p_code].reindex(years_avail)
+                else:
+                    if not mixed_components:
+                        st.error("Define at least one mixed-use component with a positive area share.")
+                        carbon_limit = pd.Series(index=years_avail, dtype=float)
+                        eui_limit = pd.Series(index=years_avail, dtype=float)
+                    else:
+                        # normalize weights
+                        tot = sum(w for _, w in mixed_components)
+                        weights = [(u, w / tot) for u, w in mixed_components if tot > 0]
+                        # map use->code
+                        use_to_code = dict(zip(pt_df["app_use"].astype(str), pt_df["crrem_code"].astype(str)))
+                        carbon_limit = pd.Series(0.0, index=years_avail)
+                        eui_limit = pd.Series(0.0, index=years_avail)
+                        missing = []
+                        for u, w in weights:
+                            c = use_to_code.get(str(u))
+                            if not c or c not in carbon_pivot.columns:
+                                missing.append(str(u))
+                                continue
+                            carbon_limit = carbon_limit + w * carbon_pivot[c].reindex(years_avail).astype(float)
+                            eui_limit = eui_limit + w * eui_pivot[c].reindex(years_avail).astype(float)
+                        if missing:
+                            st.warning(f"Mixed-use components missing in dataset and ignored: {', '.join(sorted(set(missing)))}")
+
+                # --- Stranding years
+                stranding_carbon = find_stranding_year(carbon_asset, carbon_limit)
+                stranding_eui = find_stranding_year(eui_asset_series, eui_limit)
+
+                # --- Display
+                kpi1, kpi2, kpi3 = st.columns(3)
+                with kpi1:
+                    st.metric("Baseline year", f"{project_year_val}")
+                with kpi2:
+                    st.metric("Stranding year (Carbon)", "Not stranded ≤ 2050" if stranding_carbon is None else str(stranding_carbon))
+                with kpi3:
+                    st.metric("Stranding year (EUI)", "Not stranded ≤ 2050" if stranding_eui is None else str(stranding_eui))
+
+                ccol, ecol = st.columns(2)
+
+                with ccol:
+                    st.subheader("Carbon intensity vs CRREM pathway")
+                    df_plot = pd.DataFrame({
+                        "year": years_avail,
+                        "Project": carbon_asset.values,
+                        "CRREM limit": carbon_limit.values,
+                    })
+                    fig = px.line(df_plot, x="year", y=["Project", "CRREM limit"])
+                    fig.update_layout(height=500, yaxis_title="kgCO₂e/m²·a", legend_title="")
+                    fig.update_traces(mode="lines+markers")
+                    if stranding_carbon is not None:
+                        fig.add_vline(x=stranding_carbon, line_width=3, line_dash="dash", line_color="black")
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with ecol:
+                    st.subheader("EUI vs CRREM pathway")
+                    df_plot2 = pd.DataFrame({
+                        "year": years_avail,
+                        "Project": eui_asset_series.values,
+                        "CRREM limit": eui_limit.values,
+                    })
+                    fig2 = px.line(df_plot2, x="year", y=["Project", "CRREM limit"])
+                    fig2.update_layout(height=500, yaxis_title="kWh/m²·a", legend_title="")
+                    fig2.update_traces(mode="lines+markers")
+                    if stranding_eui is not None:
+                        fig2.add_vline(x=stranding_eui, line_width=3, line_dash="dash", line_color="black")
+                    st.plotly_chart(fig2, use_container_width=True)
+
+                st.caption("Notes: Green Electricity and PV offset are treated with EF=0. PV offsets Electricity consumption (net electricity may become negative).")
+    if not uploaded_file:
+        st.write("### ← Please upload data on sidebar")
+
+
+
+with tab7:
     if uploaded_file:
         st.write("## Scenario Comparison")
 
@@ -1314,6 +1744,17 @@ with tab6:
 
                 # Apply efficiency factors (kWh is divided by factor)
                 df_s["kWh_factored"] = df_s["kWh"] / df_s["Efficiency_Factor"]
+
+                # Apply per-scenario PV toggle/scale (PV_Generation only)
+                pv_cfg = (payload.get("pv") or {}) if isinstance(payload, dict) else {}
+                pv_enabled = bool(pv_cfg.get("enabled", False))
+                pv_scale = float(pv_cfg.get("scale", 1.0))
+                pv_mask = df_s["End_Use"] == "PV_Generation"
+                if pv_mask.any():
+                    if pv_enabled:
+                        df_s.loc[pv_mask, "kWh_factored"] = df_s.loc[pv_mask, "kWh_factored"] * pv_scale
+                    else:
+                        df_s.loc[pv_mask, "kWh_factored"] = 0.0
 
                 # Enforce sign convention for net calculations:
                 # - PV_Generation is always treated as a negative credit (generation)
@@ -1789,6 +2230,7 @@ with tab2:
             "Gas": co2_emissions_gas,
             "District Heating": co2_emissions_dh,
             "District Cooling": co2_emissions_dc,
+            "Biomass": co2_emissions_biomass,
         }
 
         # Compute emissions per row
@@ -2022,6 +2464,7 @@ with tab3:
             "District Heating": cost_dh,
             "District Cooling": cost_dc,
             "Green Electricity": cost_green_electricity,
+            "Biomass": cost_biomass,
         }
 
         # Compute row-level cost
@@ -2596,6 +3039,7 @@ with tab5:
                 "Gas": co2_emissions_gas,
                 "District Heating": co2_emissions_dh,
                 "District Cooling": co2_emissions_dc,
+                "Biomass": co2_emissions_biomass,
             }
             df_co2 = df_melted.copy()
             df_co2["CO2_factor_kg_per_kWh"] = df_co2["Energy_Source"].map(factor_map).fillna(0.0)
@@ -2613,6 +3057,7 @@ with tab5:
                 "District Heating": cost_dh,
                 "District Cooling": cost_dc,
                 "Green Electricity": cost_green_electricity,
+                "Biomass": cost_biomass,
             }
             df_cost = df_melted.copy()
             df_cost["cost_per_kWh"] = df_cost["Energy_Source"].map(cost_map).fillna(0.0)
