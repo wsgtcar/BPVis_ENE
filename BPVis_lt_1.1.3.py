@@ -852,23 +852,48 @@ with tab1:
         with st.sidebar.expander("Project Data"):
             st.write("Enter Project's Basic Informations")
 
-            default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
-            default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
-            default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
+            # Prefer current session values (so Project Data stays global across scenarios)
+            default_name = st.session_state.get("project_name")
+            if not default_name:
+                default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
 
-            # NEW: defaults for lat/lon (fallback to your previous hard-coded values)
-            default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
-            default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
+            default_area = st.session_state.get("project_area")
+            if default_area is None:
+                default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
+
+            default_building_use = st.session_state.get("building_use")
+            if not default_building_use:
+                default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
+
+            # Defaults for lat/lon (fallback to previous hard-coded values)
+            default_lat = st.session_state.get("project_latitude")
+            if default_lat is None:
+                default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
+
+            default_lon = st.session_state.get("project_longitude")
+            if default_lon is None:
+                default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
 
             # keep title reactive via session_state
-            project_name = st.text_input("Project Name", value=default_name, key="project_name")
+            project_name = st.text_input("Project Name", value=str(default_name), key="project_name")
             project_area = numeric_input("Project Area", float(default_area), key="project_area", min_value=0.0)
 
-            # FIXED LABEL + use defaults from file if present
-            latitude = numeric_input("Project Latitude", float(default_lat), key="project_latitude", min_value=-90.0,
-                                     max_value=90.0, fmt="{:.6f}")
-            longitude = numeric_input("Project Longitude", float(default_lon), key="project_longitude",
-                                      min_value=-180.0, max_value=180.0, fmt="{:.6f}")
+            latitude = numeric_input(
+                "Project Latitude",
+                float(default_lat),
+                key="project_latitude",
+                min_value=-90.0,
+                max_value=90.0,
+                fmt="{:.6f}",
+            )
+            longitude = numeric_input(
+                "Project Longitude",
+                float(default_lon),
+                key="project_longitude",
+                min_value=-180.0,
+                max_value=180.0,
+                fmt="{:.6f}",
+            )
 
             # building use dropdown unchanged...
             building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
@@ -1367,6 +1392,62 @@ with tab6:
             df_cmp = df_cmp.sort_values("Scenario", kind="stable").reset_index(drop=True)
             st.dataframe(df_cmp, use_container_width=True)
 
+            # Net KPI charts (incl. PV_Generation) — values printed on bars
+            if _area and _area > 0:
+                df_kpi = df_cmp.copy()
+                df_kpi["Scenario"] = df_kpi["Scenario"].astype(str)
+                df_kpi["Net Emissions (kgCO₂e/m²·a)"] = (df_kpi["Net CO2 (t/a)"] * 1000.0) / _area
+
+                net_cost_col_a = f"Net Cost ({_curr}/a)"
+                net_cost_col_m2 = f"Net Cost ({_curr}/m²·a)"
+                if net_cost_col_a in df_kpi.columns:
+                    df_kpi[net_cost_col_m2] = df_kpi[net_cost_col_a] / _area
+
+                st.markdown("### Net KPI comparison (incl. PV)")
+                k1, k2, k3 = st.columns(3)
+
+                with k1:
+                    fig_net_eui = px.bar(
+                        df_kpi,
+                        x="Scenario",
+                        y="Net EUI (kWh/m²·a)",
+                        category_orders={"Scenario": scenario_order},
+                        text_auto=".1f",
+                        title="Net EUI (kWh/m²·a)",
+                    )
+                    fig_net_eui.update_xaxes(type="category")
+                    fig_net_eui.update_layout(xaxis_title="", yaxis_title="kWh/m²·a")
+                    st.plotly_chart(fig_net_eui, use_container_width=True, key="scenario_net_eui")
+
+                with k2:
+                    fig_net_emis = px.bar(
+                        df_kpi,
+                        x="Scenario",
+                        y="Net Emissions (kgCO₂e/m²·a)",
+                        category_orders={"Scenario": scenario_order},
+                        text_auto=".1f",
+                        title="Net Emissions (kgCO₂e/m²·a)",
+                    )
+                    fig_net_emis.update_xaxes(type="category")
+                    fig_net_emis.update_layout(xaxis_title="", yaxis_title="kgCO₂e/m²·a")
+                    st.plotly_chart(fig_net_emis, use_container_width=True, key="scenario_net_emissions")
+
+                with k3:
+                    if net_cost_col_m2 in df_kpi.columns:
+                        fig_net_cost = px.bar(
+                            df_kpi,
+                            x="Scenario",
+                            y=net_cost_col_m2,
+                            category_orders={"Scenario": scenario_order},
+                            text_auto=".2f",
+                            title=f"Net Cost ({_curr}/m²·a)",
+                        )
+                        fig_net_cost.update_xaxes(type="category")
+                        fig_net_cost.update_layout(xaxis_title="", yaxis_title=f"{_curr}/m²·a")
+                        st.plotly_chart(fig_net_cost, use_container_width=True, key="scenario_net_cost")
+            else:
+                st.info("Project Area must be greater than 0 to show per m² net KPI charts.")
+
             # Scenario comparison charts (factored values, stacked by Energy Source)
             if not _area or _area <= 0:
                 st.warning("Project Area must be greater than 0 to show per m² scenario charts.")
@@ -1376,7 +1457,7 @@ with tab6:
                 # 1) End Energy /m² (factored) by energy source
                 df_energy_src = pd.DataFrame(energy_rows)
                 if not df_energy_src.empty:
-                    df_energy_src["Scenario"] = pd.Categorical(df_energy_src["Scenario"].astype(str), categories=scenario_order, ordered=True)
+                    df_energy_src["Scenario"] = df_energy_src["Scenario"].astype(str)
                     fig_end_energy = px.bar(
                         df_energy_src,
                         x="Scenario",
@@ -1386,12 +1467,14 @@ with tab6:
                         title="End Energy /m² (factored) by Energy Source and Scenario",
                         category_orders={"Scenario": scenario_order},
                         color_discrete_map=color_map_sources,
+                        text_auto=".1f",
                     )
                     fig_end_energy.update_layout(
                         xaxis_title="Scenario",
                         yaxis_title="kWh/m²·a",
                         legend_title_text="Energy Source",
                     )
+                    fig_end_energy.update_traces(textfont_size=14, textfont_color="white")
                     fig_end_energy.update_xaxes(type="category")
                     st.plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
 
@@ -1399,7 +1482,7 @@ with tab6:
                 cost_col = f"Cost ({_curr}/m²·a)"
                 df_cost_src = pd.DataFrame(cost_rows)
                 if not df_cost_src.empty and cost_col in df_cost_src.columns:
-                    df_cost_src["Scenario"] = pd.Categorical(df_cost_src["Scenario"].astype(str), categories=scenario_order, ordered=True)
+                    df_cost_src["Scenario"] = df_cost_src["Scenario"].astype(str)
                     fig_cost = px.bar(
                         df_cost_src,
                         x="Scenario",
@@ -1409,19 +1492,21 @@ with tab6:
                         title=f"Energy Cost /m² (factored) by Energy Source and Scenario [{_curr}]",
                         category_orders={"Scenario": scenario_order},
                         color_discrete_map=color_map_sources,
+                        text_auto=".2f",
                     )
                     fig_cost.update_layout(
                         xaxis_title="Scenario",
                         yaxis_title=f"{_curr}/m²·a",
                         legend_title_text="Energy Source",
                     )
+                    fig_cost.update_traces(textfont_size=14, textfont_color="white")
                     fig_cost.update_xaxes(type="category")
                     st.plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
 
                 # 3) Energy Emissions /m² (factored) by energy source
                 df_emis_src = pd.DataFrame(emissions_rows)
                 if not df_emis_src.empty:
-                    df_emis_src["Scenario"] = pd.Categorical(df_emis_src["Scenario"].astype(str), categories=scenario_order, ordered=True)
+                    df_emis_src["Scenario"] = df_emis_src["Scenario"].astype(str)
                     fig_emis = px.bar(
                         df_emis_src,
                         x="Scenario",
@@ -1431,12 +1516,14 @@ with tab6:
                         title="Energy Emissions /m² (factored) by Energy Source and Scenario",
                         category_orders={"Scenario": scenario_order},
                         color_discrete_map=color_map_sources,
+                        text_auto=".2f",
                     )
                     fig_emis.update_layout(
                         xaxis_title="Scenario",
                         yaxis_title="kgCO₂e/m²·a",
                         legend_title_text="Energy Source",
                     )
+                    fig_emis.update_traces(textfont_size=14, textfont_color="white")
                     fig_emis.update_xaxes(type="category")
                     st.plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
 
