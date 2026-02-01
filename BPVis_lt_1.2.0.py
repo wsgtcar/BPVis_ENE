@@ -63,7 +63,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.2.0",
+    page_title="WSGT_BPVis_ENE 1.3.0",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -116,7 +116,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.2.0")
+st.sidebar.write("Version 1.3.0")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -610,7 +610,7 @@ def parse_project_df_with_building_use(
         df: Optional[pd.DataFrame]
 ) -> Tuple[
     Optional[str], Optional[float], Optional[str], Optional[str], Optional[float], Optional[float], Optional[int]]:
-    """Parse Project_Data sheet (name, area, currency, building use, latitude, longitude, year).
+    """Parse Project_Data sheet (name, area, currency, building use, country, latitude, longitude, year).
 
     Backwards compatible:
       - accepts missing Year
@@ -624,6 +624,7 @@ def parse_project_df_with_building_use(
     name = kv.get("Project_Name")
     currency = kv.get("Currency")
     building_use = kv.get("Building_Use")
+    country = kv.get("Country")
 
     def _to_float(x):
         try:
@@ -649,7 +650,7 @@ def parse_project_df_with_building_use(
     if year_saved is None:
         year_saved = _to_int(kv.get("Project_Year"))
 
-    return name, area, currency, building_use, latitude_saved, longitude_saved, year_saved
+    return name, area, currency, building_use, country, latitude_saved, longitude_saved, year_saved
 
 
 def build_project_df_with_building_use(
@@ -657,6 +658,7 @@ def build_project_df_with_building_use(
         project_area: float,
         currency_symbol: str,
         building_use: str,
+        country: str,
         latitude: Optional[float],
         longitude: Optional[float],
         year: Optional[int],
@@ -669,6 +671,7 @@ def build_project_df_with_building_use(
                 "Project_Area",
                 "Currency",
                 "Building_Use",
+                "Country",
                 "Project_Latitude",
                 "Project_Longitude",
                 "Year",
@@ -678,6 +681,7 @@ def build_project_df_with_building_use(
                 project_area,
                 currency_symbol,
                 building_use,
+                country,
                 latitude,
                 longitude,
                 year,
@@ -846,18 +850,32 @@ def write_config_to_excel(original_bytes: bytes,
 # CRREM (Germany) — data loader & helpers
 # =========================
 
+# =========================
+# CRREM (EU multi-country) — data loader & helpers
+# =========================
+
+CRREM_EU_EXTRACT_FILENAME = "CRREM_EU_Data_Extract_v2_07_1p5_2C.xlsx"
+CRREM_DE_EXTRACT_FILENAME = "CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx"
+
 CRREM_DATA_CANDIDATES = [
-    Path("templates/CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx"),
-    Path("CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx"),
-    Path("data/CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx"),
+    Path(f"templates/{CRREM_EU_EXTRACT_FILENAME}"),
+    Path(CRREM_EU_EXTRACT_FILENAME),
+    Path(f"data/{CRREM_EU_EXTRACT_FILENAME}"),
+    Path(f"templates/{CRREM_DE_EXTRACT_FILENAME}"),
+    Path(CRREM_DE_EXTRACT_FILENAME),
+    Path(f"data/{CRREM_DE_EXTRACT_FILENAME}"),
 ]
 
 
 @st.cache_data(show_spinner=False)
-def load_crrem_de_dataset() -> Optional[dict]:
-    """Load the compact CRREM DE extract workbook (pathways + DE grid EF series).
+def load_crrem_meta() -> Optional[dict]:
+    """Load CRREM extract workbook metadata (countries + property types).
 
-    Returns None if the file is not found.
+    Supports:
+      - EU multi-country extract (with a 'COUNTRIES' sheet)
+      - legacy DE-only extract (no 'COUNTRIES' sheet; assumes Germany)
+
+    Returns None if no dataset is found.
     """
     path = None
     for p in CRREM_DATA_CANDIDATES:
@@ -872,14 +890,91 @@ def load_crrem_de_dataset() -> Optional[dict]:
         return None
 
     try:
-        property_types = pd.read_excel(path, sheet_name="PROPERTY_TYPES")
-        pathways_carbon = pd.read_excel(path, sheet_name="PATHWAYS_CARBON_DE")
-        pathways_eui = pd.read_excel(path, sheet_name="PATHWAYS_EUI_DE")
-        ef = pd.read_excel(path, sheet_name="EMISSION_FACTORS_DE")
+        xls = pd.ExcelFile(path)
+        sheet_names = set(xls.sheet_names)
+
+        property_types = pd.read_excel(xls, sheet_name="PROPERTY_TYPES")
+
+        if "COUNTRIES" in sheet_names:
+            countries = pd.read_excel(xls, sheet_name="COUNTRIES")
+            # normalize
+            if not {"country_name", "country_code"}.issubset(set(countries.columns)):
+                # fallback if template differs
+                countries = countries.rename(
+                    columns={countries.columns[0]: "country_name", countries.columns[1]: "country_code"})
+            countries["country_name"] = countries["country_name"].astype(str).str.strip()
+            countries["country_code"] = countries["country_code"].astype(str).str.strip()
+            is_eu = True
+        else:
+            countries = pd.DataFrame([{"country_name": "Germany", "country_code": "DE"}])
+            is_eu = False
+
     except Exception:
         return None
 
-    # Germany electricity EF (kgCO2e/kWh) time-series
+    return {
+        "path": str(path),
+        "is_eu": is_eu,
+        "countries": countries,
+        "property_types": property_types,
+    }
+
+
+def get_crrem_country_options() -> list:
+    """Return list of country *names* available in the CRREM extract.
+
+    Always includes 'Germany' as a safe default.
+    """
+    meta = load_crrem_meta()
+    if meta is None:
+        return ["Germany"]
+    countries = meta.get("countries")
+    if countries is None or countries.empty:
+        return ["Germany"]
+    opts = sorted([c for c in countries["country_name"].dropna().astype(str).unique().tolist() if c.strip()])
+    if "Germany" not in opts:
+        opts = ["Germany"] + opts
+    return opts
+
+
+@st.cache_data(show_spinner=False)
+def load_crrem_dataset(country_name: str) -> Optional[dict]:
+    """Load CRREM pathways and grid electricity EF series for the given country name."""
+    meta = load_crrem_meta()
+    if meta is None:
+        return None
+
+    path = Path(meta["path"])
+    is_eu = bool(meta.get("is_eu"))
+    countries = meta.get("countries", pd.DataFrame())
+    property_types = meta.get("property_types", pd.DataFrame()).copy()
+
+    # Resolve country code (ISO2). Default Germany.
+    resolved_country_name = "Germany"
+    country_code = "DE"
+
+    if is_eu and (countries is not None) and (not countries.empty):
+        cn = str(country_name).strip() if country_name else "Germany"
+        hit = countries.loc[countries["country_name"].astype(str).str.strip() == cn]
+        if hit.empty:
+            hit = countries.loc[countries["country_name"].astype(str).str.strip() == "Germany"]
+        if not hit.empty:
+            resolved_country_name = str(hit.iloc[0]["country_name"]).strip()
+            country_code = str(hit.iloc[0]["country_code"]).strip().upper()
+        else:
+            resolved_country_name = "Germany"
+            country_code = "DE"
+
+    # Load country-specific sheets (EU) or DE-only sheets (legacy)
+    code = country_code if is_eu else "DE"
+    try:
+        xls = pd.ExcelFile(path)
+        pathways_carbon = pd.read_excel(xls, sheet_name=f"PATHWAYS_CARBON_{code}")
+        pathways_eui = pd.read_excel(xls, sheet_name=f"PATHWAYS_EUI_{code}")
+        ef = pd.read_excel(xls, sheet_name=f"EMISSION_FACTORS_{code}")
+    except Exception:
+        return None
+
     ef_grid = (
         ef.loc[ef["energy_carrier"].astype(str) == "grid_electricity", ["year", "kgco2e_per_kwh"]]
         .dropna()
@@ -892,6 +987,9 @@ def load_crrem_de_dataset() -> Optional[dict]:
 
     return {
         "path": str(path),
+        "is_eu": is_eu,
+        "country_name": resolved_country_name,
+        "country_code": code,
         "property_types": property_types,
         "pathways_carbon": pathways_carbon,
         "pathways_eui": pathways_eui,
@@ -947,7 +1045,7 @@ if uploaded_file:
     file_bytes = uploaded_file.getvalue()
     cfg_saved = read_config_from_excel(file_bytes)
 
-    saved_name, saved_area, saved_currency, saved_building_use, saved_lat, saved_lon, saved_year = \
+    saved_name, saved_area, saved_currency, saved_building_use, saved_country, saved_lat, saved_lon, saved_year = \
         parse_project_df_with_building_use(cfg_saved["project"])
 
     saved_factors = parse_factors_df(cfg_saved["factors"])
@@ -955,7 +1053,8 @@ if uploaded_file:
     saved_mapping_df = cfg_saved["mapping"]
     saved_efficiency = parse_efficiency_df(cfg_saved.get("efficiency"))
     has_any_saved = any([
-        saved_name, saved_area, saved_currency, saved_building_use, bool(saved_factors), bool(saved_tariffs),
+        saved_name, saved_area, saved_currency, saved_building_use, saved_country, bool(saved_factors),
+        bool(saved_tariffs),
         bool(saved_efficiency), saved_mapping_df is not None
     ])
     if has_any_saved:
@@ -968,6 +1067,7 @@ if uploaded_file:
         "area": saved_area,
         "currency": saved_currency,
         "building_use": saved_building_use,
+        "country": saved_country,
         "lat": saved_lat,
         "lon": saved_lon,
         "year": saved_year,
@@ -1023,6 +1123,9 @@ if uploaded_file:
 
         if preloaded.get("building_use"):
             st.session_state["building_use"] = str(preloaded["building_use"])
+
+        if preloaded.get("country"):
+            st.session_state["project_country"] = str(preloaded["country"])
 
         if preloaded.get("currency") in ["€", "$", "£"]:
             st.session_state["currency_symbol"] = str(preloaded["currency"])
@@ -1173,7 +1276,7 @@ with tab1:
             default_building_use = st.session_state.get("building_use")
             if not default_building_use:
                 default_building_use = preloaded["building_use"] if (
-                            preloaded and preloaded["building_use"]) else "Office"
+                        preloaded and preloaded["building_use"]) else "Office"
 
             # Defaults for lat/lon (fallback to previous hard-coded values)
             default_lat = st.session_state.get("project_latitude")
@@ -1202,6 +1305,24 @@ with tab1:
                 step=1,
                 format="%d",
                 key="project_year",
+            )
+
+            # Country (CRREM-aligned). Stored as full name. Default: Germany.
+            country_options = get_crrem_country_options()
+            default_country = st.session_state.get("project_country")
+            if not default_country:
+                default_country = preloaded.get("country") if (preloaded and preloaded.get("country")) else "Germany"
+            if (not country_options) or (default_country not in country_options):
+                default_country = "Germany" if (country_options and "Germany" in country_options) else (
+                    country_options[0] if country_options else "Germany"
+                )
+
+            st.selectbox(
+                "Country",
+                options=country_options if country_options else ["Germany"],
+                index=(country_options.index(default_country) if (
+                            country_options and default_country in country_options) else 0),
+                key="project_country",
             )
 
             latitude = numeric_input(
@@ -1347,6 +1468,7 @@ with tab1:
                     float(st.session_state.get("project_area", project_area) or 0.0),
                     currency_symbol,
                     building_use,
+                    st.session_state.get("project_country", "Germany"),
                     lat_val,
                     lon_val,
                     int(st.session_state.get("project_year", 2025)),
@@ -1632,12 +1754,12 @@ with tab1:
 # =========================
 with tab6:
     if uploaded_file:
-        st.write("## CRREM-Analysis (Germany)")
+        st.write(f"## CRREM-Analysis ({st.session_state.get('project_country', 'Germany')})")
 
-        crrem = load_crrem_de_dataset()
+        crrem = load_crrem_dataset(st.session_state.get("project_country", "Germany"))
         if crrem is None:
             st.warning(
-                "CRREM dataset not found. Place 'CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx' in the app root or in the 'templates/' folder."
+                "CRREM dataset not found. Place 'CRREM_EU_Data_Extract_v2_07_1p5_2C.xlsx' (preferred) or 'CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx' in the app root, 'templates/' or 'data/' folder."
             )
         else:
             # --- Controls
@@ -1840,9 +1962,9 @@ with tab6:
                 stranding_carbon = find_stranding_year(carbon_asset, carbon_limit)
                 stranding_eui = find_stranding_year(eui_asset_series, eui_limit)
 
+                st.write("## Prognose without measures")
+                st.metric(label="Selected Scenario",value=f"{st.session_state.get("active_scenario")}")
                 # --- Display
-                st.write("### Projections without measures")
-                st.metric("Active Scenario", f"## {st.session_state.get("active_scenario")}")
                 kpi1, kpi2, kpi3 = st.columns(3)
                 with kpi1:
                     st.metric("Baseline year", f"{project_year_val}")
@@ -1856,7 +1978,7 @@ with tab6:
                 ccol, ecol = st.columns(2)
 
                 with ccol:
-                    st.write("#### Carbon intensity vs CRREM pathway")
+                    st.subheader("Carbon intensity vs CRREM pathway")
                     df_plot = pd.DataFrame({
                         "year": years_avail,
                         "Project": carbon_asset.values,
@@ -1879,7 +2001,7 @@ with tab6:
                     st.plotly_chart(fig, use_container_width=True)
 
                 with ecol:
-                    st.write("#### EUI vs CRREM pathway")
+                    st.subheader("EUI vs CRREM pathway")
                     df_plot2 = pd.DataFrame({
                         "year": years_avail,
                         "Project": eui_asset_series.values,
@@ -1907,10 +2029,10 @@ with tab6:
                 # Measures (scenario-specific)
                 # =========================
 
-                with st.expander("Decarbonization Pathway Analysis", expanded=True):
-                    st.write("## Decarbonization Pathway Analysis")
+                with st.expander("Decarbonization Path Analysis", expanded=False):
+                    st.write("## Decarbonization Path Analysis")
                     show_overlay = st.checkbox(
-                        "Show baseline vs with measures",
+                        "## Show baseline vs with measures",
                         value=True,
                         key="crrem_show_baseline_overlay",
                         help="Overlay baseline and with-measures trajectories in the measures charts below.",
@@ -1963,8 +2085,8 @@ with tab6:
                         _add_param(f"Assign Energy Sources → {u}", {"kind": "src", "end_use": u, "dtype": "source"})
 
                     # Measures editor (scenario-specific storage)
-                    with st.expander("Decarbonization Measures", expanded=False):
-                        st.caption(
+                    with st.expander("Measures (scenario-specific)", expanded=False):
+                        st.write(
                             "Each row is one measure. From the selected year onwards, the parameter takes the new value. "
                             "Multiple measures for the same parameter in different years are allowed."
                         )
@@ -2336,23 +2458,23 @@ with tab6:
                         stranding_carbon_meas = find_stranding_year(carbon_meas_s, carbon_limit)
                         stranding_eui_meas = find_stranding_year(eui_meas_s, eui_limit)
 
-                        st.write("### Projections with measures")
-                        st.metric("Active Scenario", f"## {st.session_state.get("active_scenario")}")
+                        st.write("## Prognose with measures")
+                        st.metric(label="Selected Scenario", value=f"{st.session_state.get("active_scenario")}")
                         mk1, mk2, mk3 = st.columns(3)
                         with mk1:
                             st.metric("Measures defined", str(len(measures_records)))
                         with mk2:
-                            st.metric("Stranding year (Carbon)",
+                            st.metric("Stranding year (Carbon, with measures)",
                                       "Not stranded" if stranding_carbon_meas is None else str(
                                           stranding_carbon_meas))
                         with mk3:
-                            st.metric("Stranding year (EUI)",
+                            st.metric("Stranding year (EUI, with measures)",
                                       "Not stranded" if stranding_eui_meas is None else str(stranding_eui_meas))
 
                         mcol, ecol2 = st.columns(2)
 
                         with mcol:
-                            st.write("#### Carbon intensity vs CRREM pathway")
+                            st.subheader("Carbon intensity vs CRREM pathway (with measures)")
                             figm = go.Figure()
                             # CRREM limit
                             figm.add_trace(go.Scatter(
@@ -2388,7 +2510,7 @@ with tab6:
                             st.plotly_chart(figm, use_container_width=True, key="crrem_carbon_measures_chart")
 
                         with ecol2:
-                            st.write("#### EUI vs CRREM pathway")
+                            st.subheader("EUI vs CRREM pathway (with measures)")
                             fige = go.Figure()
                             fige.add_trace(go.Scatter(
                                 x=years_avail, y=eui_limit.values,
@@ -2473,9 +2595,9 @@ with tab7:
                 # Apply efficiency factors (kWh is divided by factor)
                 df_s["kWh_factored"] = df_s["kWh"] / df_s["Efficiency_Factor"]
 
-                # Apply per-scenario PV scaling (PV_Generation only)
-                # NOTE: In the Scenarios tab, “Net” KPIs always treat PV as an offset.
-                #       To model “no PV” in a scenario, set PV scale = 0.
+                # Apply per-scenario PV scale (PV_Generation only)
+                # In Scenarios tab net KPIs, PV is always considered as an offset.
+                # To model a "no PV" scenario, set PV scale to 0.0.
                 pv_cfg = (payload.get("pv") or {}) if isinstance(payload, dict) else {}
                 pv_scale = float(pv_cfg.get("scale", 1.0))
                 pv_mask = df_s["End_Use"] == "PV_Generation"
@@ -2491,7 +2613,6 @@ with tab7:
                 df_s.loc[~pv_mask, "kWh_signed"] = df_s.loc[~pv_mask, "kWh_factored"].clip(lower=0.0)
 
                 df_s["Energy_Source"] = df_s["End_Use"].map(lambda u: str(mapping.get(u, "Electricity")))
-                df_s.loc[pv_mask, "Energy_Source"] = "Electricity"
 
                 # Annual energy (net includes PV as a negative contribution)
                 totals_use = df_s.groupby("End_Use", as_index=False)["kWh_signed"].sum()
@@ -2511,6 +2632,13 @@ with tab7:
 
                 co2_kg = float((df_net["kWh_signed"] * df_net["co2_factor"]).sum())
                 cost_val = float((df_net["kWh_signed"] * df_net["tariff"]).sum())
+                # Gross CO2 and gross cost (excluding PV_Generation)
+                df_gross = df_s.loc[df_s["End_Use"] != "PV_Generation"].copy()
+                df_gross["kWh_pos"] = df_gross["kWh_factored"].clip(lower=0.0)
+                df_gross["co2_factor"] = df_gross["Energy_Source"].map(lambda s: float(factors.get(s, 0.0))).fillna(0.0)
+                df_gross["tariff"] = df_gross["Energy_Source"].map(lambda s: float(tariffs.get(s, 0.0))).fillna(0.0)
+                gross_co2_kg = float((df_gross["kWh_pos"] * df_gross["co2_factor"]).sum())
+                gross_cost_val = float((df_gross["kWh_pos"] * df_gross["tariff"]).sum())
 
                 # Per-source breakdown (net, including PV) for scenario comparison charts (intensities)
                 if _area and _area > 0:
@@ -2549,6 +2677,9 @@ with tab7:
                     "PV Generation (kWh/a)": pv_kwh,
                     "Net CO2 (t/a)": co2_kg / 1000.0,
                     f"Net Cost ({_curr}/a)": cost_val,
+                    # Hidden (used for Gross KPI charts)
+                    "Gross CO2 (t/a)": gross_co2_kg / 1000.0,
+                    f"Gross Cost ({_curr}/a)": gross_cost_val,
                     "Net EUI (kWh/m²·a)": (net_kwh / _area) if _area else np.nan,
                     "Gross EUI (kWh/m²·a)": (gross_kwh / _area) if _area else np.nan,
                 })
@@ -2558,7 +2689,17 @@ with tab7:
             df_cmp["Scenario"] = df_cmp["Scenario"].astype(str)
             df_cmp["Scenario"] = pd.Categorical(df_cmp["Scenario"], categories=scenario_order, ordered=True)
             df_cmp = df_cmp.sort_values("Scenario", kind="stable").reset_index(drop=True)
-            st.dataframe(df_cmp, use_container_width=True)
+            df_cmp_display = df_cmp[[
+                "Scenario",
+                "Net Energy (kWh/a)",
+                "Gross Consumption (kWh/a)",
+                "PV Generation (kWh/a)",
+                "Net CO2 (t/a)",
+                f"Net Cost ({_curr}/a)",
+                "Net EUI (kWh/m²·a)",
+                "Gross EUI (kWh/m²·a)",
+            ]].copy()
+            st.dataframe(df_cmp_display, use_container_width=True)
 
             # Net KPI charts (incl. PV_Generation) — values printed on bars
             if _area and _area > 0:
@@ -2589,6 +2730,7 @@ with tab7:
                         title="Net EUI (kWh/m²·a)",
                     )
                     fig_net_eui.update_xaxes(type="category")
+                    fig_net_eui.update_yaxes(rangemode="tozero")
                     fig_net_eui.update_layout(
                         xaxis_title="",
                         yaxis_title="kWh/m²·a",
@@ -2610,6 +2752,7 @@ with tab7:
                         title="Net Emissions (kgCO₂e/m²·a)",
                     )
                     fig_net_emis.update_xaxes(type="category")
+                    fig_net_emis.update_yaxes(rangemode="tozero")
                     fig_net_emis.update_layout(
                         xaxis_title="",
                         yaxis_title="kgCO₂e/m²·a",
@@ -2632,6 +2775,7 @@ with tab7:
                             title=f"Net Cost ({_curr}/m²·a)",
                         )
                         fig_net_cost.update_xaxes(type="category")
+                        fig_net_cost.update_yaxes(rangemode="tozero")
                         fig_net_cost.update_layout(
                             xaxis_title="",
                             yaxis_title=f"{_curr}/m²·a",
@@ -2640,6 +2784,88 @@ with tab7:
                             margin=dict(b=90),
                         )
                         st.plotly_chart(fig_net_cost, use_container_width=True, key="scenario_net_cost")
+
+                # Gross KPI charts (excl. PV_Generation)
+                df_kpi["Gross Emissions (kgCO₂e/m²·a)"] = (df_kpi["Gross CO2 (t/a)"] * 1000.0) / _area
+
+                gross_cost_col_a = f"Gross Cost ({_curr}/a)"
+                gross_cost_col_m2 = f"Gross Cost ({_curr}/m²·a)"
+                if gross_cost_col_a in df_kpi.columns:
+                    df_kpi[gross_cost_col_m2] = df_kpi[gross_cost_col_a] / _area
+
+                st.markdown("### Gross KPI comparison (excl. PV)")
+
+                g1, g2, g3 = st.columns(3)
+
+                with g1:
+                    fig_gross_eui = px.bar(
+                        df_kpi,
+                        x="Scenario",
+                        y="Gross EUI (kWh/m²·a)",
+                        color="Scenario",
+                        color_discrete_map=scenario_color_map,
+                        category_orders={"Scenario": scenario_order},
+                        text_auto=".1f",
+                        title="Gross EUI (kWh/m²·a)",
+                    )
+                    fig_gross_eui.update_xaxes(type="category")
+                    fig_gross_eui.update_yaxes(rangemode="tozero")
+                    fig_gross_eui.update_layout(
+                        xaxis_title="",
+                        yaxis_title="kWh/m²·a",
+                        legend_title_text="Scenario",
+                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                        margin=dict(b=90),
+                    )
+                    st.plotly_chart(fig_gross_eui, use_container_width=True, key="scenario_gross_eui")
+
+                with g2:
+                    fig_gross_emis = px.bar(
+                        df_kpi,
+                        x="Scenario",
+                        y="Gross Emissions (kgCO₂e/m²·a)",
+                        color="Scenario",
+                        color_discrete_map=scenario_color_map,
+                        category_orders={"Scenario": scenario_order},
+                        text_auto=".1f",
+                        title="Gross Emissions (kgCO₂e/m²·a)",
+                    )
+                    fig_gross_emis.update_xaxes(type="category")
+                    fig_gross_emis.update_yaxes(rangemode="tozero")
+                    fig_gross_emis.update_layout(
+                        xaxis_title="",
+                        yaxis_title="kgCO₂e/m²·a",
+                        legend_title_text="Scenario",
+                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                        margin=dict(b=90),
+                    )
+                    st.plotly_chart(fig_gross_emis, use_container_width=True, key="scenario_gross_emissions")
+
+                with g3:
+                    if gross_cost_col_m2 in df_kpi.columns:
+                        fig_gross_cost = px.bar(
+                            df_kpi,
+                            x="Scenario",
+                            y=gross_cost_col_m2,
+                            color="Scenario",
+                            color_discrete_map=scenario_color_map,
+                            category_orders={"Scenario": scenario_order},
+                            text_auto=".2f",
+                            title=f"Gross Cost ({_curr}/m²·a)",
+                        )
+                        fig_gross_cost.update_xaxes(type="category")
+                        fig_gross_cost.update_yaxes(rangemode="tozero")
+                        fig_gross_cost.update_layout(
+                            xaxis_title="",
+                            yaxis_title=f"{_curr}/m²·a",
+                            legend_title_text="Scenario",
+                            legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                            margin=dict(b=90),
+                        )
+                        st.plotly_chart(fig_gross_cost, use_container_width=True, key="scenario_gross_cost")
+                    else:
+                        st.info("Gross cost not available for this project.")
+
             else:
                 st.info("Project Area must be greater than 0 to show per m² net KPI charts.")
 
@@ -2673,6 +2899,30 @@ with tab7:
                     fig_end_energy.update_xaxes(type="category")
                     st.plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
 
+                # 2) Energy Cost /m² (factored) by energy source
+                cost_col = f"Cost ({_curr}/m²·a)"
+                df_cost_src = pd.DataFrame(cost_rows)
+                if not df_cost_src.empty and cost_col in df_cost_src.columns:
+                    df_cost_src["Scenario"] = df_cost_src["Scenario"].astype(str)
+                    fig_cost = px.bar(
+                        df_cost_src,
+                        x="Scenario",
+                        y=cost_col,
+                        color="Energy_Source",
+                        barmode="relative",
+                        title=f"Energy Cost /m² (factored) by Energy Source and Scenario [{_curr}]",
+                        category_orders={"Scenario": scenario_order},
+                        color_discrete_map=color_map_sources,
+                        text_auto=".2f",
+                    )
+                    fig_cost.update_layout(
+                        xaxis_title="Scenario",
+                        yaxis_title=f"{_curr}/m²·a",
+                        legend_title_text="Energy Source",
+                    )
+                    fig_cost.update_traces(textfont_size=14, textfont_color="white")
+                    fig_cost.update_xaxes(type="category")
+                    st.plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
 
                 # 3) Energy Emissions /m² (factored) by energy source
                 df_emis_src = pd.DataFrame(emissions_rows)
@@ -2697,31 +2947,6 @@ with tab7:
                     fig_emis.update_traces(textfont_size=14, textfont_color="white")
                     fig_emis.update_xaxes(type="category")
                     st.plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
-
-                    # 2) Energy Cost /m² (factored) by energy source
-                    cost_col = f"Cost ({_curr}/m²·a)"
-                    df_cost_src = pd.DataFrame(cost_rows)
-                    if not df_cost_src.empty and cost_col in df_cost_src.columns:
-                        df_cost_src["Scenario"] = df_cost_src["Scenario"].astype(str)
-                        fig_cost = px.bar(
-                            df_cost_src,
-                            x="Scenario",
-                            y=cost_col,
-                            color="Energy_Source",
-                            barmode="relative",
-                            title=f"Energy Cost /m² (factored) by Energy Source and Scenario [{_curr}]",
-                            category_orders={"Scenario": scenario_order},
-                            color_discrete_map=color_map_sources,
-                            text_auto=".2f",
-                        )
-                        fig_cost.update_layout(
-                            xaxis_title="Scenario",
-                            yaxis_title=f"{_curr}/m²·a",
-                            legend_title_text="Energy Source",
-                        )
-                        fig_cost.update_traces(textfont_size=14, textfont_color="white")
-                        fig_cost.update_xaxes(type="category")
-                        st.plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
