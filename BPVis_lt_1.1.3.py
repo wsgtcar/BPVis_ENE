@@ -63,7 +63,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.1.5",
+    page_title="WSGT_BPVis_ENE 1.2.0",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -116,7 +116,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.1.5")
+st.sidebar.write("Version 1.2.0")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -904,13 +904,28 @@ def _clamp_year_to_series(year: int, s: pd.Series) -> int:
     return int(max(y_min, min(y_max, int(year))))
 
 
-def compute_decarb_multiplier(ef_grid: pd.Series, base_year: int, years: list) -> pd.Series:
-    """Return multiplier m(year) = EF_grid(year) / EF_grid(base_year)."""
+def compute_decarb_multiplier(ef_grid: pd.Series, base_year: int, years: list, ref_year: int = 2020) -> pd.Series:
+    """
+    Return multiplier m(y) = DF(y) / DF(base_year), where DF(y) = EF_grid(y) / EF_grid(ref_year).
+    This matches CRREM-style decarbonization factors and ensures m(base_year) = 1.
+    """
+    ref_year_c = _clamp_year_to_series(ref_year, ef_grid)
     base_year_c = _clamp_year_to_series(base_year, ef_grid)
-    denom = float(ef_grid.loc[base_year_c])
-    if denom == 0:
+
+    ef_ref = float(ef_grid.loc[ref_year_c])
+    if ef_ref == 0:
         return pd.Series({int(y): 1.0 for y in years})
-    return ef_grid.reindex([int(y) for y in years]).astype(float) / denom
+
+    df_series = ef_grid.astype(float) / ef_ref
+    df_base = float(df_series.loc[base_year_c])
+    if df_base == 0:
+        return pd.Series({int(y): 1.0 for y in years})
+
+    idx_years = [int(y) for y in years]
+    out = df_series.reindex(idx_years).astype(float)
+    if out.isna().any():
+        out = out.interpolate(method="linear", limit_direction="both")
+    return out / df_base
 
 
 def find_stranding_year(asset: pd.Series, limit: pd.Series) -> Optional[int]:
