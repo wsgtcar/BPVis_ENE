@@ -2468,16 +2468,14 @@ with tab7:
                 # Apply efficiency factors (kWh is divided by factor)
                 df_s["kWh_factored"] = df_s["kWh"] / df_s["Efficiency_Factor"]
 
-                # Apply per-scenario PV toggle/scale (PV_Generation only)
+                # Apply per-scenario PV scaling (PV_Generation only)
+                # NOTE: In the Scenarios tab, “Net” KPIs always treat PV as an offset.
+                #       To model “no PV” in a scenario, set PV scale = 0.
                 pv_cfg = (payload.get("pv") or {}) if isinstance(payload, dict) else {}
-                pv_enabled = bool(pv_cfg.get("enabled", False))
                 pv_scale = float(pv_cfg.get("scale", 1.0))
                 pv_mask = df_s["End_Use"] == "PV_Generation"
                 if pv_mask.any():
-                    if pv_enabled:
-                        df_s.loc[pv_mask, "kWh_factored"] = df_s.loc[pv_mask, "kWh_factored"] * pv_scale
-                    else:
-                        df_s.loc[pv_mask, "kWh_factored"] = 0.0
+                    df_s.loc[pv_mask, "kWh_factored"] = df_s.loc[pv_mask, "kWh_factored"] * pv_scale
 
                 # Enforce sign convention for net calculations:
                 # - PV_Generation is always treated as a negative credit (generation)
@@ -2488,6 +2486,7 @@ with tab7:
                 df_s.loc[~pv_mask, "kWh_signed"] = df_s.loc[~pv_mask, "kWh_factored"].clip(lower=0.0)
 
                 df_s["Energy_Source"] = df_s["End_Use"].map(lambda u: str(mapping.get(u, "Electricity")))
+                df_s.loc[pv_mask, "Energy_Source"] = "Electricity"
 
                 # Annual energy (net includes PV as a negative contribution)
                 totals_use = df_s.groupby("End_Use", as_index=False)["kWh_signed"].sum()
