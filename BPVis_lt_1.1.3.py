@@ -1553,15 +1553,13 @@ with tab6:
                 df_crrem_m["Efficiency_Factor"] = df_crrem_m["End_Use"].map(eff_map_crrem).fillna(1.0)
                 df_crrem_m["kWh_adj"] = df_crrem_m["kWh"] / df_crrem_m["Efficiency_Factor"]
 
-                # Apply PV sizing toggle/scale (scenario-specific)
-                pv_enabled = bool(st.session_state.get("pv_sc_enabled", False))
+                # Apply PV scaling (scenario-specific). For CRREM carbon, PV always offsets Electricity (EF=0).
+                pv_apply_scale = bool(st.session_state.get("pv_sc_enabled", False))
                 pv_scale = float(st.session_state.get("pv_scale", 1.0))
                 pv_mask = df_crrem_m["End_Use"].astype(str) == "PV_Generation"
                 if pv_mask.any():
-                    if pv_enabled:
-                        df_crrem_m.loc[pv_mask, "kWh_adj"] = df_crrem_m.loc[pv_mask, "kWh_adj"] * pv_scale
-                    else:
-                        df_crrem_m.loc[pv_mask, "kWh_adj"] = 0.0
+                    scale = pv_scale if pv_apply_scale else 1.0
+                    df_crrem_m.loc[pv_mask, "kWh_adj"] = df_crrem_m.loc[pv_mask, "kWh_adj"] * scale
                     # Enforce PV as an electricity offset (negative)
                     df_crrem_m.loc[pv_mask, "kWh_adj"] = -df_crrem_m.loc[pv_mask, "kWh_adj"].abs()
 
@@ -1575,6 +1573,10 @@ with tab6:
 
                 # Annual kWh per source (net, PV included as negative electricity)
                 annual_kwh_by_source = df_crrem_m.groupby("Energy_Source", as_index=True)["kWh_adj"].sum()
+
+                # Clamp net electricity to >= 0 (PV offsets electricity up to demand; no export credit)
+                if "Electricity" in annual_kwh_by_source.index:
+                    annual_kwh_by_source.loc["Electricity"] = max(float(annual_kwh_by_source.loc["Electricity"]), 0.0)
 
                 # CRREM EUI is consumption-only (exclude PV_Generation)
                 annual_consumption_kwh = df_crrem_m.loc[~pv_mask, "kWh_adj"].sum()
