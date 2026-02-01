@@ -1978,7 +1978,7 @@ with tab6:
                 ccol, ecol = st.columns(2)
 
                 with ccol:
-                    st.subheader("Carbon intensity vs CRREM pathway")
+                    st.write("#### Carbon intensity vs CRREM pathway")
                     df_plot = pd.DataFrame({
                         "year": years_avail,
                         "Project": carbon_asset.values,
@@ -2001,7 +2001,7 @@ with tab6:
                     st.plotly_chart(fig, use_container_width=True)
 
                 with ecol:
-                    st.subheader("EUI vs CRREM pathway")
+                    st.write("#### EUI vs CRREM pathway")
                     df_plot2 = pd.DataFrame({
                         "year": years_avail,
                         "Project": eui_asset_series.values,
@@ -2474,7 +2474,7 @@ with tab6:
                         mcol, ecol2 = st.columns(2)
 
                         with mcol:
-                            st.subheader("Carbon intensity vs CRREM pathway (with measures)")
+                            st.write("#### Carbon intensity vs CRREM pathway")
                             figm = go.Figure()
                             # CRREM limit
                             figm.add_trace(go.Scatter(
@@ -2510,7 +2510,7 @@ with tab6:
                             st.plotly_chart(figm, use_container_width=True, key="crrem_carbon_measures_chart")
 
                         with ecol2:
-                            st.subheader("EUI vs CRREM pathway (with measures)")
+                            st.write("#### EUI vs CRREM pathway")
                             fige = go.Figure()
                             fige.add_trace(go.Scatter(
                                 x=years_avail, y=eui_limit.values,
