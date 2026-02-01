@@ -2668,30 +2668,6 @@ with tab7:
                     fig_end_energy.update_xaxes(type="category")
                     st.plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
 
-                # 2) Energy Cost /m² (factored) by energy source
-                cost_col = f"Cost ({_curr}/m²·a)"
-                df_cost_src = pd.DataFrame(cost_rows)
-                if not df_cost_src.empty and cost_col in df_cost_src.columns:
-                    df_cost_src["Scenario"] = df_cost_src["Scenario"].astype(str)
-                    fig_cost = px.bar(
-                        df_cost_src,
-                        x="Scenario",
-                        y=cost_col,
-                        color="Energy_Source",
-                        barmode="relative",
-                        title=f"Energy Cost /m² (factored) by Energy Source and Scenario [{_curr}]",
-                        category_orders={"Scenario": scenario_order},
-                        color_discrete_map=color_map_sources,
-                        text_auto=".2f",
-                    )
-                    fig_cost.update_layout(
-                        xaxis_title="Scenario",
-                        yaxis_title=f"{_curr}/m²·a",
-                        legend_title_text="Energy Source",
-                    )
-                    fig_cost.update_traces(textfont_size=14, textfont_color="white")
-                    fig_cost.update_xaxes(type="category")
-                    st.plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
 
                 # 3) Energy Emissions /m² (factored) by energy source
                 df_emis_src = pd.DataFrame(emissions_rows)
@@ -2716,6 +2692,31 @@ with tab7:
                     fig_emis.update_traces(textfont_size=14, textfont_color="white")
                     fig_emis.update_xaxes(type="category")
                     st.plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
+
+                    # 2) Energy Cost /m² (factored) by energy source
+                    cost_col = f"Cost ({_curr}/m²·a)"
+                    df_cost_src = pd.DataFrame(cost_rows)
+                    if not df_cost_src.empty and cost_col in df_cost_src.columns:
+                        df_cost_src["Scenario"] = df_cost_src["Scenario"].astype(str)
+                        fig_cost = px.bar(
+                            df_cost_src,
+                            x="Scenario",
+                            y=cost_col,
+                            color="Energy_Source",
+                            barmode="relative",
+                            title=f"Energy Cost /m² (factored) by Energy Source and Scenario [{_curr}]",
+                            category_orders={"Scenario": scenario_order},
+                            color_discrete_map=color_map_sources,
+                            text_auto=".2f",
+                        )
+                        fig_cost.update_layout(
+                            xaxis_title="Scenario",
+                            yaxis_title=f"{_curr}/m²·a",
+                            legend_title_text="Energy Source",
+                        )
+                        fig_cost.update_traces(textfont_size=14, textfont_color="white")
+                        fig_cost.update_xaxes(type="category")
+                        st.plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
