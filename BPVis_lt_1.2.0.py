@@ -1841,20 +1841,22 @@ with tab6:
                 stranding_eui = find_stranding_year(eui_asset_series, eui_limit)
 
                 # --- Display
+                st.write("### Projections without measures")
+                st.metric("Active Scenario", f"## {st.session_state.get("active_scenario")}")
                 kpi1, kpi2, kpi3 = st.columns(3)
                 with kpi1:
                     st.metric("Baseline year", f"{project_year_val}")
                 with kpi2:
                     st.metric("Stranding year (Carbon)",
-                              "Not stranded ≤ 2050" if stranding_carbon is None else str(stranding_carbon))
+                              "Not stranded" if stranding_carbon is None else str(stranding_carbon))
                 with kpi3:
                     st.metric("Stranding year (EUI)",
-                              "Not stranded ≤ 2050" if stranding_eui is None else str(stranding_eui))
+                              "Not stranded" if stranding_eui is None else str(stranding_eui))
 
                 ccol, ecol = st.columns(2)
 
                 with ccol:
-                    st.subheader("Carbon intensity vs CRREM pathway")
+                    st.write("#### Carbon intensity vs CRREM pathway")
                     df_plot = pd.DataFrame({
                         "year": years_avail,
                         "Project": carbon_asset.values,
@@ -1877,7 +1879,7 @@ with tab6:
                     st.plotly_chart(fig, use_container_width=True)
 
                 with ecol:
-                    st.subheader("EUI vs CRREM pathway")
+                    st.write("#### EUI vs CRREM pathway")
                     df_plot2 = pd.DataFrame({
                         "year": years_avail,
                         "Project": eui_asset_series.values,
@@ -1904,519 +1906,522 @@ with tab6:
                 # =========================
                 # Measures (scenario-specific)
                 # =========================
-                show_overlay = st.checkbox(
-                    "Show baseline vs with measures",
-                    value=True,
-                    key="crrem_show_baseline_overlay",
-                    help="Overlay baseline and with-measures trajectories in the measures charts below.",
-                )
 
-                # Build a parameter registry (dropdown options) from the existing sidebar parameters
-                end_uses_all = sorted(df_crrem_m["End_Use"].astype(str).unique().tolist())
-                end_uses_no_pv = [u for u in end_uses_all if u != "PV_Generation"]
-
-                param_specs = {}
-                param_options = []
-
-
-                def _add_param(label: str, spec: dict):
-                    param_options.append(label)
-                    param_specs[label] = spec
-
-
-                # Emission Factors (numeric)
-                _add_param("Emission Factors → Electricity", {"kind": "ef", "source": "Electricity", "dtype": "float"})
-                _add_param("Emission Factors → Green Electricity",
-                           {"kind": "ef", "source": "Green Electricity", "dtype": "float"})
-                _add_param("Emission Factors → Gas", {"kind": "ef", "source": "Gas", "dtype": "float"})
-                _add_param("Emission Factors → District Heating",
-                           {"kind": "ef", "source": "District Heating", "dtype": "float"})
-                _add_param("Emission Factors → District Cooling",
-                           {"kind": "ef", "source": "District Cooling", "dtype": "float"})
-                _add_param("Emission Factors → Biomass", {"kind": "ef", "source": "Biomass", "dtype": "float"})
-
-                # Energy Tariffs (numeric; stored for future extensions)
-                _add_param("Energy Tariffs → Electricity",
-                           {"kind": "tariff", "source": "Electricity", "dtype": "float"})
-                _add_param("Energy Tariffs → Green Electricity",
-                           {"kind": "tariff", "source": "Green Electricity", "dtype": "float"})
-                _add_param("Energy Tariffs → Gas", {"kind": "tariff", "source": "Gas", "dtype": "float"})
-                _add_param("Energy Tariffs → District Heating",
-                           {"kind": "tariff", "source": "District Heating", "dtype": "float"})
-                _add_param("Energy Tariffs → District Cooling",
-                           {"kind": "tariff", "source": "District Cooling", "dtype": "float"})
-                _add_param("Energy Tariffs → Biomass", {"kind": "tariff", "source": "Biomass", "dtype": "float"})
-                # PV (numeric; affects CRREM by offsetting Electricity)
-                _add_param("PV_Generation → PV Annual Production (kWh/a)", {"kind": "pv", "dtype": "float"})
-
-                # Efficiency Factors (numeric)
-                for u in end_uses_no_pv:
-                    _add_param(f"Efficiency Factors → {u}", {"kind": "eff", "end_use": u, "dtype": "float"})
-
-                # Assign Energy Sources (categorical)
-                for u in end_uses_no_pv:
-                    _add_param(f"Assign Energy Sources → {u}", {"kind": "src", "end_use": u, "dtype": "source"})
-
-                # Measures editor (scenario-specific storage)
-                with st.expander("Measures (scenario-specific)", expanded=False):
-                    st.write(
-                        "Each row is one measure. From the selected year onwards, the parameter takes the new value. "
-                        "Multiple measures for the same parameter in different years are allowed."
+                with st.expander("Decarbonization Pathway Analysis", expanded=True):
+                    st.write("## Decarbonization Pathway Analysis")
+                    show_overlay = st.checkbox(
+                        "Show baseline vs with measures",
+                        value=True,
+                        key="crrem_show_baseline_overlay",
+                        help="Overlay baseline and with-measures trajectories in the measures charts below.",
                     )
 
-                    if "crrem_measures_df" not in st.session_state or not isinstance(
-                            st.session_state.get("crrem_measures_df"), pd.DataFrame):
-                        st.session_state["crrem_measures_df"] = pd.DataFrame(columns=["Parameter", "Year", "New Value"])
+                    # Build a parameter registry (dropdown options) from the existing sidebar parameters
+                    end_uses_all = sorted(df_crrem_m["End_Use"].astype(str).unique().tolist())
+                    end_uses_no_pv = [u for u in end_uses_all if u != "PV_Generation"]
 
-                    if st.button("Add measure", key="crrem_add_measure_btn", use_container_width=False):
-                        df_tmp = st.session_state["crrem_measures_df"].copy()
-                        default_param = param_options[0] if param_options else ""
-                        df_tmp = pd.concat(
-                            [
-                                df_tmp,
-                                pd.DataFrame(
-                                    [{"Parameter": default_param, "Year": int(project_year_val), "New Value": ""}]),
-                            ],
-                            ignore_index=True,
+                    param_specs = {}
+                    param_options = []
+
+
+                    def _add_param(label: str, spec: dict):
+                        param_options.append(label)
+                        param_specs[label] = spec
+
+
+                    # Emission Factors (numeric)
+                    _add_param("Emission Factors → Electricity", {"kind": "ef", "source": "Electricity", "dtype": "float"})
+                    _add_param("Emission Factors → Green Electricity",
+                               {"kind": "ef", "source": "Green Electricity", "dtype": "float"})
+                    _add_param("Emission Factors → Gas", {"kind": "ef", "source": "Gas", "dtype": "float"})
+                    _add_param("Emission Factors → District Heating",
+                               {"kind": "ef", "source": "District Heating", "dtype": "float"})
+                    _add_param("Emission Factors → District Cooling",
+                               {"kind": "ef", "source": "District Cooling", "dtype": "float"})
+                    _add_param("Emission Factors → Biomass", {"kind": "ef", "source": "Biomass", "dtype": "float"})
+
+                    # Energy Tariffs (numeric; stored for future extensions)
+                    _add_param("Energy Tariffs → Electricity",
+                               {"kind": "tariff", "source": "Electricity", "dtype": "float"})
+                    _add_param("Energy Tariffs → Green Electricity",
+                               {"kind": "tariff", "source": "Green Electricity", "dtype": "float"})
+                    _add_param("Energy Tariffs → Gas", {"kind": "tariff", "source": "Gas", "dtype": "float"})
+                    _add_param("Energy Tariffs → District Heating",
+                               {"kind": "tariff", "source": "District Heating", "dtype": "float"})
+                    _add_param("Energy Tariffs → District Cooling",
+                               {"kind": "tariff", "source": "District Cooling", "dtype": "float"})
+                    _add_param("Energy Tariffs → Biomass", {"kind": "tariff", "source": "Biomass", "dtype": "float"})
+                    # PV (numeric; affects CRREM by offsetting Electricity)
+                    _add_param("PV_Generation → PV Annual Production (kWh/a)", {"kind": "pv", "dtype": "float"})
+
+                    # Efficiency Factors (numeric)
+                    for u in end_uses_no_pv:
+                        _add_param(f"Efficiency Factors → {u}", {"kind": "eff", "end_use": u, "dtype": "float"})
+
+                    # Assign Energy Sources (categorical)
+                    for u in end_uses_no_pv:
+                        _add_param(f"Assign Energy Sources → {u}", {"kind": "src", "end_use": u, "dtype": "source"})
+
+                    # Measures editor (scenario-specific storage)
+                    with st.expander("Decarbonization Measures", expanded=False):
+                        st.caption(
+                            "Each row is one measure. From the selected year onwards, the parameter takes the new value. "
+                            "Multiple measures for the same parameter in different years are allowed."
                         )
-                        st.session_state["crrem_measures_df"] = df_tmp
 
-                    editor_kwargs = {
-                        "num_rows": "dynamic",
-                        "use_container_width": True,
-                        "key": "crrem_measures_editor",
-                    }
-                    if hasattr(st, "column_config"):
-                        editor_kwargs["column_config"] = {
-                            "Parameter": st.column_config.SelectboxColumn("Parameter", options=param_options,
-                                                                          required=True),
-                            "Year": st.column_config.NumberColumn(
-                                "Year",
-                                min_value=int(start_year),
-                                max_value=int(max_year),
-                                step=1,
-                                format="%d",
-                                required=True,
-                            ),
-                            "New Value": st.column_config.TextColumn("New Value", required=True),
+                        if "crrem_measures_df" not in st.session_state or not isinstance(
+                                st.session_state.get("crrem_measures_df"), pd.DataFrame):
+                            st.session_state["crrem_measures_df"] = pd.DataFrame(columns=["Parameter", "Year", "New Value"])
+
+                        if st.button("Add measure", key="crrem_add_measure_btn", use_container_width=False):
+                            df_tmp = st.session_state["crrem_measures_df"].copy()
+                            default_param = param_options[0] if param_options else ""
+                            df_tmp = pd.concat(
+                                [
+                                    df_tmp,
+                                    pd.DataFrame(
+                                        [{"Parameter": default_param, "Year": int(project_year_val), "New Value": ""}]),
+                                ],
+                                ignore_index=True,
+                            )
+                            st.session_state["crrem_measures_df"] = df_tmp
+
+                        editor_kwargs = {
+                            "num_rows": "dynamic",
+                            "use_container_width": True,
+                            "key": "crrem_measures_editor",
+                        }
+                        if hasattr(st, "column_config"):
+                            editor_kwargs["column_config"] = {
+                                "Parameter": st.column_config.SelectboxColumn("Parameter", options=param_options,
+                                                                              required=True),
+                                "Year": st.column_config.NumberColumn(
+                                    "Year",
+                                    min_value=int(start_year),
+                                    max_value=int(max_year),
+                                    step=1,
+                                    format="%d",
+                                    required=True,
+                                ),
+                                "New Value": st.column_config.TextColumn("New Value", required=True),
+                            }
+
+                        measures_df = st.data_editor(st.session_state["crrem_measures_df"], **editor_kwargs)
+                        st.session_state["crrem_measures_df"] = measures_df
+                        # Deleting measures (explicit controls to support Streamlit versions where row-delete UI is not exposed)
+                        if not measures_df.empty:
+
+                            def _fmt_measure_idx(i):
+                                try:
+                                    p = str(measures_df.loc[i, "Parameter"]) if pd.notna(
+                                        measures_df.loc[i, "Parameter"]) else ""
+                                except Exception:
+                                    p = ""
+                                try:
+                                    yv = measures_df.loc[i, "Year"]
+                                    y = str(int(float(yv))) if pd.notna(yv) and str(yv).strip() != "" else ""
+                                except Exception:
+                                    y = ""
+                                return f"{i + 1}: {p} @ {y}"
+
+
+                            def _crrem_delete_selected_measures():
+                                sel = st.session_state.get("crrem_measures_delete_idx", [])
+                                if sel:
+                                    df = st.session_state.get("crrem_measures_df", pd.DataFrame()).copy()
+                                    try:
+                                        df = df.drop(sel).reset_index(drop=True)
+                                    except Exception:
+                                        df = df.iloc[[j for j in range(len(df)) if j not in set(sel)]].reset_index(
+                                            drop=True)
+                                    st.session_state["crrem_measures_df"] = df
+                                # Clear selection (safe to mutate in callback)
+                                st.session_state["crrem_measures_delete_idx"] = []
+
+
+                            st.multiselect(
+                                "Select measure rows to delete",
+                                options=list(measures_df.index),
+                                format_func=_fmt_measure_idx,
+                                key="crrem_measures_delete_idx",
+                            )
+                            st.button(
+                                "Delete selected measures",
+                                key="crrem_delete_measures_btn",
+                                on_click=_crrem_delete_selected_measures,
+                                use_container_width=False,
+                            )
+
+                        # Persist measures into the active scenario payload (saved in Scenarios sheet)
+                        try:
+                            _sc = st.session_state.get("scenarios", {})
+                            _act = st.session_state.get("active_scenario")
+                            if _act in _sc:
+                                _sc[_act]["crrem_measures"] = _measures_df_to_records(measures_df)
+                                st.session_state["scenarios"] = _sc
+                        except Exception:
+                            pass
+
+                        st.caption("Note: tariff measures are stored but do not affect the CRREM Carbon/EUI charts yet.")
+
+                    # --- Compute trajectories WITH measures (step changes)
+                    measures_df = st.session_state.get("crrem_measures_df")
+                    measures_records = _measures_df_to_records(measures_df)
+
+                    # Parse and validate measures
+                    ef_measures = {s: [] for s in ENERGY_SOURCE_ORDER}  # by energy source
+                    tariff_measures = {s: [] for s in ENERGY_SOURCE_ORDER}
+                    eff_measures = []  # (year, end_use, value)
+                    src_measures = []  # (year, end_use, source)
+                    pv_measures = []  # (year, pv_annual_production_kwh_per_a)
+                    parse_errors = []
+
+
+                    def _to_int_year(x):
+                        try:
+                            return int(float(x))
+                        except Exception:
+                            return None
+
+
+                    def _to_float(x):
+                        try:
+                            return float(str(x).replace(",", "."))
+                        except Exception:
+                            return None
+
+
+                    def _norm_source(s):
+                        s = str(s).strip()
+                        # allow case-insensitive matching
+                        for opt in ENERGY_SOURCE_ORDER:
+                            if str(opt).lower() == s.lower():
+                                return str(opt)
+                        return None
+
+
+                    for i, rec in enumerate(measures_records, start=1):
+                        p = str(rec.get("Parameter", "")).strip()
+                        y = _to_int_year(rec.get("Year"))
+                        v = rec.get("New Value", "")
+                        if not p or p not in param_specs:
+                            continue
+                        if y is None:
+                            parse_errors.append(f"Row {i}: invalid Year.")
+                            continue
+                        if y < int(start_year) or y > int(max_year):
+                            # ignore out-of-horizon rows
+                            continue
+
+                        spec = param_specs[p]
+                        kind = spec.get("kind")
+
+                        if spec.get("dtype") == "float":
+                            fv = _to_float(v)
+                            if fv is None:
+                                parse_errors.append(f"Row {i}: '{p}' expects a numeric New Value.")
+                                continue
+                            if kind == "ef":
+                                ef_measures[str(spec["source"])].append((int(y), float(fv)))
+                            elif kind == "tariff":
+                                tariff_measures[str(spec["source"])].append((int(y), float(fv)))
+                            elif kind == "eff":
+                                eff_measures.append((int(y), str(spec["end_use"]), float(fv)))
+                            elif kind == "pv":
+                                pv_measures.append((int(y), float(fv)))
+                        elif spec.get("dtype") == "source":
+                            sv = _norm_source(v)
+                            if sv is None:
+                                parse_errors.append(f"Row {i}: '{p}' expects one of: {', '.join(ENERGY_SOURCE_ORDER)}.")
+                                continue
+                            src_measures.append((int(y), str(spec["end_use"]), str(sv)))
+
+                    if parse_errors:
+                        st.warning("Some measures were ignored due to invalid inputs:\n- " + "\n- ".join(parse_errors))
+
+                    has_any_measures = any([
+                        any(v for v in ef_measures.values()),
+                        any(v for v in tariff_measures.values()),
+                        len(eff_measures) > 0,
+                        len(src_measures) > 0,
+                        len(pv_measures) > 0,
+                    ])
+
+                    if has_any_measures:
+                        # Sort measures by year
+                        for k in ef_measures:
+                            ef_measures[k] = sorted(ef_measures[k], key=lambda t: t[0])
+                        for k in tariff_measures:
+                            tariff_measures[k] = sorted(tariff_measures[k], key=lambda t: t[0])
+                        eff_measures = sorted(eff_measures, key=lambda t: t[0])
+                        src_measures = sorted(src_measures, key=lambda t: t[0])
+                        pv_measures = sorted(pv_measures, key=lambda t: t[0])
+
+                        # Baseline maps (from current scenario state)
+                        eff_base = {u: float(st.session_state.get(f"eff_{u}", 1.0)) for u in end_uses_all}
+                        src_base = {u: str(st.session_state.get(f"source_{u}", "Electricity")) for u in end_uses_all}
+                        src_base["PV_Generation"] = "Electricity"
+
+                        base_tariffs = {
+                            "Electricity": float(st.session_state.get("cost_electricity", 0.0)),
+                            "Green Electricity": float(st.session_state.get("cost_green_electricity", 0.0)),
+                            "Gas": float(st.session_state.get("cost_gas", 0.0)),
+                            "District Heating": float(st.session_state.get("cost_dh", 0.0)),
+                            "District Cooling": float(st.session_state.get("cost_dc", 0.0)),
+                            "Biomass": float(st.session_state.get("cost_biomass", 0.0)),
                         }
 
-                    measures_df = st.data_editor(st.session_state["crrem_measures_df"], **editor_kwargs)
-                    st.session_state["crrem_measures_df"] = measures_df
-                    # Deleting measures (explicit controls to support Streamlit versions where row-delete UI is not exposed)
-                    if not measures_df.empty:
+                        # Annual kWh by end use from uploaded sheet (raw, before efficiency/source assignment)
+                        annual_by_enduse = df_crrem_m.groupby("End_Use", as_index=True)["kWh"].sum()
 
-                        def _fmt_measure_idx(i):
-                            try:
-                                p = str(measures_df.loc[i, "Parameter"]) if pd.notna(
-                                    measures_df.loc[i, "Parameter"]) else ""
-                            except Exception:
-                                p = ""
-                            try:
-                                yv = measures_df.loc[i, "Year"]
-                                y = str(int(float(yv))) if pd.notna(yv) and str(yv).strip() != "" else ""
-                            except Exception:
-                                y = ""
-                            return f"{i + 1}: {p} @ {y}"
+                        # PV scaling (scenario-specific). PV is always included; if PV scaling is disabled, scale=1.0.
+                        pv_apply_scale = bool(st.session_state.get("pv_sc_enabled", False))
+                        pv_scale = float(st.session_state.get("pv_scale", 1.0))
+                        pv_scale_eff = pv_scale if pv_apply_scale else 1.0
 
 
-                        def _crrem_delete_selected_measures():
-                            sel = st.session_state.get("crrem_measures_delete_idx", [])
-                            if sel:
-                                df = st.session_state.get("crrem_measures_df", pd.DataFrame()).copy()
-                                try:
-                                    df = df.drop(sel).reset_index(drop=True)
-                                except Exception:
-                                    df = df.iloc[[j for j in range(len(df)) if j not in set(sel)]].reset_index(
-                                        drop=True)
-                                st.session_state["crrem_measures_df"] = df
-                            # Clear selection (safe to mutate in callback)
-                            st.session_state["crrem_measures_delete_idx"] = []
+                        def _ef_at_year(src: str, year: int, inclusive: bool = True) -> float:
+                            # Green Electricity is always zero by project rule
+                            if str(src) == "Green Electricity":
+                                return 0.0
+                            # Find the most recent EF-setting (project baseline year or EF measure)
+                            y0 = int(project_year_val)
+                            v0 = float(base_factors.get(str(src), 0.0))
+                            for ym, vm in ef_measures.get(str(src), []):
+                                if ((int(ym) <= int(year)) if inclusive else (int(ym) < int(year))) and int(ym) >= int(y0):
+                                    y0 = int(ym)
+                                    v0 = float(vm)
+
+                            # Apply electricity-based decarbonization ratio EF_grid(year)/EF_grid(y0)
+                            y0_c = _clamp_year_to_series(int(y0), ef_grid)
+                            y_c = _clamp_year_to_series(int(year), ef_grid)
+                            denom = float(ef_grid.loc[y0_c]) if float(ef_grid.loc[y0_c]) != 0 else None
+                            if denom is None:
+                                return float(v0)
+                            return float(v0) * float(ef_grid.loc[y_c]) / denom
 
 
-                        st.multiselect(
-                            "Select measure rows to delete",
-                            options=list(measures_df.index),
-                            format_func=_fmt_measure_idx,
-                            key="crrem_measures_delete_idx",
-                        )
-                        st.button(
-                            "Delete selected measures",
-                            key="crrem_delete_measures_btn",
-                            on_click=_crrem_delete_selected_measures,
-                            use_container_width=False,
-                        )
+                        # Trajectories
+                        carbon_meas = {}
+                        eui_meas = {}
+                        carbon_pre = {}
+                        eui_pre = {}
 
-                    # Persist measures into the active scenario payload (saved in Scenarios sheet)
-                    try:
-                        _sc = st.session_state.get("scenarios", {})
-                        _act = st.session_state.get("active_scenario")
-                        if _act in _sc:
-                            _sc[_act]["crrem_measures"] = _measures_df_to_records(measures_df)
-                            st.session_state["scenarios"] = _sc
-                    except Exception:
-                        pass
-
-                    st.caption("Note: tariff measures are stored but do not affect the CRREM Carbon/EUI charts yet.")
-
-                # --- Compute trajectories WITH measures (step changes)
-                measures_df = st.session_state.get("crrem_measures_df")
-                measures_records = _measures_df_to_records(measures_df)
-
-                # Parse and validate measures
-                ef_measures = {s: [] for s in ENERGY_SOURCE_ORDER}  # by energy source
-                tariff_measures = {s: [] for s in ENERGY_SOURCE_ORDER}
-                eff_measures = []  # (year, end_use, value)
-                src_measures = []  # (year, end_use, source)
-                pv_measures = []  # (year, pv_annual_production_kwh_per_a)
-                parse_errors = []
+                        # Years where the measures curve should have a vertical step (only for parameters that affect these charts)
+                        step_years = set()
+                        step_years.update([int(ym) for ym, _, _ in eff_measures])
+                        step_years.update([int(ym) for ym, _, _ in src_measures])
+                        for _src, _lst in ef_measures.items():
+                            step_years.update([int(ym) for ym, _ in _lst])
+                        step_years.update([int(ym) for ym, _ in pv_measures])
+                        step_years = sorted([yy for yy in step_years if int(start_year) <= int(yy) <= int(max_year)])
 
 
-                def _to_int_year(x):
-                    try:
-                        return int(float(x))
-                    except Exception:
-                        return None
+                        def _compute_for_year(y: int, include_year_measures: bool) -> Tuple[float, float]:
+                            # Build year-specific parameter sets (piecewise constant; only measure years should create vertical steps in plots)
+                            eff_y = dict(eff_base)
+                            src_y = dict(src_base)
+                            tariffs_y = dict(base_tariffs)
 
+                            # PV annual production override (kWh/a). If set via measures, overrides baseline PV (and sidebar PV scale).
+                            pv_annual_override_y = None
 
-                def _to_float(x):
-                    try:
-                        return float(str(x).replace(",", "."))
-                    except Exception:
-                        return None
+                            def _cmp(ym: int) -> bool:
+                                return int(ym) <= int(y) if include_year_measures else int(ym) < int(y)
 
-
-                def _norm_source(s):
-                    s = str(s).strip()
-                    # allow case-insensitive matching
-                    for opt in ENERGY_SOURCE_ORDER:
-                        if str(opt).lower() == s.lower():
-                            return str(opt)
-                    return None
-
-
-                for i, rec in enumerate(measures_records, start=1):
-                    p = str(rec.get("Parameter", "")).strip()
-                    y = _to_int_year(rec.get("Year"))
-                    v = rec.get("New Value", "")
-                    if not p or p not in param_specs:
-                        continue
-                    if y is None:
-                        parse_errors.append(f"Row {i}: invalid Year.")
-                        continue
-                    if y < int(start_year) or y > int(max_year):
-                        # ignore out-of-horizon rows
-                        continue
-
-                    spec = param_specs[p]
-                    kind = spec.get("kind")
-
-                    if spec.get("dtype") == "float":
-                        fv = _to_float(v)
-                        if fv is None:
-                            parse_errors.append(f"Row {i}: '{p}' expects a numeric New Value.")
-                            continue
-                        if kind == "ef":
-                            ef_measures[str(spec["source"])].append((int(y), float(fv)))
-                        elif kind == "tariff":
-                            tariff_measures[str(spec["source"])].append((int(y), float(fv)))
-                        elif kind == "eff":
-                            eff_measures.append((int(y), str(spec["end_use"]), float(fv)))
-                        elif kind == "pv":
-                            pv_measures.append((int(y), float(fv)))
-                    elif spec.get("dtype") == "source":
-                        sv = _norm_source(v)
-                        if sv is None:
-                            parse_errors.append(f"Row {i}: '{p}' expects one of: {', '.join(ENERGY_SOURCE_ORDER)}.")
-                            continue
-                        src_measures.append((int(y), str(spec["end_use"]), str(sv)))
-
-                if parse_errors:
-                    st.warning("Some measures were ignored due to invalid inputs:\n- " + "\n- ".join(parse_errors))
-
-                has_any_measures = any([
-                    any(v for v in ef_measures.values()),
-                    any(v for v in tariff_measures.values()),
-                    len(eff_measures) > 0,
-                    len(src_measures) > 0,
-                    len(pv_measures) > 0,
-                ])
-
-                if has_any_measures:
-                    # Sort measures by year
-                    for k in ef_measures:
-                        ef_measures[k] = sorted(ef_measures[k], key=lambda t: t[0])
-                    for k in tariff_measures:
-                        tariff_measures[k] = sorted(tariff_measures[k], key=lambda t: t[0])
-                    eff_measures = sorted(eff_measures, key=lambda t: t[0])
-                    src_measures = sorted(src_measures, key=lambda t: t[0])
-                    pv_measures = sorted(pv_measures, key=lambda t: t[0])
-
-                    # Baseline maps (from current scenario state)
-                    eff_base = {u: float(st.session_state.get(f"eff_{u}", 1.0)) for u in end_uses_all}
-                    src_base = {u: str(st.session_state.get(f"source_{u}", "Electricity")) for u in end_uses_all}
-                    src_base["PV_Generation"] = "Electricity"
-
-                    base_tariffs = {
-                        "Electricity": float(st.session_state.get("cost_electricity", 0.0)),
-                        "Green Electricity": float(st.session_state.get("cost_green_electricity", 0.0)),
-                        "Gas": float(st.session_state.get("cost_gas", 0.0)),
-                        "District Heating": float(st.session_state.get("cost_dh", 0.0)),
-                        "District Cooling": float(st.session_state.get("cost_dc", 0.0)),
-                        "Biomass": float(st.session_state.get("cost_biomass", 0.0)),
-                    }
-
-                    # Annual kWh by end use from uploaded sheet (raw, before efficiency/source assignment)
-                    annual_by_enduse = df_crrem_m.groupby("End_Use", as_index=True)["kWh"].sum()
-
-                    # PV scaling (scenario-specific). PV is always included; if PV scaling is disabled, scale=1.0.
-                    pv_apply_scale = bool(st.session_state.get("pv_sc_enabled", False))
-                    pv_scale = float(st.session_state.get("pv_scale", 1.0))
-                    pv_scale_eff = pv_scale if pv_apply_scale else 1.0
-
-
-                    def _ef_at_year(src: str, year: int, inclusive: bool = True) -> float:
-                        # Green Electricity is always zero by project rule
-                        if str(src) == "Green Electricity":
-                            return 0.0
-                        # Find the most recent EF-setting (project baseline year or EF measure)
-                        y0 = int(project_year_val)
-                        v0 = float(base_factors.get(str(src), 0.0))
-                        for ym, vm in ef_measures.get(str(src), []):
-                            if ((int(ym) <= int(year)) if inclusive else (int(ym) < int(year))) and int(ym) >= int(y0):
-                                y0 = int(ym)
-                                v0 = float(vm)
-
-                        # Apply electricity-based decarbonization ratio EF_grid(year)/EF_grid(y0)
-                        y0_c = _clamp_year_to_series(int(y0), ef_grid)
-                        y_c = _clamp_year_to_series(int(year), ef_grid)
-                        denom = float(ef_grid.loc[y0_c]) if float(ef_grid.loc[y0_c]) != 0 else None
-                        if denom is None:
-                            return float(v0)
-                        return float(v0) * float(ef_grid.loc[y_c]) / denom
-
-
-                    # Trajectories
-                    carbon_meas = {}
-                    eui_meas = {}
-                    carbon_pre = {}
-                    eui_pre = {}
-
-                    # Years where the measures curve should have a vertical step (only for parameters that affect these charts)
-                    step_years = set()
-                    step_years.update([int(ym) for ym, _, _ in eff_measures])
-                    step_years.update([int(ym) for ym, _, _ in src_measures])
-                    for _src, _lst in ef_measures.items():
-                        step_years.update([int(ym) for ym, _ in _lst])
-                    step_years.update([int(ym) for ym, _ in pv_measures])
-                    step_years = sorted([yy for yy in step_years if int(start_year) <= int(yy) <= int(max_year)])
-
-
-                    def _compute_for_year(y: int, include_year_measures: bool) -> Tuple[float, float]:
-                        # Build year-specific parameter sets (piecewise constant; only measure years should create vertical steps in plots)
-                        eff_y = dict(eff_base)
-                        src_y = dict(src_base)
-                        tariffs_y = dict(base_tariffs)
-
-                        # PV annual production override (kWh/a). If set via measures, overrides baseline PV (and sidebar PV scale).
-                        pv_annual_override_y = None
-
-                        def _cmp(ym: int) -> bool:
-                            return int(ym) <= int(y) if include_year_measures else int(ym) < int(y)
-
-                        # Apply efficiency measures (< y for 'pre', <= y for 'post')
-                        for ym, eu, val in eff_measures:
-                            if _cmp(ym):
-                                eff_y[str(eu)] = float(val)
-
-                        # Apply source assignment measures
-                        for ym, eu, val in src_measures:
-                            if _cmp(ym):
-                                src_y[str(eu)] = str(val)
-
-                        # Tariffs measures (stored; not used in these charts yet)
-                        for s in tariffs_y.keys():
-                            for ym, val in tariff_measures.get(str(s), []):
+                            # Apply efficiency measures (< y for 'pre', <= y for 'post')
+                            for ym, eu, val in eff_measures:
                                 if _cmp(ym):
-                                    tariffs_y[str(s)] = float(val)
+                                    eff_y[str(eu)] = float(val)
 
-                        # PV measures (affect these charts)
-                        for ym, val in pv_measures:
-                            if _cmp(ym):
-                                pv_annual_override_y = float(val)
-                        # Compute annual kWh by energy source for year y
-                        kwh_by_source_y = {}
-                        consumption_kwh_y = 0.0
+                            # Apply source assignment measures
+                            for ym, eu, val in src_measures:
+                                if _cmp(ym):
+                                    src_y[str(eu)] = str(val)
 
-                        for eu, kwh in annual_by_enduse.items():
-                            eu = str(eu)
-                            effv = float(eff_y.get(eu, 1.0) or 1.0)
-                            if effv == 0:
-                                effv = 1.0
-                            kwh_adj = float(kwh) / effv
+                            # Tariffs measures (stored; not used in these charts yet)
+                            for s in tariffs_y.keys():
+                                for ym, val in tariff_measures.get(str(s), []):
+                                    if _cmp(ym):
+                                        tariffs_y[str(s)] = float(val)
 
-                            if eu == "PV_Generation":
-                                # PV always offsets electricity; enforce negative generation
-                                if pv_annual_override_y is not None:
-                                    # Absolute annual PV production (kWh/a) provided by measures
-                                    kwh_adj = -abs(float(pv_annual_override_y))
-                                else:
-                                    # Baseline PV (from uploaded data) scaled by sidebar PV factor (if enabled)
-                                    kwh_adj = -abs(kwh_adj) * float(pv_scale_eff)
-                                src = "Electricity"
-                            else:
-                                consumption_kwh_y += kwh_adj
-                                src = str(src_y.get(eu, "Electricity"))
-                                if src not in ENERGY_SOURCE_ORDER:
+                            # PV measures (affect these charts)
+                            for ym, val in pv_measures:
+                                if _cmp(ym):
+                                    pv_annual_override_y = float(val)
+                            # Compute annual kWh by energy source for year y
+                            kwh_by_source_y = {}
+                            consumption_kwh_y = 0.0
+
+                            for eu, kwh in annual_by_enduse.items():
+                                eu = str(eu)
+                                effv = float(eff_y.get(eu, 1.0) or 1.0)
+                                if effv == 0:
+                                    effv = 1.0
+                                kwh_adj = float(kwh) / effv
+
+                                if eu == "PV_Generation":
+                                    # PV always offsets electricity; enforce negative generation
+                                    if pv_annual_override_y is not None:
+                                        # Absolute annual PV production (kWh/a) provided by measures
+                                        kwh_adj = -abs(float(pv_annual_override_y))
+                                    else:
+                                        # Baseline PV (from uploaded data) scaled by sidebar PV factor (if enabled)
+                                        kwh_adj = -abs(kwh_adj) * float(pv_scale_eff)
                                     src = "Electricity"
+                                else:
+                                    consumption_kwh_y += kwh_adj
+                                    src = str(src_y.get(eu, "Electricity"))
+                                    if src not in ENERGY_SOURCE_ORDER:
+                                        src = "Electricity"
 
-                            kwh_by_source_y[src] = float(kwh_by_source_y.get(src, 0.0)) + float(kwh_adj)
+                                kwh_by_source_y[src] = float(kwh_by_source_y.get(src, 0.0)) + float(kwh_adj)
 
-                        # Clamp net electricity to >= 0 (no export credit)
-                        if "Electricity" in kwh_by_source_y:
-                            kwh_by_source_y["Electricity"] = max(float(kwh_by_source_y["Electricity"]), 0.0)
+                            # Clamp net electricity to >= 0 (no export credit)
+                            if "Electricity" in kwh_by_source_y:
+                                kwh_by_source_y["Electricity"] = max(float(kwh_by_source_y["Electricity"]), 0.0)
 
-                        # Compute emissions intensity for year y
-                        emis_y = 0.0
-                        for src, kwhv in kwh_by_source_y.items():
-                            ef_y = _ef_at_year(str(src), int(y), inclusive=include_year_measures)
-                            emis_y += float(kwhv) * float(ef_y)
+                            # Compute emissions intensity for year y
+                            emis_y = 0.0
+                            for src, kwhv in kwh_by_source_y.items():
+                                ef_y = _ef_at_year(str(src), int(y), inclusive=include_year_measures)
+                                emis_y += float(kwhv) * float(ef_y)
 
-                        carbon_int = float(emis_y) / project_area_val
-                        eui_int = float(consumption_kwh_y) / project_area_val
-                        return carbon_int, eui_int
-
-
-                    for y in years_avail:
-                        y_int = int(y)
-
-                        # Pre-step point at the SAME calendar year using parameters strictly before year y
-                        if (y_int in step_years) and (y_int != int(years_avail[0])):
-                            cpre, epre = _compute_for_year(y_int, include_year_measures=False)
-                            carbon_pre[y_int] = float(cpre)
-                            eui_pre[y_int] = float(epre)
-
-                        cpost, epost = _compute_for_year(y_int, include_year_measures=True)
-                        carbon_meas[y_int] = float(cpost)
-                        eui_meas[y_int] = float(epost)
-
-                    carbon_meas_s = pd.Series(carbon_meas).reindex(years_avail)
-                    eui_meas_s = pd.Series(eui_meas).reindex(years_avail)
+                            carbon_int = float(emis_y) / project_area_val
+                            eui_int = float(consumption_kwh_y) / project_area_val
+                            return carbon_int, eui_int
 
 
-                    # Build plot series where vertical steps occur ONLY in the years a measure is implemented.
-                    # Between measure years, the line follows the normal year-to-year trajectory (like the baseline curve).
-                    def _build_step_only_plot_series(years_list, post_series, pre_dict, step_years_list):
-                        xs, ys = [], []
-                        step_set = set([int(v) for v in step_years_list])
-                        first_year = int(years_list[0]) if len(years_list) else None
-                        for yy in years_list:
-                            yy = int(yy)
-                            if (first_year is not None) and (yy in step_set) and (yy != first_year) and (
-                                    yy in pre_dict):
-                                xs.append(yy)
-                                ys.append(float(pre_dict[yy]))
-                                xs.append(yy)
-                                ys.append(float(post_series.loc[yy]))
-                            else:
-                                xs.append(yy)
-                                ys.append(float(post_series.loc[yy]))
-                        return xs, ys
+                        for y in years_avail:
+                            y_int = int(y)
+
+                            # Pre-step point at the SAME calendar year using parameters strictly before year y
+                            if (y_int in step_years) and (y_int != int(years_avail[0])):
+                                cpre, epre = _compute_for_year(y_int, include_year_measures=False)
+                                carbon_pre[y_int] = float(cpre)
+                                eui_pre[y_int] = float(epre)
+
+                            cpost, epost = _compute_for_year(y_int, include_year_measures=True)
+                            carbon_meas[y_int] = float(cpost)
+                            eui_meas[y_int] = float(epost)
+
+                        carbon_meas_s = pd.Series(carbon_meas).reindex(years_avail)
+                        eui_meas_s = pd.Series(eui_meas).reindex(years_avail)
 
 
-                    carbon_meas_x, carbon_meas_y = _build_step_only_plot_series(years_avail, carbon_meas_s, carbon_pre,
-                                                                                step_years)
-                    eui_meas_x, eui_meas_y = _build_step_only_plot_series(years_avail, eui_meas_s, eui_pre, step_years)
+                        # Build plot series where vertical steps occur ONLY in the years a measure is implemented.
+                        # Between measure years, the line follows the normal year-to-year trajectory (like the baseline curve).
+                        def _build_step_only_plot_series(years_list, post_series, pre_dict, step_years_list):
+                            xs, ys = [], []
+                            step_set = set([int(v) for v in step_years_list])
+                            first_year = int(years_list[0]) if len(years_list) else None
+                            for yy in years_list:
+                                yy = int(yy)
+                                if (first_year is not None) and (yy in step_set) and (yy != first_year) and (
+                                        yy in pre_dict):
+                                    xs.append(yy)
+                                    ys.append(float(pre_dict[yy]))
+                                    xs.append(yy)
+                                    ys.append(float(post_series.loc[yy]))
+                                else:
+                                    xs.append(yy)
+                                    ys.append(float(post_series.loc[yy]))
+                            return xs, ys
 
-                    stranding_carbon_meas = find_stranding_year(carbon_meas_s, carbon_limit)
-                    stranding_eui_meas = find_stranding_year(eui_meas_s, eui_limit)
 
-                    st.markdown("### With measures (step changes)")
+                        carbon_meas_x, carbon_meas_y = _build_step_only_plot_series(years_avail, carbon_meas_s, carbon_pre,
+                                                                                    step_years)
+                        eui_meas_x, eui_meas_y = _build_step_only_plot_series(years_avail, eui_meas_s, eui_pre, step_years)
 
-                    mk1, mk2, mk3 = st.columns(3)
-                    with mk1:
-                        st.metric("Measures defined", str(len(measures_records)))
-                    with mk2:
-                        st.metric("Stranding year (Carbon, with measures)",
-                                  "Not stranded ≤ 2050" if stranding_carbon_meas is None else str(
-                                      stranding_carbon_meas))
-                    with mk3:
-                        st.metric("Stranding year (EUI, with measures)",
-                                  "Not stranded ≤ 2050" if stranding_eui_meas is None else str(stranding_eui_meas))
+                        stranding_carbon_meas = find_stranding_year(carbon_meas_s, carbon_limit)
+                        stranding_eui_meas = find_stranding_year(eui_meas_s, eui_limit)
 
-                    mcol, ecol2 = st.columns(2)
+                        st.write("### Projections with measures")
+                        st.metric("Active Scenario", f"## {st.session_state.get("active_scenario")}")
+                        mk1, mk2, mk3 = st.columns(3)
+                        with mk1:
+                            st.metric("Measures defined", str(len(measures_records)))
+                        with mk2:
+                            st.metric("Stranding year (Carbon)",
+                                      "Not stranded" if stranding_carbon_meas is None else str(
+                                          stranding_carbon_meas))
+                        with mk3:
+                            st.metric("Stranding year (EUI)",
+                                      "Not stranded" if stranding_eui_meas is None else str(stranding_eui_meas))
 
-                    with mcol:
-                        st.subheader("Carbon intensity vs CRREM pathway (with measures)")
-                        figm = go.Figure()
-                        # CRREM limit
-                        figm.add_trace(go.Scatter(
-                            x=years_avail, y=carbon_limit.values,
-                            mode="lines+markers",
-                            name="CRREM limit",
-                            line=dict(color=CRREM_COLOR_LIMIT),
-                            marker=dict(color=CRREM_COLOR_LIMIT),
-                        ))
-                        # baseline
-                        if show_overlay:
+                        mcol, ecol2 = st.columns(2)
+
+                        with mcol:
+                            st.write("#### Carbon intensity vs CRREM pathway")
+                            figm = go.Figure()
+                            # CRREM limit
                             figm.add_trace(go.Scatter(
-                                x=years_avail, y=carbon_asset.values,
+                                x=years_avail, y=carbon_limit.values,
                                 mode="lines+markers",
-                                name="Baseline project",
-                                line=dict(dash="dash", color=CRREM_COLOR_BASELINE),
-                                marker=dict(color=CRREM_COLOR_BASELINE),
+                                name="CRREM limit",
+                                line=dict(color=CRREM_COLOR_LIMIT),
+                                marker=dict(color=CRREM_COLOR_LIMIT),
                             ))
-                        # with measures (step)
-                        figm.add_trace(go.Scatter(
-                            x=carbon_meas_x, y=carbon_meas_y,
-                            mode="lines+markers",
-                            name="Project (with measures)",
-                            line=dict(color=CRREM_COLOR_MEASURES),
-                            marker=dict(color=CRREM_COLOR_MEASURES),
-                        ))
-                        figm.update_layout(height=520, yaxis_title="kgCO₂e/m²·a", legend_title="",
-                                           legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
-                                                       x=0.5), margin=dict(l=40, r=20, t=50, b=85))
-                        figm.update_yaxes(rangemode="tozero")
-                        if stranding_carbon_meas is not None:
-                            figm.add_vline(x=stranding_carbon_meas, line_width=3, line_dash="dash", line_color="black")
-                        st.plotly_chart(figm, use_container_width=True, key="crrem_carbon_measures_chart")
+                            # baseline
+                            if show_overlay:
+                                figm.add_trace(go.Scatter(
+                                    x=years_avail, y=carbon_asset.values,
+                                    mode="lines+markers",
+                                    name="Baseline project",
+                                    line=dict(dash="dash", color=CRREM_COLOR_BASELINE),
+                                    marker=dict(color=CRREM_COLOR_BASELINE),
+                                ))
+                            # with measures (step)
+                            figm.add_trace(go.Scatter(
+                                x=carbon_meas_x, y=carbon_meas_y,
+                                mode="lines+markers",
+                                name="Project (with measures)",
+                                line=dict(color=CRREM_COLOR_MEASURES),
+                                marker=dict(color=CRREM_COLOR_MEASURES),
+                            ))
+                            figm.update_layout(height=520, yaxis_title="kgCO₂e/m²·a", legend_title="",
+                                               legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
+                                                           x=0.5), margin=dict(l=40, r=20, t=50, b=85))
+                            figm.update_yaxes(rangemode="tozero")
+                            if stranding_carbon_meas is not None:
+                                figm.add_vline(x=stranding_carbon_meas, line_width=3, line_dash="dash", line_color="black")
+                            st.plotly_chart(figm, use_container_width=True, key="crrem_carbon_measures_chart")
 
-                    with ecol2:
-                        st.subheader("EUI vs CRREM pathway (with measures)")
-                        fige = go.Figure()
-                        fige.add_trace(go.Scatter(
-                            x=years_avail, y=eui_limit.values,
-                            mode="lines+markers",
-                            name="CRREM limit",
-                            line=dict(color=CRREM_COLOR_LIMIT),
-                            marker=dict(color=CRREM_COLOR_LIMIT),
-                        ))
-                        if show_overlay:
+                        with ecol2:
+                            st.write("#### EUI vs CRREM pathway")
+                            fige = go.Figure()
                             fige.add_trace(go.Scatter(
-                                x=years_avail, y=eui_asset_series.values,
+                                x=years_avail, y=eui_limit.values,
                                 mode="lines+markers",
-                                name="Baseline project",
-                                line=dict(dash="dash", color=CRREM_COLOR_BASELINE),
-                                marker=dict(color=CRREM_COLOR_BASELINE),
+                                name="CRREM limit",
+                                line=dict(color=CRREM_COLOR_LIMIT),
+                                marker=dict(color=CRREM_COLOR_LIMIT),
                             ))
-                        fige.add_trace(go.Scatter(
-                            x=eui_meas_x, y=eui_meas_y,
-                            mode="lines+markers",
-                            name="Project (with measures)",
-                            line=dict(color=CRREM_COLOR_MEASURES),
-                            marker=dict(color=CRREM_COLOR_MEASURES),
-                        ))
-                        fige.update_layout(height=520, yaxis_title="kWh/m²·a", legend_title="",
-                                           legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
-                                                       x=0.5), margin=dict(l=40, r=20, t=50, b=85))
-                        fige.update_yaxes(rangemode="tozero")
-                        if stranding_eui_meas is not None:
-                            fige.add_vline(x=stranding_eui_meas, line_width=3, line_dash="dash", line_color="black")
-                        st.plotly_chart(fige, use_container_width=True, key="crrem_eui_measures_chart")
+                            if show_overlay:
+                                fige.add_trace(go.Scatter(
+                                    x=years_avail, y=eui_asset_series.values,
+                                    mode="lines+markers",
+                                    name="Baseline project",
+                                    line=dict(dash="dash", color=CRREM_COLOR_BASELINE),
+                                    marker=dict(color=CRREM_COLOR_BASELINE),
+                                ))
+                            fige.add_trace(go.Scatter(
+                                x=eui_meas_x, y=eui_meas_y,
+                                mode="lines+markers",
+                                name="Project (with measures)",
+                                line=dict(color=CRREM_COLOR_MEASURES),
+                                marker=dict(color=CRREM_COLOR_MEASURES),
+                            ))
+                            fige.update_layout(height=520, yaxis_title="kWh/m²·a", legend_title="",
+                                               legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
+                                                           x=0.5), margin=dict(l=40, r=20, t=50, b=85))
+                            fige.update_yaxes(rangemode="tozero")
+                            if stranding_eui_meas is not None:
+                                fige.add_vline(x=stranding_eui_meas, line_width=3, line_dash="dash", line_color="black")
+                            st.plotly_chart(fige, use_container_width=True, key="crrem_eui_measures_chart")
 
-                st.caption(
-                    "Notes: Green Electricity and PV offset are treated with EF=0. PV offsets Electricity consumption (no export credit).")
+                    st.caption(
+                        "Notes: Green Electricity and PV offset are treated with EF=0. PV offsets Electricity consumption (no export credit).")
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
