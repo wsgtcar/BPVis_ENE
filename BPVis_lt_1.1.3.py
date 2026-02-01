@@ -8,11 +8,14 @@ import streamlit as st
 import json
 from copy import deepcopy
 
-
 # --- CRREM chart colors (synced across CRREM diagrams)
-CRREM_COLOR_LIMIT = "#c02419"   # light red
+CRREM_COLOR_LIMIT = "#c02419"  # light red
 CRREM_COLOR_BASELINE = "#5a73a5"  # light blue
 CRREM_COLOR_MEASURES = "#a9c724"  # light green
+
+# --- Scenario palette (used in Scenarios tab Net KPI bar charts)
+SCENARIO_COLOR_PALETTE = ["#c02419", "#5a73a5", "#a9c724", "#42b360", "#833fd1", "#42b38d"]
+
 
 # --- Robust numeric input helpers (dot/comma tolerant, no spinner behavior)
 def _seed_default(key, default):
@@ -37,7 +40,7 @@ def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None,
     txt_key = f"{key}_txt"
     if txt_key not in st.session_state:
         st.session_state[txt_key] = (fmt.format(default) if fmt else str(default)) if hasattr(fmt, "format") else (
-                    fmt or str(default))
+                fmt or str(default))
     val = st.text_input(label, key=txt_key, help=help)
     v = _parse_float_locale(val, default)
     if (min_value is not None) and (v < min_value):
@@ -306,7 +309,6 @@ def build_scenarios_sheet(scenarios: Dict[str, dict], active_name: Optional[str]
     return pd.DataFrame(rows)
 
 
-
 def _measures_df_to_records(df) -> list:
     """Convert a CRREM measures dataframe to JSON-serializable records."""
     if df is None:
@@ -356,6 +358,71 @@ def _measures_records_to_df(records) -> pd.DataFrame:
         return pd.DataFrame(columns=["Parameter", "Year", "New Value"])
 
 
+def _mixed_use_df_to_records(df) -> list:
+    """Convert a CRREM mixed-use dataframe to JSON-serializable records."""
+    if df is None:
+        return []
+    if isinstance(df, list):
+        return df
+    try:
+        if isinstance(df, pd.DataFrame):
+            if df.empty:
+                return []
+            cols = ["Use Type", "Area Share %"]
+            for c in cols:
+                if c not in df.columns:
+                    return []
+            out = []
+            for _, row in df.iterrows():
+                use = row.get("Use Type")
+                share = row.get("Area Share %")
+                if use is None or str(use).strip() == "":
+                    continue
+                try:
+                    share_f = float(str(share).replace(",", ".")) if share is not None and str(
+                        share).strip() != "" else 0.0
+                except Exception:
+                    share_f = 0.0
+                out.append({"Use Type": str(use), "Area Share %": share_f})
+            return out
+    except Exception:
+        return []
+    return []
+
+
+def _mixed_use_records_to_df(records) -> pd.DataFrame:
+    """Convert saved mixed-use records to a dataframe with stable columns."""
+    cols = ["Use Type", "Area Share %"]
+    try:
+        if records is None:
+            return pd.DataFrame(columns=cols)
+        if isinstance(records, pd.DataFrame):
+            df = records.copy()
+        elif isinstance(records, list):
+            df = pd.DataFrame(records)
+        else:
+            df = pd.DataFrame(columns=cols)
+
+        for c in cols:
+            if c not in df.columns:
+                df[c] = None
+        df = df[cols].copy()
+
+        # Coerce share to float
+        def _to_f(x):
+            try:
+                return float(str(x).replace(",", ".")) if x is not None and str(x).strip() != "" else 0.0
+            except Exception:
+                return 0.0
+
+        df["Area Share %"] = df["Area Share %"].apply(_to_f)
+        df["Use Type"] = df["Use Type"].astype(str)
+
+        # drop empty
+        df = df[df["Use Type"].str.strip() != ""]
+        return df.reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=cols)
 
 
 def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> dict:
@@ -363,7 +430,7 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
     def_f = (preloaded_cfg.get("factors") if preloaded_cfg else {}) or {}
     def_t = (preloaded_cfg.get("tariffs") if preloaded_cfg else {}) or {}
     saved_mapping = parse_mapping_df(preloaded_cfg.get("mapping_df")) if (
-                preloaded_cfg and preloaded_cfg.get("mapping_df") is not None) else {}
+            preloaded_cfg and preloaded_cfg.get("mapping_df") is not None) else {}
     def_eff = (preloaded_cfg.get("efficiency") if preloaded_cfg else {}) or {}
 
     return {
@@ -387,6 +454,11 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
         "efficiency": {use: float(def_eff.get(use, 1.0)) for use in end_uses},
         "pv": {"enabled": False, "scale": 1.0},
         "crrem_measures": [],
+        "crrem_use_type": "Office",
+        "crrem_mixed_use": [
+            {"Use Type": "Office", "Area Share %": 50.0},
+            {"Use Type": "Retail, High Street", "Area Share %": 50.0},
+        ],
     }
 
 
@@ -416,6 +488,8 @@ def capture_scenario_from_widgets(end_uses: list) -> dict:
             "scale": float(st.session_state.get("pv_scale", 1.0)),
         },
         "crrem_measures": _measures_df_to_records(st.session_state.get("crrem_measures_df")),
+        "crrem_use_type": str(st.session_state.get("crrem_use_type", "Office")),
+        "crrem_mixed_use": _mixed_use_df_to_records(st.session_state.get("crrem_mixed_use_df")),
     }
     return payload
 
@@ -460,6 +534,20 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
     # CRREM measures (scenario-specific)
     st.session_state["crrem_measures_df"] = _measures_records_to_df(payload.get("crrem_measures", []))
 
+    # CRREM use settings (scenario-specific; defaults to Office if absent)
+    try:
+        st.session_state["crrem_use_type"] = str(payload.get("crrem_use_type", "Office") or "Office")
+    except Exception:
+        st.session_state["crrem_use_type"] = "Office"
+
+    mixed_records = payload.get("crrem_mixed_use", None)
+    mixed_df = _mixed_use_records_to_df(mixed_records)
+    if mixed_df is None or mixed_df.empty:
+        mixed_df = pd.DataFrame({
+            "Use Type": ["Office", "Retail, High Street"],
+            "Area Share %": [50.0, 50.0],
+        })
+    st.session_state["crrem_mixed_use_df"] = mixed_df
 
 
 def build_efficiency_df(end_uses) -> pd.DataFrame:
@@ -520,7 +608,8 @@ def build_mapping_df(end_uses) -> pd.DataFrame:
 
 def parse_project_df_with_building_use(
         df: Optional[pd.DataFrame]
-) -> Tuple[Optional[str], Optional[float], Optional[str], Optional[str], Optional[float], Optional[float], Optional[int]]:
+) -> Tuple[
+    Optional[str], Optional[float], Optional[str], Optional[str], Optional[float], Optional[float], Optional[int]]:
     """Parse Project_Data sheet (name, area, currency, building use, latitude, longitude, year).
 
     Backwards compatible:
@@ -538,7 +627,10 @@ def parse_project_df_with_building_use(
 
     def _to_float(x):
         try:
-            return float(x) if x is not None and str(x).strip() != "" else None
+            if x is None or str(x).strip() == "":
+                return None
+            s = str(x).strip().replace(" ", "").replace(",", ".")
+            return float(s)
         except Exception:
             return None
 
@@ -750,7 +842,6 @@ def write_config_to_excel(original_bytes: bytes,
     return buf.getvalue()
 
 
-
 # =========================
 # CRREM (Germany) — data loader & helpers
 # =========================
@@ -873,7 +964,7 @@ if uploaded_file:
         "file_bytes": file_bytes,
     }
 
-        # --- Seed Project Data from file on each new upload (token-based)
+    # --- Seed Project Data from file on each new upload (token-based)
     #     This keeps Project Data global (not scenario-dependent) and ensures it reloads correctly from the workbook.
     wb_token = f"{uploaded_file.name}|{hashlib.md5(file_bytes).hexdigest()}"
     if st.session_state.get("_loaded_workbook_token") != wb_token:
@@ -1066,7 +1157,8 @@ with tab1:
 
             default_building_use = st.session_state.get("building_use")
             if not default_building_use:
-                default_building_use = preloaded["building_use"] if (preloaded and preloaded["building_use"]) else "Office"
+                default_building_use = preloaded["building_use"] if (
+                            preloaded and preloaded["building_use"]) else "Office"
 
             # Defaults for lat/lon (fallback to previous hard-coded values)
             default_lat = st.session_state.get("project_latitude")
@@ -1097,7 +1189,6 @@ with tab1:
                 key="project_year",
             )
 
-
             latitude = numeric_input(
                 "Project Latitude",
                 float(default_lat),
@@ -1120,7 +1211,8 @@ with tab1:
                                     "Leisure", "Healthcare"]
             building_use_index = building_use_options.index(
                 default_building_use) if default_building_use in building_use_options else 0
-            building_use = st.selectbox("Building Use", building_use_options, index=building_use_index, key="building_use")
+            building_use = st.selectbox("Building Use", building_use_options, index=building_use_index,
+                                        key="building_use")
 
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
@@ -1139,7 +1231,8 @@ with tab1:
                                              key="co2_emissions_dc", min_value=0.0, max_value=1.0, fmt="{:.3f}")
             co2_emissions_gas = numeric_input("CO2 Factor Gas", float(def_f.get("Gas", 0.180)), key="co2_emissions_gas",
                                               min_value=0.0, max_value=1.0, fmt="{:.3f}")
-            co2_emissions_biomass = numeric_input("CO2 Factor Biomass", float(def_f.get("Biomass", 0.000)), key="co2_emissions_biomass",
+            co2_emissions_biomass = numeric_input("CO2 Factor Biomass", float(def_f.get("Biomass", 0.000)),
+                                                  key="co2_emissions_biomass",
                                                   min_value=0.0, max_value=5.0, fmt="{:.3f}")
 
         # --- Energy Cost (€/kWh) ---
@@ -1147,7 +1240,8 @@ with tab1:
             st.write("Assign energy cost per source (per kWh)")
             default_currency = preloaded["currency"] if (
                     preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
-            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency), key="currency_symbol")
+            currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency),
+                                           key="currency_symbol")
 
             def_t = preloaded["tariffs"] if preloaded else {}
             cost_electricity = numeric_input(f"Cost Electricity ({currency_symbol}/kWh)",
@@ -1165,7 +1259,8 @@ with tab1:
                                     max_value=100.0, fmt="{:.2f}")
             cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.12)), key="cost_gas",
                                      min_value=0.0, max_value=100.0, fmt="{:.2f}")
-            cost_biomass = numeric_input(f"Cost Biomass ({currency_symbol}/kWh)", float(def_t.get("Biomass", 0.10)), key="cost_biomass",
+            cost_biomass = numeric_input(f"Cost Biomass ({currency_symbol}/kWh)", float(def_t.get("Biomass", 0.10)),
+                                         key="cost_biomass",
                                          min_value=0.0, max_value=100.0, fmt="{:.2f}")
 
         # ---- Sidebar: efficiency factors per End_Use (used in 'Energy Balance with Factors' tab)
@@ -1213,10 +1308,13 @@ with tab1:
             if st.button("Save Project", use_container_width=True):
                 # Ensure the active scenario payload is up-to-date (including CRREM measures)
                 try:
-                    if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
-                        st.session_state["scenarios"][st.session_state["active_scenario"]] = capture_scenario_from_widgets(end_uses)
+                    if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state[
+                        "scenarios"]:
+                        st.session_state["scenarios"][
+                            st.session_state["active_scenario"]] = capture_scenario_from_widgets(end_uses)
                 except Exception:
                     pass
+
 
                 # coerce UI strings to floats when possible
                 def _to_float_safe(s):
@@ -1541,26 +1639,16 @@ with tab6:
             # keep Mixed Use last (if present)
             if "Mixed Use" in use_options:
                 use_options = [u for u in use_options if u != "Mixed Use"] + ["Mixed Use"]
-
-            # Default CRREM use based on the app's Building Use (best-effort mapping)
+            # Default CRREM use: Office if not available / invalid (backwards compatible)
             if "crrem_use_type" not in st.session_state or st.session_state.get("crrem_use_type") not in use_options:
-                bu = str(st.session_state.get("building_use", "Office"))
-                bu_map = {
-                    "Office": "Office",
-                    "Retail": "Retail, High Street",
-                    "Residential": "Residential",
-                    "Healthcare": "Healthcare",
-                    "Hospitality": "Hotel",
-                    "Industrial": "Industrial, Distribution Warehouse",
-                    "Leisure": "Lodging, Leisure & Recreation",
-                    "Education": "Office",
-                }
-                st.session_state["crrem_use_type"] = bu_map.get(bu, "Office")
+                st.session_state["crrem_use_type"] = "Office" if "Office" in use_options else (
+                    use_options[0] if use_options else "Office")
 
             crrem_use = st.selectbox(
                 "CRREM Use Type",
                 use_options,
-                index=use_options.index(st.session_state["crrem_use_type"]) if st.session_state["crrem_use_type"] in use_options else 0,
+                index=use_options.index(st.session_state["crrem_use_type"]) if st.session_state[
+                                                                                   "crrem_use_type"] in use_options else 0,
                 key="crrem_use_type",
             )
 
@@ -1635,7 +1723,8 @@ with tab6:
                     df_crrem_m.loc[pv_mask, "kWh_adj"] = -df_crrem_m.loc[pv_mask, "kWh_adj"].abs()
 
                 # Energy source mapping (scenario-specific)
-                src_map_crrem = {u: st.session_state.get(f"source_{u}", "Electricity") for u in df_crrem_m["End_Use"].unique()}
+                src_map_crrem = {u: st.session_state.get(f"source_{u}", "Electricity") for u in
+                                 df_crrem_m["End_Use"].unique()}
                 df_crrem_m["Energy_Source"] = df_crrem_m["End_Use"].map(src_map_crrem).fillna("Electricity")
                 # normalize unknown sources
                 df_crrem_m.loc[~df_crrem_m["Energy_Source"].isin(ENERGY_SOURCE_ORDER), "Energy_Source"] = "Electricity"
@@ -1729,7 +1818,8 @@ with tab6:
                             carbon_limit = carbon_limit + w * carbon_pivot[c].reindex(years_avail).astype(float)
                             eui_limit = eui_limit + w * eui_pivot[c].reindex(years_avail).astype(float)
                         if missing:
-                            st.warning(f"Mixed-use components missing in dataset and ignored: {', '.join(sorted(set(missing)))}")
+                            st.warning(
+                                f"Mixed-use components missing in dataset and ignored: {', '.join(sorted(set(missing)))}")
 
                 # --- Stranding years
                 stranding_carbon = find_stranding_year(carbon_asset, carbon_limit)
@@ -1740,9 +1830,11 @@ with tab6:
                 with kpi1:
                     st.metric("Baseline year", f"{project_year_val}")
                 with kpi2:
-                    st.metric("Stranding year (Carbon)", "Not stranded ≤ 2050" if stranding_carbon is None else str(stranding_carbon))
+                    st.metric("Stranding year (Carbon)",
+                              "Not stranded ≤ 2050" if stranding_carbon is None else str(stranding_carbon))
                 with kpi3:
-                    st.metric("Stranding year (EUI)", "Not stranded ≤ 2050" if stranding_eui is None else str(stranding_eui))
+                    st.metric("Stranding year (EUI)",
+                              "Not stranded ≤ 2050" if stranding_eui is None else str(stranding_eui))
 
                 ccol, ecol = st.columns(2)
 
@@ -1754,7 +1846,9 @@ with tab6:
                         "CRREM limit": carbon_limit.values,
                     })
                     fig = px.line(df_plot, x="year", y=["Project", "CRREM limit"])
-                    fig.update_layout(height=520, yaxis_title="kgCO₂e/m²·a", legend_title="", legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5), margin=dict(l=40, r=20, t=50, b=85))
+                    fig.update_layout(height=520, yaxis_title="kgCO₂e/m²·a", legend_title="",
+                                      legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                      margin=dict(l=40, r=20, t=50, b=85))
                     fig.update_traces(mode="lines+markers")
                     fig.update_yaxes(rangemode="tozero")
                     # Enforce consistent colors across baseline and measures charts
@@ -1775,7 +1869,9 @@ with tab6:
                         "CRREM limit": eui_limit.values,
                     })
                     fig2 = px.line(df_plot2, x="year", y=["Project", "CRREM limit"])
-                    fig2.update_layout(height=520, yaxis_title="kWh/m²·a", legend_title="", legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5), margin=dict(l=40, r=20, t=50, b=85))
+                    fig2.update_layout(height=520, yaxis_title="kWh/m²·a", legend_title="",
+                                       legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                       margin=dict(l=40, r=20, t=50, b=85))
                     fig2.update_traces(mode="lines+markers")
                     fig2.update_yaxes(rangemode="tozero")
                     # Enforce consistent colors across baseline and measures charts
@@ -1788,7 +1884,6 @@ with tab6:
                         fig2.add_vline(x=stranding_eui, line_width=3, line_dash="dash", line_color="black")
                     st.plotly_chart(fig2, use_container_width=True)
 
-                
                 st.divider()
 
                 # =========================
@@ -1808,24 +1903,33 @@ with tab6:
                 param_specs = {}
                 param_options = []
 
+
                 def _add_param(label: str, spec: dict):
                     param_options.append(label)
                     param_specs[label] = spec
 
+
                 # Emission Factors (numeric)
                 _add_param("Emission Factors → Electricity", {"kind": "ef", "source": "Electricity", "dtype": "float"})
-                _add_param("Emission Factors → Green Electricity", {"kind": "ef", "source": "Green Electricity", "dtype": "float"})
+                _add_param("Emission Factors → Green Electricity",
+                           {"kind": "ef", "source": "Green Electricity", "dtype": "float"})
                 _add_param("Emission Factors → Gas", {"kind": "ef", "source": "Gas", "dtype": "float"})
-                _add_param("Emission Factors → District Heating", {"kind": "ef", "source": "District Heating", "dtype": "float"})
-                _add_param("Emission Factors → District Cooling", {"kind": "ef", "source": "District Cooling", "dtype": "float"})
+                _add_param("Emission Factors → District Heating",
+                           {"kind": "ef", "source": "District Heating", "dtype": "float"})
+                _add_param("Emission Factors → District Cooling",
+                           {"kind": "ef", "source": "District Cooling", "dtype": "float"})
                 _add_param("Emission Factors → Biomass", {"kind": "ef", "source": "Biomass", "dtype": "float"})
 
                 # Energy Tariffs (numeric; stored for future extensions)
-                _add_param("Energy Tariffs → Electricity", {"kind": "tariff", "source": "Electricity", "dtype": "float"})
-                _add_param("Energy Tariffs → Green Electricity", {"kind": "tariff", "source": "Green Electricity", "dtype": "float"})
+                _add_param("Energy Tariffs → Electricity",
+                           {"kind": "tariff", "source": "Electricity", "dtype": "float"})
+                _add_param("Energy Tariffs → Green Electricity",
+                           {"kind": "tariff", "source": "Green Electricity", "dtype": "float"})
                 _add_param("Energy Tariffs → Gas", {"kind": "tariff", "source": "Gas", "dtype": "float"})
-                _add_param("Energy Tariffs → District Heating", {"kind": "tariff", "source": "District Heating", "dtype": "float"})
-                _add_param("Energy Tariffs → District Cooling", {"kind": "tariff", "source": "District Cooling", "dtype": "float"})
+                _add_param("Energy Tariffs → District Heating",
+                           {"kind": "tariff", "source": "District Heating", "dtype": "float"})
+                _add_param("Energy Tariffs → District Cooling",
+                           {"kind": "tariff", "source": "District Cooling", "dtype": "float"})
                 _add_param("Energy Tariffs → Biomass", {"kind": "tariff", "source": "Biomass", "dtype": "float"})
                 # PV (numeric; affects CRREM by offsetting Electricity)
                 _add_param("PV_Generation → PV Annual Production (kWh/a)", {"kind": "pv", "dtype": "float"})
@@ -1845,7 +1949,8 @@ with tab6:
                         "Multiple measures for the same parameter in different years are allowed."
                     )
 
-                    if "crrem_measures_df" not in st.session_state or not isinstance(st.session_state.get("crrem_measures_df"), pd.DataFrame):
+                    if "crrem_measures_df" not in st.session_state or not isinstance(
+                            st.session_state.get("crrem_measures_df"), pd.DataFrame):
                         st.session_state["crrem_measures_df"] = pd.DataFrame(columns=["Parameter", "Year", "New Value"])
 
                     if st.button("Add measure", key="crrem_add_measure_btn", use_container_width=False):
@@ -1854,7 +1959,8 @@ with tab6:
                         df_tmp = pd.concat(
                             [
                                 df_tmp,
-                                pd.DataFrame([{"Parameter": default_param, "Year": int(project_year_val), "New Value": ""}]),
+                                pd.DataFrame(
+                                    [{"Parameter": default_param, "Year": int(project_year_val), "New Value": ""}]),
                             ],
                             ignore_index=True,
                         )
@@ -1867,7 +1973,8 @@ with tab6:
                     }
                     if hasattr(st, "column_config"):
                         editor_kwargs["column_config"] = {
-                            "Parameter": st.column_config.SelectboxColumn("Parameter", options=param_options, required=True),
+                            "Parameter": st.column_config.SelectboxColumn("Parameter", options=param_options,
+                                                                          required=True),
                             "Year": st.column_config.NumberColumn(
                                 "Year",
                                 min_value=int(start_year),
@@ -1881,6 +1988,49 @@ with tab6:
 
                     measures_df = st.data_editor(st.session_state["crrem_measures_df"], **editor_kwargs)
                     st.session_state["crrem_measures_df"] = measures_df
+                    # Deleting measures (explicit controls to support Streamlit versions where row-delete UI is not exposed)
+                    if not measures_df.empty:
+
+                        def _fmt_measure_idx(i):
+                            try:
+                                p = str(measures_df.loc[i, "Parameter"]) if pd.notna(
+                                    measures_df.loc[i, "Parameter"]) else ""
+                            except Exception:
+                                p = ""
+                            try:
+                                yv = measures_df.loc[i, "Year"]
+                                y = str(int(float(yv))) if pd.notna(yv) and str(yv).strip() != "" else ""
+                            except Exception:
+                                y = ""
+                            return f"{i + 1}: {p} @ {y}"
+
+
+                        def _crrem_delete_selected_measures():
+                            sel = st.session_state.get("crrem_measures_delete_idx", [])
+                            if sel:
+                                df = st.session_state.get("crrem_measures_df", pd.DataFrame()).copy()
+                                try:
+                                    df = df.drop(sel).reset_index(drop=True)
+                                except Exception:
+                                    df = df.iloc[[j for j in range(len(df)) if j not in set(sel)]].reset_index(
+                                        drop=True)
+                                st.session_state["crrem_measures_df"] = df
+                            # Clear selection (safe to mutate in callback)
+                            st.session_state["crrem_measures_delete_idx"] = []
+
+
+                        st.multiselect(
+                            "Select measure rows to delete",
+                            options=list(measures_df.index),
+                            format_func=_fmt_measure_idx,
+                            key="crrem_measures_delete_idx",
+                        )
+                        st.button(
+                            "Delete selected measures",
+                            key="crrem_delete_measures_btn",
+                            on_click=_crrem_delete_selected_measures,
+                            use_container_width=False,
+                        )
 
                     # Persist measures into the active scenario payload (saved in Scenarios sheet)
                     try:
@@ -1906,17 +2056,20 @@ with tab6:
                 pv_measures = []  # (year, pv_annual_production_kwh_per_a)
                 parse_errors = []
 
+
                 def _to_int_year(x):
                     try:
                         return int(float(x))
                     except Exception:
                         return None
 
+
                 def _to_float(x):
                     try:
                         return float(str(x).replace(",", "."))
                     except Exception:
                         return None
+
 
                 def _norm_source(s):
                     s = str(s).strip()
@@ -1925,6 +2078,7 @@ with tab6:
                         if str(opt).lower() == s.lower():
                             return str(opt)
                     return None
+
 
                 for i, rec in enumerate(measures_records, start=1):
                     p = str(rec.get("Parameter", "")).strip()
@@ -2005,6 +2159,7 @@ with tab6:
                     pv_scale = float(st.session_state.get("pv_scale", 1.0))
                     pv_scale_eff = pv_scale if pv_apply_scale else 1.0
 
+
                     def _ef_at_year(src: str, year: int, inclusive: bool = True) -> float:
                         # Green Electricity is always zero by project rule
                         if str(src) == "Green Electricity":
@@ -2025,6 +2180,7 @@ with tab6:
                             return float(v0)
                         return float(v0) * float(ef_grid.loc[y_c]) / denom
 
+
                     # Trajectories
                     carbon_meas = {}
                     eui_meas = {}
@@ -2040,12 +2196,12 @@ with tab6:
                     step_years.update([int(ym) for ym, _ in pv_measures])
                     step_years = sorted([yy for yy in step_years if int(start_year) <= int(yy) <= int(max_year)])
 
+
                     def _compute_for_year(y: int, include_year_measures: bool) -> Tuple[float, float]:
                         # Build year-specific parameter sets (piecewise constant; only measure years should create vertical steps in plots)
                         eff_y = dict(eff_base)
                         src_y = dict(src_base)
                         tariffs_y = dict(base_tariffs)
-
 
                         # PV annual production override (kWh/a). If set via measures, overrides baseline PV (and sidebar PV scale).
                         pv_annual_override_y = None
@@ -2068,7 +2224,6 @@ with tab6:
                             for ym, val in tariff_measures.get(str(s), []):
                                 if _cmp(ym):
                                     tariffs_y[str(s)] = float(val)
-
 
                         # PV measures (affect these charts)
                         for ym, val in pv_measures:
@@ -2116,6 +2271,7 @@ with tab6:
                         eui_int = float(consumption_kwh_y) / project_area_val
                         return carbon_int, eui_int
 
+
                     for y in years_avail:
                         y_int = int(y)
 
@@ -2132,6 +2288,7 @@ with tab6:
                     carbon_meas_s = pd.Series(carbon_meas).reindex(years_avail)
                     eui_meas_s = pd.Series(eui_meas).reindex(years_avail)
 
+
                     # Build plot series where vertical steps occur ONLY in the years a measure is implemented.
                     # Between measure years, the line follows the normal year-to-year trajectory (like the baseline curve).
                     def _build_step_only_plot_series(years_list, post_series, pre_dict, step_years_list):
@@ -2140,7 +2297,8 @@ with tab6:
                         first_year = int(years_list[0]) if len(years_list) else None
                         for yy in years_list:
                             yy = int(yy)
-                            if (first_year is not None) and (yy in step_set) and (yy != first_year) and (yy in pre_dict):
+                            if (first_year is not None) and (yy in step_set) and (yy != first_year) and (
+                                    yy in pre_dict):
                                 xs.append(yy)
                                 ys.append(float(pre_dict[yy]))
                                 xs.append(yy)
@@ -2150,7 +2308,9 @@ with tab6:
                                 ys.append(float(post_series.loc[yy]))
                         return xs, ys
 
-                    carbon_meas_x, carbon_meas_y = _build_step_only_plot_series(years_avail, carbon_meas_s, carbon_pre, step_years)
+
+                    carbon_meas_x, carbon_meas_y = _build_step_only_plot_series(years_avail, carbon_meas_s, carbon_pre,
+                                                                                step_years)
                     eui_meas_x, eui_meas_y = _build_step_only_plot_series(years_avail, eui_meas_s, eui_pre, step_years)
 
                     stranding_carbon_meas = find_stranding_year(carbon_meas_s, carbon_limit)
@@ -2162,9 +2322,12 @@ with tab6:
                     with mk1:
                         st.metric("Measures defined", str(len(measures_records)))
                     with mk2:
-                        st.metric("Stranding year (Carbon, with measures)", "Not stranded ≤ 2050" if stranding_carbon_meas is None else str(stranding_carbon_meas))
+                        st.metric("Stranding year (Carbon, with measures)",
+                                  "Not stranded ≤ 2050" if stranding_carbon_meas is None else str(
+                                      stranding_carbon_meas))
                     with mk3:
-                        st.metric("Stranding year (EUI, with measures)", "Not stranded ≤ 2050" if stranding_eui_meas is None else str(stranding_eui_meas))
+                        st.metric("Stranding year (EUI, with measures)",
+                                  "Not stranded ≤ 2050" if stranding_eui_meas is None else str(stranding_eui_meas))
 
                     mcol, ecol2 = st.columns(2)
 
@@ -2196,7 +2359,9 @@ with tab6:
                             line=dict(color=CRREM_COLOR_MEASURES),
                             marker=dict(color=CRREM_COLOR_MEASURES),
                         ))
-                        figm.update_layout(height=520, yaxis_title="kgCO₂e/m²·a", legend_title="", legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5), margin=dict(l=40, r=20, t=50, b=85))
+                        figm.update_layout(height=520, yaxis_title="kgCO₂e/m²·a", legend_title="",
+                                           legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
+                                                       x=0.5), margin=dict(l=40, r=20, t=50, b=85))
                         figm.update_yaxes(rangemode="tozero")
                         if stranding_carbon_meas is not None:
                             figm.add_vline(x=stranding_carbon_meas, line_width=3, line_dash="dash", line_color="black")
@@ -2227,18 +2392,19 @@ with tab6:
                             line=dict(color=CRREM_COLOR_MEASURES),
                             marker=dict(color=CRREM_COLOR_MEASURES),
                         ))
-                        fige.update_layout(height=520, yaxis_title="kWh/m²·a", legend_title="", legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5), margin=dict(l=40, r=20, t=50, b=85))
+                        fige.update_layout(height=520, yaxis_title="kWh/m²·a", legend_title="",
+                                           legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
+                                                       x=0.5), margin=dict(l=40, r=20, t=50, b=85))
                         fige.update_yaxes(rangemode="tozero")
                         if stranding_eui_meas is not None:
                             fige.add_vline(x=stranding_eui_meas, line_width=3, line_dash="dash", line_color="black")
                         st.plotly_chart(fige, use_container_width=True, key="crrem_eui_measures_chart")
 
-                st.caption("Notes: Green Electricity and PV offset are treated with EF=0. PV offsets Electricity consumption (no export credit).")
+                st.caption(
+                    "Notes: Green Electricity and PV offset are treated with EF=0. PV offsets Electricity consumption (no export credit).")
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
-
-
 
 with tab7:
     if uploaded_file:
@@ -2387,6 +2553,9 @@ with tab7:
                     df_kpi[net_cost_col_m2] = df_kpi[net_cost_col_a] / _area
 
                 st.markdown("### Net KPI comparison (incl. PV)")
+
+                scenario_color_map = {s: SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)] for i, s in
+                                      enumerate(scenario_order)}
                 k1, k2, k3 = st.columns(3)
 
                 with k1:
@@ -2394,12 +2563,20 @@ with tab7:
                         df_kpi,
                         x="Scenario",
                         y="Net EUI (kWh/m²·a)",
+                        color="Scenario",
+                        color_discrete_map=scenario_color_map,
                         category_orders={"Scenario": scenario_order},
                         text_auto=".1f",
                         title="Net EUI (kWh/m²·a)",
                     )
                     fig_net_eui.update_xaxes(type="category")
-                    fig_net_eui.update_layout(xaxis_title="", yaxis_title="kWh/m²·a")
+                    fig_net_eui.update_layout(
+                        xaxis_title="",
+                        yaxis_title="kWh/m²·a",
+                        legend_title_text="Scenario",
+                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                        margin=dict(b=90),
+                    )
                     st.plotly_chart(fig_net_eui, use_container_width=True, key="scenario_net_eui")
 
                 with k2:
@@ -2407,12 +2584,20 @@ with tab7:
                         df_kpi,
                         x="Scenario",
                         y="Net Emissions (kgCO₂e/m²·a)",
+                        color="Scenario",
+                        color_discrete_map=scenario_color_map,
                         category_orders={"Scenario": scenario_order},
                         text_auto=".1f",
                         title="Net Emissions (kgCO₂e/m²·a)",
                     )
                     fig_net_emis.update_xaxes(type="category")
-                    fig_net_emis.update_layout(xaxis_title="", yaxis_title="kgCO₂e/m²·a")
+                    fig_net_emis.update_layout(
+                        xaxis_title="",
+                        yaxis_title="kgCO₂e/m²·a",
+                        legend_title_text="Scenario",
+                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                        margin=dict(b=90),
+                    )
                     st.plotly_chart(fig_net_emis, use_container_width=True, key="scenario_net_emissions")
 
                 with k3:
@@ -2421,12 +2606,20 @@ with tab7:
                             df_kpi,
                             x="Scenario",
                             y=net_cost_col_m2,
+                            color="Scenario",
+                            color_discrete_map=scenario_color_map,
                             category_orders={"Scenario": scenario_order},
                             text_auto=".2f",
                             title=f"Net Cost ({_curr}/m²·a)",
                         )
                         fig_net_cost.update_xaxes(type="category")
-                        fig_net_cost.update_layout(xaxis_title="", yaxis_title=f"{_curr}/m²·a")
+                        fig_net_cost.update_layout(
+                            xaxis_title="",
+                            yaxis_title=f"{_curr}/m²·a",
+                            legend_title_text="Scenario",
+                            legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                            margin=dict(b=90),
+                        )
                         st.plotly_chart(fig_net_cost, use_container_width=True, key="scenario_net_cost")
             else:
                 st.info("Project Area must be greater than 0 to show per m² net KPI charts.")
