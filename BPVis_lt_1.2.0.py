@@ -63,7 +63,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.3.2",
+    page_title="WSGT_BPVis_ENE 1.3.4",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -2040,7 +2040,7 @@ with tab6:
                                               legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                                               margin=dict(l=40, r=20, t=50, b=85))
                         fig_tot.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_tot, use_container_width=True)
+                        st.plotly_chart(fig_tot, use_container_width=True, key=f"crrem_tot_emis_{project_label}")
 
                         st.write("#### Cumulative emissions")
                         fig_cum = go.Figure()
@@ -2072,7 +2072,7 @@ with tab6:
                                               legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                                               margin=dict(l=40, r=20, t=50, b=85))
                         fig_cum.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_cum, use_container_width=True)
+                        st.plotly_chart(fig_cum, use_container_width=True, key=f"crrem_cum_emis_{project_label}")
 
                     with c2:
                         st.write("#### Total annual site energy")
@@ -2105,7 +2105,7 @@ with tab6:
                                                 legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                                                 margin=dict(l=40, r=20, t=50, b=85))
                         fig_e_tot.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_e_tot, use_container_width=True)
+                        st.plotly_chart(fig_e_tot, use_container_width=True, key=f"crrem_tot_energy_{project_label}")
 
                         st.write("#### Cumulative site energy")
                         fig_e_cum = go.Figure()
@@ -2137,12 +2137,89 @@ with tab6:
                                                 legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                                                 margin=dict(l=40, r=20, t=50, b=85))
                         fig_e_cum.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_e_cum, use_container_width=True)
+                        st.plotly_chart(fig_e_cum, use_container_width=True, key=f"crrem_cum_energy_{project_label}")
+
+                    # Cumulative exceedance (project − CRREM limit) — totals only
+                    ex1, ex2 = st.columns(2)
+
+                    # Exceedance is defined as max(project − limit, 0) in absolute units (tCO₂e and MWh)
+                    exc_emis_t = (total_emis_t - total_emis_limit_t).clip(lower=0.0)
+                    exc_energy_mwh = (total_energy_mwh - total_energy_limit_mwh).clip(lower=0.0)
+
+                    cum_exc_emis_t = exc_emis_t.cumsum()
+                    cum_exc_energy_mwh = exc_energy_mwh.cumsum()
+
+                    with ex1:
+                        st.write("#### Cumulative exceedance — Carbon (project − CRREM limit)")
+                        fig_exc_c = go.Figure()
+
+                        # Optional baseline overlay (also exceedance vs the same limit)
+                        if overlay_baseline is not None:
+                            base_carbon_s, _ = overlay_baseline
+                            base_total_t = (base_carbon_s.reindex(years_list).astype(float) * float(area_m2)) / 1000.0
+                            base_exc = (base_total_t - total_emis_limit_t).clip(lower=0.0)
+                            fig_exc_c.add_trace(go.Scatter(
+                                x=years_list, y=base_exc.cumsum().values,
+                                mode="lines+markers",
+                                name="Baseline cumulative exceedance",
+                                line=dict(dash="dash", color=CRREM_COLOR_BASELINE),
+                                marker=dict(color=CRREM_COLOR_BASELINE),
+                                fill="tozeroy",
+                            ))
+
+                        fig_exc_c.add_trace(go.Scatter(
+                            x=years_list, y=cum_exc_emis_t.values,
+                            mode="lines+markers",
+                            name=f"{project_label} cumulative exceedance",
+                            line=dict(color=project_color),
+                            marker=dict(color=project_color),
+                            fill="tozeroy",
+                        ))
+                        fig_exc_c.update_layout(
+                            height=420, yaxis_title="tCO₂e", legend_title="",
+                            legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                            margin=dict(l=40, r=20, t=50, b=85),
+                        )
+                        fig_exc_c.update_yaxes(rangemode="tozero")
+                        st.plotly_chart(fig_exc_c, use_container_width=True, key=f"crrem_cum_exceed_carbon_{project_label}")
+
+                    with ex2:
+                        st.write("#### Cumulative exceedance — Energy (project − CRREM limit)")
+                        fig_exc_e = go.Figure()
+
+                        if overlay_baseline is not None:
+                            _, base_eui_s = overlay_baseline
+                            base_total_mwh = (base_eui_s.reindex(years_list).astype(float) * float(area_m2)) / 1000.0
+                            base_exc_e = (base_total_mwh - total_energy_limit_mwh).clip(lower=0.0)
+                            fig_exc_e.add_trace(go.Scatter(
+                                x=years_list, y=base_exc_e.cumsum().values,
+                                mode="lines+markers",
+                                name="Baseline cumulative exceedance",
+                                line=dict(dash="dash", color=CRREM_COLOR_BASELINE),
+                                marker=dict(color=CRREM_COLOR_BASELINE),
+                                fill="tozeroy",
+                            ))
+
+                        fig_exc_e.add_trace(go.Scatter(
+                            x=years_list, y=cum_exc_energy_mwh.values,
+                            mode="lines+markers",
+                            name=f"{project_label} cumulative exceedance",
+                            line=dict(color=project_color),
+                            marker=dict(color=project_color),
+                            fill="tozeroy",
+                        ))
+                        fig_exc_e.update_layout(
+                            height=420, yaxis_title="MWh", legend_title="",
+                            legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                            margin=dict(l=40, r=20, t=50, b=85),
+                        )
+                        fig_exc_e.update_yaxes(rangemode="tozero")
+                        st.plotly_chart(fig_exc_e, use_container_width=True, key=f"crrem_cum_exceed_energy_{project_label}")
 
                     # Optional: headroom (limit - project)
                     show_headroom = st.checkbox(
                         "Show headroom (limit − project) charts",
-                        value=True,
+                        value=False,
                         key=f"crrem_show_headroom_{project_label}",
                         help="Positive values indicate compliance; negative values indicate exceedance.",
                     )
@@ -2154,14 +2231,14 @@ with tab6:
                             fig_hc = go.Figure(go.Bar(x=years_list, y=headroom_c.values, marker_color=bar_colors, name="Headroom"))
                             fig_hc.update_layout(height=260, yaxis_title="kgCO₂e/m²·a", title="Carbon headroom",
                                                  margin=dict(l=40, r=20, t=45, b=45))
-                            st.plotly_chart(fig_hc, use_container_width=True)
+                            st.plotly_chart(fig_hc, use_container_width=True, key=f"crrem_headroom_carbon_{project_label}")
                         with h2:
                             headroom_e = (eui_limit_s - eui_project_s).astype(float)
                             bar_colors = [CRREM_COLOR_MEASURES if v >= 0 else CRREM_COLOR_LIMIT for v in headroom_e.values]
                             fig_he = go.Figure(go.Bar(x=years_list, y=headroom_e.values, marker_color=bar_colors, name="Headroom"))
                             fig_he.update_layout(height=260, yaxis_title="kWh/m²·a", title="EUI headroom",
                                                  margin=dict(l=40, r=20, t=45, b=45))
-                            st.plotly_chart(fig_he, use_container_width=True)
+                            st.plotly_chart(fig_he, use_container_width=True, key=f"crrem_headroom_energy_{project_label}")
 
                 st.write("## Prognose without measures")
                 st.metric(label="Selected Scenario",value=f"{st.session_state.get('active_scenario')}")
@@ -2787,7 +2864,7 @@ with tab6:
                                     )
                                     fig_tl.update_layout(height=420, xaxis_title="Year", yaxis_title="", legend_title="",
                                                          margin=dict(l=20, r=20, t=50, b=30))
-                                    fig_tl.update_traces(marker=dict(size=14))  # <— change 14 to what you want
+                                    fig_tl.update_traces(marker=dict(size=14))
                                     st.plotly_chart(fig_tl, use_container_width=True)
                                 else:
                                     st.info("No valid measures to plot in the timeline.")
@@ -4528,4 +4605,3 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
-
