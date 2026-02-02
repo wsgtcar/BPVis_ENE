@@ -63,7 +63,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.3.5",
+    page_title="WSGT_BPVis_ENE 1.3.0",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -2705,6 +2705,31 @@ with tab6:
                             eui_int = float(consumption_kwh_y) / project_area_val
                             return carbon_int, eui_int
 
+                        with st.expander("Measures timeline", expanded=True):
+                            if measures_records:
+                                df_meas_tl = pd.DataFrame(measures_records)
+                                df_meas_tl = df_meas_tl.dropna(subset=["Year"])
+                                if not df_meas_tl.empty:
+                                    df_meas_tl["Category"] = df_meas_tl["Parameter"].astype(str).str.split("→").str[0].str.strip()
+                                    df_meas_tl["Parameter"] = df_meas_tl["Parameter"].astype(str).str.strip()
+                                    df_meas_tl = df_meas_tl.sort_values(by="Year", ascending=False)
+
+                                    fig_tl = px.scatter(
+                                        df_meas_tl,
+                                        x="Year",
+                                        y="Parameter",
+                                        color="Category",
+                                        hover_data={"New Value": True, "Year": True, "Category": True,
+                                                    "Parameter": True},
+                                    )
+                                    fig_tl.update_layout(height=420, xaxis_title="Year", yaxis_title="", legend_title="",
+                                                         margin=dict(l=20, r=20, t=50, b=30))
+                                    fig_tl.update_traces(marker=dict(size=14, symbol="cross"))
+                                    st.plotly_chart(fig_tl, use_container_width=True)
+                                else:
+                                    st.info("No valid measures to plot in the timeline.")
+                            else:
+                                st.info("No measures defined yet.")
 
                         for y in years_avail:
                             y_int = int(y)
@@ -2830,31 +2855,7 @@ with tab6:
                                 overlay_baseline=(carbon_asset, eui_asset_series) if show_overlay else None,
                             )
 
-                        with st.expander("Measures timeline", expanded=False):
-                            if measures_records:
-                                df_meas_tl = pd.DataFrame(measures_records)
-                                df_meas_tl = df_meas_tl.dropna(subset=["Year"])
-                                if not df_meas_tl.empty:
-                                    df_meas_tl["Category"] = df_meas_tl["Parameter"].astype(str).str.split("→").str[0].str.strip()
-                                    df_meas_tl["Parameter"] = df_meas_tl["Parameter"].astype(str).str.strip()
-                                    df_meas_tl = df_meas_tl.sort_values(by="Year", ascending=False)
 
-                                    fig_tl = px.scatter(
-                                        df_meas_tl,
-                                        x="Year",
-                                        y="Parameter",
-                                        color="Category",
-                                        hover_data={"New Value": True, "Year": True, "Category": True,
-                                                    "Parameter": True},
-                                    )
-                                    fig_tl.update_layout(height=420, xaxis_title="Year", yaxis_title="", legend_title="",
-                                                         margin=dict(l=20, r=20, t=50, b=30))
-                                    fig_tl.update_traces(marker=dict(size=14, symbol="cross"))
-                                    st.plotly_chart(fig_tl, use_container_width=True)
-                                else:
-                                    st.info("No valid measures to plot in the timeline.")
-                            else:
-                                st.info("No measures defined yet.")
 
                     st.caption(
                         "Notes: Green Electricity and PV offset are treated with EF=0. PV offsets Electricity consumption (no export credit).")
@@ -4303,30 +4304,41 @@ with tab4:
 # =========================
 with tab5:
     if uploaded_file:
-        # Load benchmark data for the selected building use
-        benchmark_df = load_benchmark_data(building_use)
+        st.write("## Benchmark")
 
-        if benchmark_df is not None:
-            # Calculate project KPIs (reuse calculations from other tabs)
-            df = energy_balance_sheet(uploaded_file.getvalue())
-            df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
-            # ---- Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
+        # -------------------------
+        # Load benchmark thresholds
+        # -------------------------
+        benchmark_df = load_benchmark_data(building_use)
+        if benchmark_df is None:
+            st.error(f"Benchmark data not found for building use: {building_use}")
+            st.write("Please ensure the benchmark template file exists in the templates folder.")
+        else:
+            # -------------------------
+            # Recompute project KPIs (aligned with other tabs)
+            # -------------------------
+            df_energy = energy_balance_sheet(uploaded_file.getvalue())
+            df_melted = df_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
+
+            # Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
             eff_map_bm = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted["End_Use"].unique()}
             df_melted["Efficiency_Factor"] = df_melted["End_Use"].map(eff_map_bm).fillna(1.0)
             df_melted["kWh"] = df_melted["kWh"] / df_melted["Efficiency_Factor"]
 
+            # Map to energy sources (align with user mappings in the sidebar)
             df_melted["Energy_Source"] = df_melted["End_Use"].map(
-                {k: st.session_state.get(f"source_{k}", "Electricity") for k in df_melted["End_Use"].unique()})
+                {k: st.session_state.get(f"source_{k}", "Electricity") for k in df_melted["End_Use"].unique()}
+            )
 
-            # Energy calculations
+            # Totals by end use (kWh and intensity)
             totals = df_melted.groupby("End_Use", as_index=False)["kWh"].sum()
-            totals["kWh_per_m2"] = (totals["kWh"] / project_area).round(1)
+            totals["kWh_per_m2"] = (totals["kWh"] / project_area).round(2)
 
-            # Net and Gross EUI calculations
-            eui_gross = totals.loc[totals["kWh_per_m2"] > 0, "kWh_per_m2"].sum()  # Consumption only (gross)
-            eui_net = totals["kWh_per_m2"].sum()  # Including PV (net)
+            # Gross vs net (gross = consumption only, net includes on-site generation like PV as negative)
+            eui_gross = float(totals.loc[totals["kWh_per_m2"] > 0, "kWh_per_m2"].sum())
+            eui_net = float(totals["kWh_per_m2"].sum())
 
-            # CO2 calculations
+            # CO2 calculations (net accounting)
             factor_map = {
                 "Electricity": co2_Emissions_Electricity,
                 "Green Electricity": co2_Emissions_Green_Electricity,
@@ -4339,12 +4351,12 @@ with tab5:
             df_co2["CO2_factor_kg_per_kWh"] = df_co2["Energy_Source"].map(factor_map).fillna(0.0)
             df_co2["kgCO2"] = df_co2["kWh"] * df_co2["CO2_factor_kg_per_kWh"]
             totals_co2 = df_co2.groupby("End_Use", as_index=False)["kgCO2"].sum()
-            totals_co2["kgCO2_per_m2"] = (totals_co2["kgCO2"] / project_area).round(1)
+            totals_co2["kgCO2_per_m2"] = (totals_co2["kgCO2"] / project_area).round(2)
 
-            co2_intensity_gross = totals_co2.loc[totals_co2["kgCO2_per_m2"] > 0, "kgCO2_per_m2"].sum()  # Gross
-            co2_intensity_net = totals_co2["kgCO2_per_m2"].sum()  # Net
+            co2_intensity_gross = float(totals_co2.loc[totals_co2["kgCO2_per_m2"] > 0, "kgCO2_per_m2"].sum())
+            co2_intensity_net = float(totals_co2["kgCO2_per_m2"].sum())
 
-            # Cost calculations
+            # Cost calculations (net accounting)
             cost_map = {
                 "Electricity": cost_electricity,
                 "Gas": cost_gas,
@@ -4359,234 +4371,366 @@ with tab5:
             totals_cost = df_cost.groupby("End_Use", as_index=False)["cost"].sum()
             totals_cost["cost_per_m2"] = (totals_cost["cost"] / project_area).round(2)
 
-            cost_intensity_gross = totals_cost.loc[totals_cost["cost_per_m2"] > 0, "cost_per_m2"].sum()  # Gross
-            cost_intensity_net = totals_cost["cost_per_m2"].sum()  # Net
+            cost_intensity_gross = float(totals_cost.loc[totals_cost["cost_per_m2"] > 0, "cost_per_m2"].sum())
+            cost_intensity_net = float(totals_cost["cost_per_m2"].sum())
 
-            # Extract benchmark thresholds
+            # -------------------------
+            # Benchmark thresholds dict
+            # -------------------------
             benchmark_dict = {}
             for _, row in benchmark_df.iterrows():
-                kpi_name = row["KPI_Name"]
-                benchmark_dict[kpi_name] = {
-                    "Good_Threshold": float(row["Good_Threshold"]),
-                    "Excellent_Threshold": float(row["Excellent_Threshold"])
+                kpi_name = row.get("KPI_Name")
+                if pd.isna(kpi_name):
+                    continue
+                benchmark_dict[str(kpi_name)] = {
+                    "Good_Threshold": float(row.get("Good_Threshold", float("nan"))),
+                    "Excellent_Threshold": float(row.get("Excellent_Threshold", float("nan"))),
                 }
 
-            # Project values (using net values for benchmarking)
-            project_values = {
-                "Energy_Density": eui_net,
-                "CO2_Emissions": co2_intensity_net,
-                "Energy_Cost": cost_intensity_net
-            }
+            # Use same currency the user selected (fallback to preloaded or €)
+            _curr = None
+            try:
+                _curr = currency_symbol
+            except Exception:
+                _curr = preloaded.get("currency") if preloaded else None
+            if not _curr:
+                _curr = "€"
 
-            # Project values (gross - without PV)
-            project_values_gross = {
-                "Energy_Density": eui_gross,
-                "CO2_Emissions": co2_intensity_gross,
-                "Energy_Cost": cost_intensity_gross
-            }
+            # -------------------------
+            # Header metrics
+            # -------------------------
+            total_consumption_kwh = float(df_melted.loc[df_melted["kWh"] > 0, "kWh"].sum())
+            total_generation_kwh = float(-df_melted.loc[df_melted["kWh"] < 0, "kWh"].sum())
+            pv_coverage = (total_generation_kwh / total_consumption_kwh) if total_consumption_kwh > 0 else 0.0
+            a1, a2 = st.columns([3,1])
+            with a1:
+                b1, b2, b3 = st.columns(3)
+                with b1:
+                    st.metric("Building Use", building_use, help="User input (sidebar)")
+                with b2:
+                    st.metric("Building Area", f"{project_area:,.0f} m²", help="User input (sidebar)")
+                with b3:
+                    st.metric("On-site generation share", f"{pv_coverage * 100:.0f} %",
+                              help="Derived from negative energy balance entries (e.g., PV)")
+                with b3:
+                    st.metric("EUI (Net)", f"{eui_net:.1f} kWh/m²·a")
+                with b2:
+                    st.metric("Energy Cost Intensity (Net)", f"{cost_intensity_net:.1f} €/m²·a")
+                with b1:
+                    st.metric("CO₂ Intensity (Net)", f"{co2_intensity_net:.1f} kgCO₂/m²·a")
 
-            st.write(f"## Benchmark Analysis")
+            with a2:
+                try:
+                    latitude_map = float(latitude)
+                    longitude_map = float(longitude)
+                    df_map = pd.DataFrame({"lat": [latitude_map], "lon": [longitude_map]})
+                    st.metric("Project Location", "", help="User input (sidebar)")
+                    st.map(data=df_map, latitude="lat", longitude="lon", height=300, zoom=9)
+                except Exception:
+                    st.metric("Project Location", "–")
+                    st.caption("Latitude/Longitude not available.")
 
-            col1, col2, col3, col4 = st.columns(4)
+            st.markdown("---")
 
-            with col1:
-                st.metric(f"Project Name:", project_name, help='User Input on Sidebar')
-            with col2:
-                st.metric(f"Building Use:", building_use, help='User Input on Sidebar')
-            with col3:
-                st.metric(f"Building Area:", f"{project_area:,.0f} m²", help='User Input on Sidebar')
-            with col4:
+            # -------------------------
+            # KPI benchmark visuals (no more speedometers)
+            # -------------------------
+            def _benchmark_band_chart(
+                title: str,
+                unit: str,
+                value_net: float,
+                value_gross: float,
+                good_thr: float,
+                excellent_thr: float,
+            ) -> go.Figure:
+                # Range: extend beyond good threshold for readability
+                candidates = [v for v in [value_net, value_gross, good_thr, excellent_thr] if pd.notna(v)]
+                xmax = max(candidates) if candidates else max(value_net, value_gross, 1.0)
+                xmax = xmax * 1.20 if xmax > 0 else 1.0
 
-                latitude_map = float(latitude)
-                longitude_map = float(longitude)
-                df = pd.DataFrame(
-                    {
-                        "col1": [latitude_map],
-                        "col2": [longitude_map],
-                        "label": [f"project_name"],
-                    }
+                fig = go.Figure()
+
+                # Background bands (Excellent -> Good -> Poor)
+                if pd.notna(excellent_thr) and pd.notna(good_thr):
+                    fig.add_shape(
+                        type="rect", x0=0, x1=excellent_thr, y0=0, y1=1,
+                        fillcolor=get_benchmark_color("Excellent"), opacity=0.12, line_width=0
+                    )
+                    fig.add_shape(
+                        type="rect", x0=excellent_thr, x1=good_thr, y0=0, y1=1,
+                        fillcolor=get_benchmark_color("Good"), opacity=0.12, line_width=0
+                    )
+                    fig.add_shape(
+                        type="rect", x0=good_thr, x1=xmax, y0=0, y1=1,
+                        fillcolor=get_benchmark_color("Poor"), opacity=0.12, line_width=0
+                    )
+                    # Threshold lines
+                    fig.add_vline(x=excellent_thr, line_width=2, line_dash="dot", line_color=get_benchmark_color("Excellent"))
+                    fig.add_vline(x=good_thr, line_width=2, line_dash="dot", line_color=get_benchmark_color("Poor"))
+
+                # Markers for gross / net
+                fig.add_trace(go.Scatter(
+                    x=[value_gross], y=[0.5],
+                    mode="markers",
+                    marker=dict(size=40, symbol="cross-open", color=CRREM_COLOR_MEASURES, line=dict(width=2, color=CRREM_COLOR_MEASURES)),
+                    name="Gross",
+                    hovertemplate=f"Gross: %{{x:.2f}} {unit}<extra></extra>",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=[value_net], y=[0.5],
+                    mode="markers",
+                    marker=dict(size=40, symbol="cross", color=CRREM_COLOR_MEASURES, line=dict(width=1, color=CRREM_COLOR_MEASURES)),
+                    name="Net",
+                    hovertemplate=f"Net: %{{x:.2f}} {unit}<extra></extra>",
+                ))
+
+                fig.update_yaxes(visible=False, range=[0, 1])
+                fig.update_xaxes(range=[0, xmax], title_text=unit, zeroline=False)
+                fig.update_layout(
+                    title=title,
+                    height=400,
+                    margin=dict(l=20, r=20, t=50, b=20),
+                    legend=dict(orientation="h", yanchor="top", y=-0.35, xanchor="center", x=0.5),
                 )
-                st.metric("Project Location:", "", help='User Input on Sidebar')
-                st.map(data=df, latitude="col1", longitude="col2", height=200, size=500, zoom=10)
+                return fig
+
+            st.subheader("Core benchmark KPIs")
+
+            kpi_specs = [
+                dict(
+                    template_key="Energy_Density",
+                    title="Energy Density (EUI) vs Benchmark",
+                    unit="kWh/m²·a",
+                    net=eui_net,
+                    gross=eui_gross,
+                    metric_net_fmt="{:.1f} kWh/m²·a",
+                    metric_gross_fmt="{:.1f} kWh/m²·a",
+                ),
+                dict(
+                    template_key="CO2_Emissions",
+                    title="Carbon Intensity vs Benchmark",
+                    unit="kgCO₂/m²·a",
+                    net=co2_intensity_net,
+                    gross=co2_intensity_gross,
+                    metric_net_fmt="{:.1f} kgCO₂/m²·a",
+                    metric_gross_fmt="{:.1f} kgCO₂/m²·a",
+                ),
+                dict(
+                    template_key="Energy_Cost",
+                    title="Energy Cost vs Benchmark",
+                    unit=f"{_curr}/m²·a",
+                    net=cost_intensity_net,
+                    gross=cost_intensity_gross,
+                    metric_net_fmt=_curr + " {:.2f}/m²·a",
+                    metric_gross_fmt=_curr + " {:.2f}/m²·a",
+                ),
+            ]
+
+            for spec in kpi_specs:
+                tkey = spec["template_key"]
+                good_thr = benchmark_dict.get(tkey, {}).get("Good_Threshold", float("nan"))
+                excellent_thr = benchmark_dict.get(tkey, {}).get("Excellent_Threshold", float("nan"))
+
+                c1, c2 = st.columns([3, 1], gap="large")
+
+                with c1:
+                    fig_band = _benchmark_band_chart(
+                        title=spec["title"],
+                        unit=spec["unit"],
+                        value_net=float(spec["net"]),
+                        value_gross=float(spec["gross"]),
+                        good_thr=good_thr,
+                        excellent_thr=excellent_thr,
+                    )
+                    st.plotly_chart(fig_band, use_container_width=True, key=f"bm_band_{tkey}")
+
+                with c2:
+                    if pd.notna(good_thr) and pd.notna(excellent_thr):
+                        category = get_benchmark_category(float(spec["net"]), float(good_thr), float(excellent_thr))
+                        st.metric("Net", spec["metric_net_fmt"].format(float(spec["net"])))
+                        st.metric("Gross", spec["metric_gross_fmt"].format(float(spec["gross"])))
+                        st.write("**WS Benchmark**")
+                        if category == "Excellent":
+                            st.image("Pamo_Icon_Platin.png", width=90)
+                            st.write("**Platin**")
+                        elif category == "Good":
+                            st.image("Pamo_Icon_Green.png", width=90)
+                            st.write("**Green**")
+                        else:
+                            st.image("Pamo_Icon_Gray.png", width=90)
+                            st.write("*not Benchmarked*")
+                    else:
+                        st.metric("Net", spec["metric_net_fmt"].format(float(spec["net"])))
+                        st.metric("Gross", spec["metric_gross_fmt"].format(float(spec["gross"])))
+                        st.caption("No benchmark thresholds available for this KPI.")
 
             st.markdown("---")
 
-            # Create gauge charts for each KPI
-            st.subheader("Energy Density")
+            # -------------------------
+            # Drivers / breakdowns (aligned with other tabs' chart style)
+            # -------------------------
+            with st.expander(label="Validation Diagrams (under development)",expanded=False):
+                st.subheader("Drivers and breakdowns")
 
-            # Create 3:1 column layout
-            col1, col2 = st.columns([3, 1])
-
-            with col1:
-
-                if "Energy_Density" in benchmark_dict:
-                    good_thresh = benchmark_dict["Energy_Density"]["Good_Threshold"]
-                    excellent_thresh = benchmark_dict["Energy_Density"]["Excellent_Threshold"]
-                    gauge_fig = create_gauge_chart(
-                        project_values["Energy_Density"],
-                        good_thresh,
-                        excellent_thresh,
-                        "",
-                        "kWh/m²·a"
+                # Energy waterfall: Gross -> On-site generation -> Net
+                gen_intensity = eui_net - eui_gross  # negative when generation exists
+                fig_water = go.Figure(
+                    go.Waterfall(
+                        x=["Gross consumption", "On-site generation", "Net (site)"],
+                        y=[eui_gross, gen_intensity, eui_net],
+                        measure=["relative", "relative", "total"],
+                        text=[f"{eui_gross:.1f}", f"{gen_intensity:.1f}", f"{eui_net:.1f}"],
+                        textposition="outside",
                     )
-                    st.plotly_chart(gauge_fig, use_container_width=True)
+                )
+                fig_water.update_layout(
+                    title="EUI accounting (Gross → Net)",
+                    xaxis_title="",
+                    yaxis_title="kWh/m²·a",
+                    height=380,
+                    margin=dict(l=20, r=20, t=60, b=40),
+                    showlegend=False,
+                )
 
-            with col2:
+                # End-use breakdown (kWh/m²·a)
+                df_end_use = totals.copy()
+                df_end_use = df_end_use.sort_values("kWh_per_m2", ascending=True)
 
-                # Display textual results (Net values)
-                st.write("**Gross Values (without PV):**")
-                for kpi_name, value in project_values_gross.items():
-                    if kpi_name in benchmark_dict:
-                        good_thresh = benchmark_dict[kpi_name]["Good_Threshold"]
-                        excellent_thresh = benchmark_dict[kpi_name]["Excellent_Threshold"]
-                        category = get_benchmark_category(value, good_thresh, excellent_thresh)
+                _enduse_order = df_end_use["End_Use"].tolist()
+                _enduse_cmap = {eu: color_map.get(eu, "#999999") for eu in df_end_use["End_Use"].unique()}
 
-                        if kpi_name == "Energy_Density":
-                            st.metric(f"EUI Gross ({category})", f"{value:.1f} kWh/m²·a",
-                                      help="Gross energy before accounting for on-site generation")
+                fig_end_use = px.bar(
+                    df_end_use,
+                    x="kWh_per_m2",
+                    y="End_Use",
+                    color="End_Use",
+                    orientation="h",
+                    title="Energy intensity by end use (Net accounting)",
+                    color_discrete_map=_enduse_cmap,
+                    category_orders={"End_Use": _enduse_order},
+                    text_auto=".1f",
+                )
+                fig_end_use.update_layout(
+                    xaxis_title="kWh/m²·a",
+                    yaxis_title="",
+                    legend_title_text="",
+                    height=380,
+                    margin=dict(l=10, r=10, t=60, b=40),
+                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                )
+                fig_end_use.add_vline(x=0, line_width=1, line_color="#666666")
 
-                st.write("**Net Values (with PV):**")
-                for kpi_name, value in project_values.items():
-                    if kpi_name in benchmark_dict:
-                        good_thresh = benchmark_dict[kpi_name]["Good_Threshold"]
-                        excellent_thresh = benchmark_dict[kpi_name]["Excellent_Threshold"]
-                        category = get_benchmark_category(value, good_thresh, excellent_thresh)
+                a1, a2 = st.columns(2, gap="large")
+                with a1:
+                    st.plotly_chart(fig_water, use_container_width=True, key="bm_waterfall_eui")
+                with a2:
+                    st.plotly_chart(fig_end_use, use_container_width=True, key="bm_enduse_energy")
 
-                        if kpi_name == "Energy_Density":
-                            st.metric(f"EUI ({category})", f"{value:.1f} kWh/m²·a",
-                                      help="Net energy after accounting for on-site generation")
+                # Source split (energy & CO2) — handle negative entries explicitly as on-site generation
+                df_src = df_melted.copy()
+                df_src["Energy_Source_BM"] = df_src.apply(
+                    lambda r: "On-site generation" if r["kWh"] < 0 else r["Energy_Source"],
+                    axis=1,
+                )
 
-                            st.write("**WS Benchmark:**")
+                _src_labels = list(pd.unique(df_src["Energy_Source_BM"]))
+                _src_cmap = {s: color_map_sources.get(s, color_map.get(s, "#999999")) for s in _src_labels}
+                if "On-site generation" in _src_cmap:
+                    _src_cmap["On-site generation"] = color_map.get("PV_Generation", CRREM_COLOR_MEASURES)
 
-                            if category == "Excellent":
-                                st.image("Pamo_Icon_Platin.png", width=100)
-                                st.write("**Platin**")
-                            if category == "Good":
-                                st.image("Pamo_Icon_Green.png", width=100)
-                                st.write("**Green**")
-                            if category == "Poor":
-                                st.image("Pamo_Icon_Gray.png", width=100)
-                                st.write("*not Benchmarked")
+                src_energy = df_src.groupby("Energy_Source_BM", as_index=False)["kWh"].sum()
+                src_energy["kWh_per_m2"] = (src_energy["kWh"] / project_area).round(2)
+                src_energy = src_energy.sort_values("kWh_per_m2", ascending=True)
 
-            st.markdown("---")
-            st.subheader("CO2 Emissions")
+                fig_src_energy = px.bar(
+                    src_energy,
+                    x="kWh_per_m2",
+                    y="Energy_Source_BM",
+                    color="Energy_Source_BM",
+                    orientation="h",
+                    title="Energy intensity by energy source (Net accounting)",
+                    color_discrete_map=_src_cmap,
+                    category_orders={"Energy_Source_BM": src_energy["Energy_Source_BM"].tolist()},
+                    text_auto=".1f",
+                )
+                fig_src_energy.update_layout(
+                    xaxis_title="kWh/m²·a",
+                    yaxis_title="",
+                    legend_title_text="",
+                    height=360,
+                    margin=dict(l=10, r=10, t=60, b=40),
+                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                )
+                fig_src_energy.add_vline(x=0, line_width=1, line_color="#666666")
 
-            col1, col2 = st.columns([3, 1])
+                df_src_co2 = df_co2.copy()
+                df_src_co2["Energy_Source_BM"] = df_src["Energy_Source_BM"].values
+                src_co2 = df_src_co2.groupby("Energy_Source_BM", as_index=False)["kgCO2"].sum()
+                src_co2["kgCO2_per_m2"] = (src_co2["kgCO2"] / project_area).round(2)
+                src_co2 = src_co2.sort_values("kgCO2_per_m2", ascending=True)
 
-            with col1:
+                fig_src_co2 = px.bar(
+                    src_co2,
+                    x="kgCO2_per_m2",
+                    y="Energy_Source_BM",
+                    color="Energy_Source_BM",
+                    orientation="h",
+                    title="CO₂ intensity by energy source (Net accounting)",
+                    color_discrete_map=_src_cmap,
+                    category_orders={"Energy_Source_BM": src_co2["Energy_Source_BM"].tolist()},
+                    text_auto=".1f",
+                )
+                fig_src_co2.update_layout(
+                    xaxis_title="kgCO₂/m²·a",
+                    yaxis_title="",
+                    legend_title_text="",
+                    height=360,
+                    margin=dict(l=10, r=10, t=60, b=40),
+                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                )
+                fig_src_co2.add_vline(x=0, line_width=1, line_color="#666666")
 
-                if "CO2_Emissions" in benchmark_dict:
-                    good_thresh = benchmark_dict["CO2_Emissions"]["Good_Threshold"]
-                    excellent_thresh = benchmark_dict["CO2_Emissions"]["Excellent_Threshold"]
-                    gauge_fig = create_gauge_chart(
-                        project_values["CO2_Emissions"],
-                        good_thresh,
-                        excellent_thresh,
-                        "",
-                        "kgCO₂/m²·a"
+                b1, b2 = st.columns(2, gap="large")
+                with b1:
+                    st.plotly_chart(fig_src_energy, use_container_width=True, key="bm_source_energy")
+                with b2:
+                    st.plotly_chart(fig_src_co2, use_container_width=True, key="bm_source_co2")
+
+                with st.expander("Cost breakdown (Net accounting)", expanded=False):
+                    df_src_cost = df_cost.copy()
+                    df_src_cost["Energy_Source_BM"] = df_src["Energy_Source_BM"].values
+                    src_cost = df_src_cost.groupby("Energy_Source_BM", as_index=False)["cost"].sum()
+                    src_cost["cost_per_m2"] = (src_cost["cost"] / project_area).round(2)
+                    src_cost = src_cost.sort_values("cost_per_m2", ascending=True)
+
+                    fig_src_cost = px.bar(
+                        src_cost,
+                        x="cost_per_m2",
+                        y="Energy_Source_BM",
+                        color="Energy_Source_BM",
+                        orientation="h",
+                        title="Energy cost by energy source (Net accounting)",
+                        color_discrete_map=_src_cmap,
+                        category_orders={"Energy_Source_BM": src_cost["Energy_Source_BM"].tolist()},
+                        text_auto=".2f",
                     )
-                    st.plotly_chart(gauge_fig, use_container_width=True)
-
-            with col2:
-
-                # Display textual results (Net values)
-                st.write("**Gross Values (without PV):**")
-                for kpi_name, value in project_values_gross.items():
-                    if kpi_name in benchmark_dict:
-                        good_thresh = benchmark_dict[kpi_name]["Good_Threshold"]
-                        excellent_thresh = benchmark_dict[kpi_name]["Excellent_Threshold"]
-                        category = get_benchmark_category(value, good_thresh, excellent_thresh)
-
-                        if kpi_name == "CO2_Emissions":
-                            st.metric(f"CO₂ Gross ({category})", f"{value:.1f} kgCO₂/m²·a"
-                                      ,
-                                      help="Gross emissions before accounting for on-site generation")
-
-                st.write("**Net Values (with PV):**")
-                for kpi_name, value in project_values.items():
-                    if kpi_name in benchmark_dict:
-                        good_thresh = benchmark_dict[kpi_name]["Good_Threshold"]
-                        excellent_thresh = benchmark_dict[kpi_name]["Excellent_Threshold"]
-                        category = get_benchmark_category(value, good_thresh, excellent_thresh)
-
-                        if kpi_name == "CO2_Emissions":
-                            st.metric(f"CO₂ Intensity ({category})", f"{value:.1f} kgCO₂/m²·a",
-                                      help="Net emissions after accounting for on-site generation")
-
-                            st.write("**WS Benchmark:**")
-
-                            if category == "Excellent":
-                                st.image("Pamo_Icon_Platin.png", width=100)
-                                st.write("**Platin**")
-                            if category == "Good":
-                                st.image("Pamo_Icon_Green.png", width=100)
-                                st.write("**Green**")
-                            if category == "Poor":
-                                st.image("Pamo_Icon_Gray.png", width=100)
-                                st.write("*not Benchmarked")
-
-            st.markdown("---")
-            st.subheader("Energy Cost")
-
-            col1, col2 = st.columns([3, 1])
-
-            with col1:
-
-                if "Energy_Cost" in benchmark_dict:
-                    good_thresh = benchmark_dict["Energy_Cost"]["Good_Threshold"]
-                    excellent_thresh = benchmark_dict["Energy_Cost"]["Excellent_Threshold"]
-                    gauge_fig = create_gauge_chart(
-                        project_values["Energy_Cost"],
-                        good_thresh,
-                        excellent_thresh,
-                        "",
-                        f"{currency_symbol}/m²·a"
+                    fig_src_cost.update_layout(
+                        xaxis_title=f"{_curr}/m²·a",
+                        yaxis_title="",
+                        legend_title_text="",
+                        height=360,
+                        margin=dict(l=10, r=10, t=60, b=40),
+                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                     )
-                    st.plotly_chart(gauge_fig, use_container_width=True)
+                    fig_src_cost.add_vline(x=0, line_width=1, line_color="#666666")
+                    st.plotly_chart(fig_src_cost, use_container_width=True, key="bm_source_cost")
 
-            with col2:
-
-                # Display textual results (Net values)
-
-                st.write("**Gross Values (without PV):**")
-                for kpi_name, value in project_values_gross.items():
-                    if kpi_name in benchmark_dict:
-                        good_thresh = benchmark_dict[kpi_name]["Good_Threshold"]
-                        excellent_thresh = benchmark_dict[kpi_name]["Excellent_Threshold"]
-                        category = get_benchmark_category(value, good_thresh, excellent_thresh)
-
-                        if kpi_name == "Energy_Cost":
-                            st.metric(f"Cost Gross ({category})", f"{currency_symbol} {value:.2f}/m²·a",
-                                      help="Gross energy cost before accounting for on-site generation")
-
-                st.write("**Net Values (with PV):**")
-                for kpi_name, value in project_values.items():
-                    if kpi_name in benchmark_dict:
-                        good_thresh = benchmark_dict[kpi_name]["Good_Threshold"]
-                        excellent_thresh = benchmark_dict[kpi_name]["Excellent_Threshold"]
-                        category = get_benchmark_category(value, good_thresh, excellent_thresh)
-
-                        if kpi_name == "Energy_Cost":
-                            st.metric(f"Cost Intensity ({category})", f"{currency_symbol} {value:.2f}/m²·a",
-                                      help="Net energy cost after accounting for on-site generation")
-
-                            st.write("**WS Benchmark:**")
-
-                            if category == "Excellent":
-                                st.image("Pamo_Icon_Platin.png", width=100)
-                                st.write("**Platin**")
-                            if category == "Good":
-                                st.image("Pamo_Icon_Green.png", width=100)
-                                st.write("**Green**")
-                            if category == "Poor":
-                                st.image("Pamo_Icon_Gray.png", width=100)
-                                st.write("-not Benchmarked-")
-
-
-
-        else:
-            st.error(f"Benchmark data not found for building use: {building_use}")
-            st.write("Please ensure the benchmark template file exists in the templates folder.")
+                    # Optional: show raw numbers for transparency
+                    st.dataframe(
+                        src_cost.rename(columns={"Energy_Source_BM": "Energy Source", "cost_per_m2": f"Cost intensity ({_curr}/m²·a)"}),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
     if not uploaded_file:
-        st.write("### ← Please upload data on sidebar")
+        st.write("Please upload the project Excel file to see benchmark results.")
