@@ -2724,7 +2724,7 @@ with tab6:
                                     )
                                     fig_tl.update_layout(height=420, xaxis_title="Year", yaxis_title="", legend_title="",
                                                          margin=dict(l=20, r=20, t=50, b=30))
-                                    fig_tl.update_traces(marker=dict(size=14, symbol="cross"))
+                                    fig_tl.update_traces(marker=dict(size=14, symbol="square"))
                                     st.plotly_chart(fig_tl, use_container_width=True)
                                 else:
                                     st.info("No valid measures to plot in the timeline.")
@@ -4468,18 +4468,33 @@ with tab5:
                     fig.add_vline(x=excellent_thr, line_width=2, line_dash="dot", line_color=get_benchmark_color("Excellent"))
                     fig.add_vline(x=good_thr, line_width=2, line_dash="dot", line_color=get_benchmark_color("Poor"))
 
+                if value_net < excellent_thr:
+                    MARKER_NET_COLOR = get_benchmark_color("Excellent")
+                elif value_net < good_thr:
+                    MARKER_NET_COLOR = get_benchmark_color("Good")
+                else:
+                    MARKER_NET_COLOR = get_benchmark_color("Poor")
+
+                if value_gross < excellent_thr:
+                    MARKER_GROSS_COLOR = get_benchmark_color("Excellent")
+                elif value_gross < good_thr:
+                    MARKER_GROSS_COLOR = get_benchmark_color("Good")
+                else:
+                    MARKER_GROSS_COLOR = get_benchmark_color("Poor")
+
                 # Markers for gross / net
                 fig.add_trace(go.Scatter(
-                    x=[value_gross], y=[0.5],
+                    x=[value_gross], y=[0.3],
                     mode="markers",
-                    marker=dict(size=40, symbol="cross-open", color=CRREM_COLOR_MEASURES, line=dict(width=2, color=CRREM_COLOR_MEASURES)),
+                    marker=dict(size=40, symbol="square-open", color=MARKER_GROSS_COLOR, line=dict(width=2, color=MARKER_GROSS_COLOR)),
                     name="Gross",
                     hovertemplate=f"Gross: %{{x:.2f}} {unit}<extra></extra>",
                 ))
+
                 fig.add_trace(go.Scatter(
-                    x=[value_net], y=[0.5],
+                    x=[value_net], y=[0.7],
                     mode="markers",
-                    marker=dict(size=40, symbol="cross", color=CRREM_COLOR_MEASURES, line=dict(width=1, color=CRREM_COLOR_MEASURES)),
+                    marker=dict(size=40, symbol="square", color=MARKER_NET_COLOR, line=dict(width=2, color=MARKER_NET_COLOR)),
                     name="Net",
                     hovertemplate=f"Net: %{{x:.2f}} {unit}<extra></extra>",
                 ))
@@ -4489,12 +4504,12 @@ with tab5:
                 fig.update_layout(
                     title=title,
                     height=400,
-                    margin=dict(l=20, r=20, t=50, b=20),
+                    margin=dict(l=20, r=20, t=50, b=10),
                     legend=dict(orientation="h", yanchor="top", y=-0.35, xanchor="center", x=0.5),
                 )
                 return fig
 
-            st.subheader("Core benchmark KPIs")
+            st.write("## Core benchmark KPIs")
 
             kpi_specs = [
                 dict(
