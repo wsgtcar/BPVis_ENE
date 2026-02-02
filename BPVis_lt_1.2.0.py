@@ -63,7 +63,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.3.4",
+    page_title="WSGT_BPVis_ENE 1.3.5",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -2229,14 +2229,14 @@ with tab6:
                             headroom_c = (carbon_limit_s - carbon_project_s).astype(float)
                             bar_colors = [CRREM_COLOR_MEASURES if v >= 0 else CRREM_COLOR_LIMIT for v in headroom_c.values]
                             fig_hc = go.Figure(go.Bar(x=years_list, y=headroom_c.values, marker_color=bar_colors, name="Headroom"))
-                            fig_hc.update_layout(height=260, yaxis_title="kgCO₂e/m²·a", title="Carbon headroom",
+                            fig_hc.update_layout(height=420, yaxis_title="kgCO₂e/m²·a", title="Carbon headroom",
                                                  margin=dict(l=40, r=20, t=45, b=45))
                             st.plotly_chart(fig_hc, use_container_width=True, key=f"crrem_headroom_carbon_{project_label}")
                         with h2:
                             headroom_e = (eui_limit_s - eui_project_s).astype(float)
                             bar_colors = [CRREM_COLOR_MEASURES if v >= 0 else CRREM_COLOR_LIMIT for v in headroom_e.values]
                             fig_he = go.Figure(go.Bar(x=years_list, y=headroom_e.values, marker_color=bar_colors, name="Headroom"))
-                            fig_he.update_layout(height=260, yaxis_title="kWh/m²·a", title="EUI headroom",
+                            fig_he.update_layout(height=420, yaxis_title="kWh/m²·a", title="EUI headroom",
                                                  margin=dict(l=40, r=20, t=45, b=45))
                             st.plotly_chart(fig_he, use_container_width=True, key=f"crrem_headroom_energy_{project_label}")
 
@@ -2723,30 +2723,12 @@ with tab6:
                         eui_meas_s = pd.Series(eui_meas).reindex(years_avail)
 
 
-                        # Build plot series where vertical steps occur ONLY in the years a measure is implemented.
-                        # Between measure years, the line follows the normal year-to-year trajectory (like the baseline curve).
-                        def _build_step_only_plot_series(years_list, post_series, pre_dict, step_years_list):
-                            xs, ys = [], []
-                            step_set = set([int(v) for v in step_years_list])
-                            first_year = int(years_list[0]) if len(years_list) else None
-                            for yy in years_list:
-                                yy = int(yy)
-                                if (first_year is not None) and (yy in step_set) and (yy != first_year) and (
-                                        yy in pre_dict):
-                                    xs.append(yy)
-                                    ys.append(float(pre_dict[yy]))
-                                    xs.append(yy)
-                                    ys.append(float(post_series.loc[yy]))
-                                else:
-                                    xs.append(yy)
-                                    ys.append(float(post_series.loc[yy]))
-                            return xs, ys
-
-
-                        carbon_meas_x, carbon_meas_y = _build_step_only_plot_series(years_avail, carbon_meas_s, carbon_pre,
-                                                                                    step_years)
-                        eui_meas_x, eui_meas_y = _build_step_only_plot_series(years_avail, eui_meas_s, eui_pre, step_years)
-
+                        # Plot series for with-measures: one value per year (no duplicate x-values).
+                        # Plotly will draw straight line segments between consecutive years.
+                        carbon_meas_x = years_avail
+                        carbon_meas_y = carbon_meas_s.astype(float).values.tolist()
+                        eui_meas_x = years_avail
+                        eui_meas_y = eui_meas_s.astype(float).values.tolist()
                         stranding_carbon_meas = find_stranding_year(carbon_meas_s, carbon_limit)
                         stranding_eui_meas = find_stranding_year(eui_meas_s, eui_limit)
 
@@ -2855,16 +2837,19 @@ with tab6:
                                 if not df_meas_tl.empty:
                                     df_meas_tl["Category"] = df_meas_tl["Parameter"].astype(str).str.split("→").str[0].str.strip()
                                     df_meas_tl["Parameter"] = df_meas_tl["Parameter"].astype(str).str.strip()
+                                    df_meas_tl = df_meas_tl.sort_values(by="Year", ascending=False)
+
                                     fig_tl = px.scatter(
                                         df_meas_tl,
                                         x="Year",
                                         y="Parameter",
                                         color="Category",
-                                        hover_data={"New Value": True, "Year": True, "Category": True, "Parameter": True},
+                                        hover_data={"New Value": True, "Year": True, "Category": True,
+                                                    "Parameter": True},
                                     )
                                     fig_tl.update_layout(height=420, xaxis_title="Year", yaxis_title="", legend_title="",
                                                          margin=dict(l=20, r=20, t=50, b=30))
-                                    fig_tl.update_traces(marker=dict(size=14))
+                                    fig_tl.update_traces(marker=dict(size=14, symbol="cross"))
                                     st.plotly_chart(fig_tl, use_container_width=True)
                                 else:
                                     st.info("No valid measures to plot in the timeline.")
