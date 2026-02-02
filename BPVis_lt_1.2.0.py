@@ -2142,7 +2142,7 @@ with tab6:
                     # Optional: headroom (limit - project)
                     show_headroom = st.checkbox(
                         "Show headroom (limit − project) charts",
-                        value=False,
+                        value=True,
                         key=f"crrem_show_headroom_{project_label}",
                         help="Positive values indicate compliance; negative values indicate exceedance.",
                     )
@@ -4528,3 +4528,4 @@ with tab5:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
+
