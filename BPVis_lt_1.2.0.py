@@ -6,6 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 import json
+import re
 from copy import deepcopy
 
 # --- CRREM chart colors (synced across CRREM diagrams)
@@ -63,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.3.0",
+    page_title="WSGT_BPVis_ENE 1.3.7",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -75,9 +76,179 @@ MONTH_ORDER = [
 ]
 END_USE_ORDER = [
     "Heating", "Cooling", "Ventilation", "Lighting",
-    "Equipment", "HotWater", "Pumps", "Other", "PV_Generation"
+    "Equipment", "HotWater", "Pumps", "Other", "On-site_Generation"
 ]
 ENERGY_SOURCE_ORDER = ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling", "Biomass"]
+
+# --- NEW: naming convention (legacy PV -> On-site Generation)
+ONSITE_GENERATION_ENDUSE = "On-site_Generation"  # internal (no suffix)
+LEGACY_PV_ENDUSE = "PV_Generation"  # legacy internal name from older templates
+ONSITE_GENERATION_LABEL = "On-site Generation"  # UI label
+
+# --- UI display name mapping (do NOT change internal keys used for calculations / saving)
+UI_NAME_MAP = {
+    ONSITE_GENERATION_ENDUSE: ONSITE_GENERATION_LABEL,
+    LEGACY_PV_ENDUSE: ONSITE_GENERATION_LABEL,  # legacy display alias
+}
+
+# --- NEW: track which End Use(s) represent on-site generation (so NET logic stays correct even if the user renames it)
+_ONSITE_ENDUSES_KEY = "_onsite_generation_enduses"
+
+
+def get_onsite_generation_enduses(enduses=None):
+    """Return a list of End Use names that should be treated as on-site generation credits.
+
+    - Primary: user/session defined list in _ONSITE_ENDUSES_KEY
+    - Fallbacks (if list not present / not in provided enduses): canonical name, then token-based heuristic.
+    """
+    try:
+        lst = st.session_state.get(_ONSITE_ENDUSES_KEY)
+    except Exception:
+        lst = None
+
+    if not isinstance(lst, list) or len(lst) == 0:
+        lst = [ONSITE_GENERATION_ENDUSE]
+
+    # normalize legacy PV token in stored list
+    norm = []
+    for x in lst:
+        xs = str(x)
+        if xs == LEGACY_PV_ENDUSE:
+            xs = ONSITE_GENERATION_ENDUSE
+        norm.append(xs)
+
+    # If enduses is provided, filter to those present; if none present, try heuristic
+    if enduses is not None:
+        try:
+            end_list = [str(e) for e in list(enduses)]
+        except Exception:
+            end_list = [str(e) for e in enduses]
+
+        present = [x for x in norm if x in end_list]
+        if present:
+            return present
+
+        # Canonical name present?
+        if ONSITE_GENERATION_ENDUSE in end_list:
+            return [ONSITE_GENERATION_ENDUSE]
+
+        # Token-based heuristic (supports renamed columns like PV_Roof, On-site_Gen, etc.)
+        try:
+            pat = re.compile(r"(pv|on\s*-?site|onsite)", re.IGNORECASE)
+            guess = [e for e in end_list if pat.search(str(e))]
+            if guess:
+                return guess
+        except Exception:
+            pass
+
+        return []
+
+    return norm
+
+
+def ui_name(name: str) -> str:
+    """Return user-facing label for internal End Use / Load names.
+
+    Rules:
+    - Keep internal keys untouched for calculations (this function is for UI only).
+    - Apply explicit aliases (e.g., PV_Generation -> On-site Generation).
+    - Replace underscores used as word separators with spaces for display.
+    """
+    s = str(name)
+    out = UI_NAME_MAP.get(s, s)
+    # Convert internal word separators to UI-friendly spaces
+    try:
+        out = out.replace("_", " ")
+        out = re.sub(r"\s{2,}", " ", out).strip()
+    except Exception:
+        pass
+    return out
+
+
+def _apply_ui_names_plotly(fig):
+    """Mutate Plotly figure so category labels show UI-friendly names (e.g., On-site_Generation -> On-site Generation)."""
+    try:
+        # Traces (legend + categorical axis arrays)
+        for tr in getattr(fig, "data", []) or []:
+            try:
+                if hasattr(tr, "name") and isinstance(tr.name, str):
+                    tr.name = ui_name(tr.name)
+            except Exception:
+                pass
+            try:
+                if hasattr(tr, "legendgroup") and isinstance(tr.legendgroup, str):
+                    tr.legendgroup = ui_name(tr.legendgroup)
+            except Exception:
+                pass
+            # Map categorical x/y values when they are strings
+            try:
+                if hasattr(tr, "x") and tr.x is not None:
+                    tr.x = [ui_name(v) if isinstance(v, str) else v for v in list(tr.x)]
+            except Exception:
+                pass
+            try:
+                if hasattr(tr, "y") and tr.y is not None:
+                    tr.y = [ui_name(v) if isinstance(v, str) else v for v in list(tr.y)]
+            except Exception:
+                pass
+
+            # Pie/Sunburst/Treemap-style categorical labels
+            try:
+                if hasattr(tr, "labels") and tr.labels is not None:
+                    tr.labels = [ui_name(v) if isinstance(v, str) else v for v in list(tr.labels)]
+            except Exception:
+                pass
+            try:
+                if hasattr(tr, "ids") and tr.ids is not None:
+                    tr.ids = [ui_name(v) if isinstance(v, str) else v for v in list(tr.ids)]
+            except Exception:
+                pass
+
+        # Layout axis category arrays (if present)
+        try:
+            for k in list(getattr(fig, "layout", {}).keys()):
+                if not (str(k).startswith("xaxis") or str(k).startswith("yaxis")):
+                    continue
+                ax = getattr(fig.layout, k, None)
+                if ax is None:
+                    continue
+                try:
+                    if getattr(ax, "categoryarray", None) is not None:
+                        ax.categoryarray = [ui_name(v) if isinstance(v, str) else v for v in list(ax.categoryarray)]
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    except Exception:
+        return fig
+    return fig
+
+
+_ST_PLOTLY_CHART = st.plotly_chart
+
+
+def st_plotly_chart(*args, **kwargs):
+    """Wrapper around st.plotly_chart that applies UI label mapping before rendering."""
+    try:
+        if args and args[0] is not None:
+            fig0 = _apply_ui_names_plotly(args[0])
+            args = (fig0,) + tuple(args[1:])
+        elif "figure_or_data" in kwargs and kwargs["figure_or_data"] is not None:
+            kwargs["figure_or_data"] = _apply_ui_names_plotly(kwargs["figure_or_data"])
+    except Exception:
+        pass
+    return _ST_PLOTLY_CHART(*args, **kwargs)
+
+
+
+def _canon_enduse_name(name: str) -> str:
+    """Canonicalize legacy PV naming to On-site Generation."""
+    n = str(name or "").strip()
+    if n.lower() in {LEGACY_PV_ENDUSE.lower(), "pv", "pv_generation", "pv generation"}:
+        return ONSITE_GENERATION_ENDUSE
+    return n
+
 
 # Color maps (keep appearance identical to your current version)
 color_map = {
@@ -89,7 +260,7 @@ color_map = {
     "HotWater": "#ff9a0a",
     "Pumps": "#06b6d1",
     "Other": "#d0448c",
-    "PV_Generation": "#a9c724",
+    "On-site_Generation": "#a9c724",
     "Electricity": "#42b360",
     "Green Electricity": "#64c423",
     "Gas": "#c9d302",
@@ -123,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.3.0")
+st.sidebar.write("Version 1.3.7")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -156,6 +327,8 @@ def energy_balance_sheet(file_bytes: bytes) -> pd.DataFrame:
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
     df_ = pd.read_excel(xls, sheet_name="Energy_Balance")
     df_.columns = df_.columns.str.replace("_kWh", "", regex=False)
+    # Canonicalize legacy PV naming
+    df_.columns = ["Month" if c == "Month" else _canon_enduse_name(c) for c in df_.columns]
     return df_
 
 
@@ -164,8 +337,133 @@ def loads_balace_sheet(file_bytes: bytes) -> pd.DataFrame:
     xls = pd.ExcelFile(io.BytesIO(file_bytes))
     df_loads = pd.read_excel(xls, sheet_name="Loads_Balance")
     df_loads.columns = [c.removesuffix("_load") for c in df_loads.columns]
+    # Canonicalize legacy PV naming
+    df_loads.columns = [_canon_enduse_name(c) for c in df_loads.columns]
     return df_loads
 
+
+
+# =========================
+# NEW — Raw data state (Energy_Balance + Loads_Balance)
+# =========================
+RAW_SHEET_ENERGY = "Energy_Balance"
+RAW_SHEET_LOADS = "Loads_Balance"
+_RAW_TOKEN_KEY = "_raw_dfs_workbook_token"
+_RAW_ENERGY_KEY = "raw_energy_balance_df"
+_RAW_LOADS_KEY = "raw_loads_balance_df"
+_RAW_ENERGY_DRAFT_KEY = "raw_energy_balance_df_draft"
+_RAW_LOADS_DRAFT_KEY = "raw_loads_balance_df_draft"
+_RAW_COMMIT_VERSION_KEY = "_raw_data_commit_version"
+
+
+def _workbook_token(file_bytes: bytes, filename: str = "") -> str:
+    try:
+        return f"{filename}|{hashlib.md5(file_bytes).hexdigest()}"
+    except Exception:
+        return f"{filename}|{hash(file_bytes)}"
+
+
+def sanitize_energy_balance_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure Energy_Balance is clean: Month as str, other cols numeric (kWh). Canonicalizes legacy PV naming."""
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+    out = df.copy()
+    if "Month" not in out.columns:
+        out.insert(0, "Month", "")
+    out["Month"] = out["Month"].astype(str)
+    for c in out.columns:
+        if c == "Month":
+            continue
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
+
+    # Canonicalize legacy PV naming (e.g., PV_Generation -> On-site_Generation)
+    rename_map = {}
+    for c in out.columns:
+        if c == "Month":
+            continue
+        canon = _canon_enduse_name(c)
+        if canon != c:
+            rename_map[c] = canon
+    if rename_map:
+        out = out.rename(columns=rename_map)
+
+    return out
+
+
+def sanitize_loads_balance_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure Loads_Balance is clean: weekday as str, other cols numeric (kW). Canonicalizes legacy PV naming."""
+    if df is None or not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
+    out = df.copy()
+    if "weekday" in out.columns:
+        out["weekday"] = out["weekday"].astype(str)
+    for c in out.columns:
+        if c == "weekday":
+            continue
+        out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
+
+    # Canonicalize legacy PV naming (e.g., PV_Generation -> On-site_Generation)
+    if LEGACY_PV_ENDUSE in out.columns and ONSITE_GENERATION_ENDUSE not in out.columns:
+        out = out.rename(columns={LEGACY_PV_ENDUSE: ONSITE_GENERATION_ENDUSE})
+
+    return out
+
+
+def get_energy_balance_df(file_bytes: bytes, filename: str = "") -> pd.DataFrame:
+    """Return the (possibly edited) Energy_Balance dataframe (columns without _kWh)."""
+    tok = _workbook_token(file_bytes, filename)
+    if st.session_state.get(_RAW_TOKEN_KEY) != tok or _RAW_ENERGY_KEY not in st.session_state:
+        try:
+            df_ = energy_balance_sheet(file_bytes)
+        except Exception:
+            df_ = pd.DataFrame()
+        st.session_state[_RAW_ENERGY_KEY] = sanitize_energy_balance_df(df_)
+    return st.session_state.get(_RAW_ENERGY_KEY, pd.DataFrame())
+
+
+def get_loads_balance_df(file_bytes: bytes, filename: str = "") -> pd.DataFrame:
+    """Return the (possibly edited) Loads_Balance dataframe (columns without _load)."""
+    tok = _workbook_token(file_bytes, filename)
+    # keep a single token for both raw dfs
+    if st.session_state.get(_RAW_TOKEN_KEY) != tok or _RAW_LOADS_KEY not in st.session_state:
+        try:
+            df_ = loads_balace_sheet(file_bytes)
+        except Exception:
+            df_ = pd.DataFrame()
+        st.session_state[_RAW_LOADS_KEY] = sanitize_loads_balance_df(df_)
+        # ensure the token is set when we successfully (re)seed raw data
+        st.session_state[_RAW_TOKEN_KEY] = tok
+    return st.session_state.get(_RAW_LOADS_KEY, pd.DataFrame())
+
+
+def _energy_balance_to_excel_df(df_no_suffix: pd.DataFrame) -> pd.DataFrame:
+    """Add _kWh suffix back (except Month) when saving to Excel."""
+    df = sanitize_energy_balance_df(df_no_suffix)
+    out = df.copy()
+    new_cols = []
+    for c in out.columns:
+        if c == "Month":
+            new_cols.append("Month")
+        else:
+            new_cols.append(f"{c}_kWh" if not str(c).endswith("_kWh") else str(c))
+    out.columns = new_cols
+    return out
+
+
+def _loads_balance_to_excel_df(df_no_suffix: pd.DataFrame) -> pd.DataFrame:
+    """Add _load suffix back for load columns when saving to Excel."""
+    df = sanitize_loads_balance_df(df_no_suffix)
+    out = df.copy()
+    meta_cols = {"hoy", "doy", "day", "month", "weekday", "hour", "Grid_Injection"}
+    new_cols = []
+    for c in out.columns:
+        c_str = str(c)
+        if c_str in meta_cols:
+            new_cols.append(c_str)
+        else:
+            new_cols.append(f"{c_str}_load" if not c_str.endswith("_load") else c_str)
+    out.columns = new_cols
+    return out
 
 # =========================
 # NEW — Configuration I/O helpers (Save/Load Project settings)
@@ -240,7 +538,7 @@ def parse_mapping_df(df: Optional[pd.DataFrame]) -> Dict[str, str]:
         for _, row in df.iterrows():
             eu = str(row["End_Use"])
             es = str(row["Energy_Source"])
-            out[eu] = es
+            out[_canon_enduse_name(eu)] = es
     return out
 
 
@@ -250,7 +548,7 @@ def parse_efficiency_df(df: Optional[pd.DataFrame]) -> Dict[str, float]:
         for _, row in df.iterrows():
             eu = str(row["End_Use"])
             try:
-                out[eu] = float(row["Efficiency_Factor"])
+                out[_canon_enduse_name(eu)] = float(row["Efficiency_Factor"])
             except Exception:
                 pass
     return out
@@ -279,11 +577,11 @@ def parse_color_settings_df(df: Optional[pd.DataFrame]) -> Tuple[Dict[str, str],
             typ_l = typ.lower()
 
             if typ_l in ["end_use", "end use", "enduse", "end-use"]:
-                end_use_map[name] = col
+                end_use_map[_canon_enduse_name(name)] = col
             elif typ_l in ["energy_source", "energy source", "energysource", "energy-source", "source"]:
                 source_map[name] = col
             elif typ_l in ["load", "loads"]:
-                load_map[name] = col
+                load_map[_canon_enduse_name(name)] = col
 
         return end_use_map, source_map, load_map
 
@@ -296,7 +594,7 @@ def parse_color_settings_df(df: Optional[pd.DataFrame]) -> Tuple[Dict[str, str],
                 continue
             if not col.startswith("#"):
                 col = f"#{col}"
-            end_use_map[name] = col
+            end_use_map[_canon_enduse_name(name)] = col
 
     if {"Energy_Source", "Color"}.issubset(df.columns):
         for _, row in df.iterrows():
@@ -316,7 +614,7 @@ def parse_color_settings_df(df: Optional[pd.DataFrame]) -> Tuple[Dict[str, str],
                 continue
             if not col.startswith("#"):
                 col = f"#{col}"
-            load_map[name] = col
+            load_map[_canon_enduse_name(name)] = col
 
     return end_use_map, source_map, load_map
 
@@ -333,7 +631,7 @@ def parse_color_settings_df(df: Optional[pd.DataFrame]) -> Tuple[Dict[str, str],
                 col = f"#{col}"
             typ_l = typ.lower()
             if typ_l in ["end_use", "end use", "enduse", "end-use"]:
-                end_use_map[name] = col
+                end_use_map[_canon_enduse_name(name)] = col
             elif typ_l in ["energy_source", "energy source", "energysource", "energy-source", "source"]:
                 source_map[name] = col
         return end_use_map, source_map
@@ -347,7 +645,7 @@ def parse_color_settings_df(df: Optional[pd.DataFrame]) -> Tuple[Dict[str, str],
                 continue
             if not col.startswith("#"):
                 col = f"#{col}"
-            end_use_map[name] = col
+            end_use_map[_canon_enduse_name(name)] = col
 
     if {"Energy_Source", "Color"}.issubset(df.columns):
         for _, row in df.iterrows():
@@ -384,6 +682,37 @@ def build_color_settings_df(
 # NEW — Scenario Manager helpers
 # =========================
 
+def _canon_scenario_payload(payload: dict) -> dict:
+    """Canonicalize scenario payload keys so legacy PV naming still works."""
+    if not isinstance(payload, dict):
+        return {}
+    for section in ("mapping", "efficiency"):
+        d = payload.get(section)
+        if isinstance(d, dict):
+            payload[section] = {_canon_enduse_name(k): v for k, v in d.items()}
+
+    # Canonicalize any measure parameter labels that reference the legacy end-use name.
+    measures = payload.get("crrem_measures")
+    if isinstance(measures, list):
+        for rec in measures:
+            if isinstance(rec, dict):
+                p = rec.get("Parameter")
+                if isinstance(p, str):
+                    p_s = p.strip()
+                    # Legacy PV annual production label -> current on-site generation label
+                    if p_s == "PV_Generation → PV Annual Production (kWh/a)":
+                        rec["Parameter"] = "On-site_Generation → Annual Production (kWh/a)"
+                        continue
+                    # Generic legacy end-use name replacement (keep other text)
+                    if LEGACY_PV_ENDUSE in p_s and ONSITE_GENERATION_ENDUSE not in p_s:
+                        p_s = p_s.replace(LEGACY_PV_ENDUSE, ONSITE_GENERATION_ENDUSE)
+                    # If the legacy label text remains, update it too
+                    if "PV Annual Production" in p_s:
+                        p_s = p_s.replace("PV Annual Production", "On-site Generation Annual Production")
+                    rec["Parameter"] = p_s
+    return payload
+
+
 def parse_scenarios_sheet(df: Optional[pd.DataFrame]) -> Tuple[Dict[str, dict], Optional[str]]:
     """Parse Scenarios sheet into dict[name] -> payload and return active scenario name if present."""
     scenarios: Dict[str, dict] = {}
@@ -408,6 +737,7 @@ def parse_scenarios_sheet(df: Optional[pd.DataFrame]) -> Tuple[Dict[str, dict], 
                     payload = json.loads(str(raw))
             except Exception:
                 payload = {}
+        payload = _canon_scenario_payload(payload)
         scenarios[name] = payload
 
         if has_active and active_name is None:
@@ -956,7 +1286,9 @@ def write_config_to_excel(original_bytes: bytes,
                           mapping_df: pd.DataFrame,
                           efficiency_df: pd.DataFrame,
                           scenarios_df: Optional[pd.DataFrame] = None,
-                          colors_df: Optional[pd.DataFrame] = None) -> bytes:
+                          colors_df: Optional[pd.DataFrame] = None,
+                          energy_balance_df: Optional[pd.DataFrame] = None,
+                          loads_balance_df: Optional[pd.DataFrame] = None) -> bytes:
     """Return a new workbook (bytes) with all original sheets + updated config sheets."""
     cfg = read_config_from_excel(original_bytes)
     sheets = cfg["all_sheets"]  # dict[name] -> df
@@ -971,6 +1303,13 @@ def write_config_to_excel(original_bytes: bytes,
         sheets[SHEET_SCENARIOS] = scenarios_df
     if colors_df is not None:
         sheets[SHEET_COLORS] = colors_df
+
+
+    # overwrite raw data sheets if provided
+    if energy_balance_df is not None:
+        sheets[RAW_SHEET_ENERGY] = _energy_balance_to_excel_df(energy_balance_df)
+    if loads_balance_df is not None:
+        sheets[RAW_SHEET_LOADS] = _loads_balance_to_excel_df(loads_balance_df)
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -1233,6 +1572,33 @@ if uploaded_file:
     # --- Seed Project Data from file on each new upload (token-based)
     #     This keeps Project Data global (not scenario-dependent) and ensures it reloads correctly from the workbook.
     wb_token = f"{uploaded_file.name}|{hashlib.md5(file_bytes).hexdigest()}"
+
+    # --- Seed Raw Data (Energy_Balance / Loads_Balance) from file on each new upload (token-based)
+    #     Raw Data is global (not scenario-dependent) and can be edited in-app in the "Raw Data" tab.
+    if st.session_state.get(_RAW_TOKEN_KEY) != wb_token:
+        try:
+            st.session_state[_RAW_ENERGY_KEY] = sanitize_energy_balance_df(energy_balance_sheet(file_bytes))
+        except Exception:
+            st.session_state[_RAW_ENERGY_KEY] = pd.DataFrame()
+        try:
+            st.session_state[_RAW_LOADS_KEY] = sanitize_loads_balance_df(loads_balace_sheet(file_bytes))
+        except Exception:
+            st.session_state[_RAW_LOADS_KEY] = pd.DataFrame()
+
+        # Draft copies are edited in the UI; committed copies drive calculations.
+        st.session_state[_RAW_ENERGY_DRAFT_KEY] = st.session_state[_RAW_ENERGY_KEY].copy(deep=True)
+        st.session_state[_RAW_LOADS_DRAFT_KEY] = st.session_state[_RAW_LOADS_KEY].copy(deep=True)
+
+        st.session_state[_RAW_TOKEN_KEY] = wb_token
+
+    # Ensure draft buffers exist (e.g., when restoring session state)
+    if _RAW_COMMIT_VERSION_KEY not in st.session_state:
+        st.session_state[_RAW_COMMIT_VERSION_KEY] = 0
+    if _RAW_ENERGY_DRAFT_KEY not in st.session_state and _RAW_ENERGY_KEY in st.session_state:
+        st.session_state[_RAW_ENERGY_DRAFT_KEY] = st.session_state[_RAW_ENERGY_KEY].copy(deep=True)
+    if _RAW_LOADS_DRAFT_KEY not in st.session_state and _RAW_LOADS_KEY in st.session_state:
+        st.session_state[_RAW_LOADS_DRAFT_KEY] = st.session_state[_RAW_LOADS_KEY].copy(deep=True)
+
     if st.session_state.get("_loaded_workbook_token") != wb_token:
         if preloaded.get("name"):
             st.session_state["project_name"] = str(preloaded["name"])
@@ -1314,9 +1680,9 @@ st.title(st.session_state["project_name"])
 # =========================
 # Tabs
 # =========================
-tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
+tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
     ["Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)", "Energy Cost (with Factors)", "Loads Analysis", "Benchmark",
-     "CRREM-Analysis", "Scenarios"])
+     "CRREM-Analysis", "Scenarios", "Raw Data"])
 
 # =========================
 # Tab 1 — Energy Balance (Energy Balance Tab)
@@ -1324,7 +1690,7 @@ tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
 with tab1:
     if uploaded_file:
         # ---- Load data
-        df = energy_balance_sheet(uploaded_file.getvalue())
+        df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
 
         # ---- Wide->Long transform for plotting and grouping
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
@@ -1426,7 +1792,7 @@ with tab1:
                     st.session_state["_prev_active_scenario"] = new_active
                     load_scenario_into_widgets(scenarios[new_active], end_uses)
                     st.rerun()
-            st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors and PV settings.")
+            st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors and On-site generation settings.")
 
         # ---- Sidebar: project info (prefill from saved if available)
         with st.sidebar.expander("Project Data"):
@@ -1640,7 +2006,7 @@ with tab1:
 
             # Detect loads from Loads_Balance (if present)
             try:
-                _df_loads_sidebar = loads_balace_sheet(uploaded_file.getvalue())
+                _df_loads_sidebar = get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name)
                 _load_cols = [c for c in _df_loads_sidebar.columns if c not in ["hoy", "doy", "day", "month", "weekday", "hour"]]
             except Exception:
                 _load_cols = []
@@ -1678,7 +2044,7 @@ with tab1:
             for _eu in end_uses:
                 _key = f"cp_eu_{_tok_short}_{_k_safe(_eu)}"
                 _val = st.session_state["color_map_enduse"].get(_eu, _rand_hex(f"enduse::{_eu}"))
-                _new = st.color_picker(str(_eu), value=_val, key=_key)
+                _new = st.color_picker(ui_name(str(_eu)), value=_val, key=_key)
                 st.session_state["color_map_enduse"][_eu] = _new
 
             st.markdown("---")
@@ -1695,7 +2061,7 @@ with tab1:
                 for _ld in _load_cols:
                     _key = f"cp_ld_{_tok_short}_{_k_safe(_ld)}"
                     _val = st.session_state["color_map_loads"].get(_ld, _rand_hex(f"load::{_ld}"))
-                    _new = st.color_picker(str(_ld), value=_val, key=_key)
+                    _new = st.color_picker(ui_name(str(_ld)), value=_val, key=_key)
                     st.session_state["color_map_loads"][_ld] = _new
             else:
                 st.caption("No Loads_Balance sheet found (or no load columns detected).")
@@ -1778,9 +2144,18 @@ with tab1:
                     st.session_state.get("color_map_loads", DEFAULT_COLOR_MAP_LOADS),
                 )
 
-                updated_bytes = write_config_to_excel(preloaded["file_bytes"], project_df, factors_df, tariffs_df,
-                                                      mapping_df, efficiency_df, scenarios_df=scenarios_df,
-                                                      colors_df=colors_df)
+                updated_bytes = write_config_to_excel(
+                    preloaded["file_bytes"],
+                    project_df,
+                    factors_df,
+                    tariffs_df,
+                    mapping_df,
+                    efficiency_df,
+                    scenarios_df=scenarios_df,
+                    colors_df=colors_df,
+                    energy_balance_df=st.session_state.get(_RAW_ENERGY_KEY),
+                    loads_balance_df=st.session_state.get(_RAW_LOADS_KEY),
+                )
 
                 st.success("Project settings saved to workbook.")
                 st.download_button(
@@ -1919,7 +2294,7 @@ with tab1:
         annual_chart_per_source.update_traces(textfont_size=14, textfont_color="white")
 
         totals_clean = totals[
-            (totals["End_Use"] != "PV_Generation")]
+            (totals["End_Use"] != "On-site_Generation")]
 
         # ---- Donuts (EUI shares)
         energy_intensity_chart = px.pie(
@@ -1965,30 +2340,30 @@ with tab1:
         energy_intensity_chart_per_source.update_traces(textinfo="value+percent", textfont_size=18,
                                                         textfont_color="white")
 
-        # ---- PV coverage (share of PV vs consumption-only EUI)
+        # ---- On-site Generation coverage (share of on-site generation vs consumption-only EUI)
         totals_indexed = totals.set_index("End_Use")
-        pv_value = totals_indexed.loc["PV_Generation", "kWh_per_m2"] if "PV_Generation" in totals_indexed.index else 0.0
+        pv_value = totals_indexed.loc["On-site_Generation", "kWh_per_m2"] if "On-site_Generation" in totals_indexed.index else 0.0
         pv_coverage = abs((pv_value / eui) * 100) if eui != 0 else 0.0
 
         # ---- Layout: charts and KPIs (kept identical)
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader("Monthly Energy")
-            st.plotly_chart(monthly_chart, use_container_width=True)
+            st_plotly_chart(monthly_chart, use_container_width=True)
         with col2:
             st.subheader("Annual Energy")
-            st.plotly_chart(annual_chart, use_container_width=True)
+            st_plotly_chart(annual_chart, use_container_width=True)
 
         # KPI calculations (kept identical logic)
         monthly_avr = (totals["kWh"].sum()) / 12
         net_total = totals["kWh"].sum()
         total_energy = totals.loc[totals["kWh"] > 0, "kWh"].sum()
-        pv_total = abs(df_melted.groupby("End_Use")["kWh"].sum().get("PV_Generation", 0.0))
+        pv_total = abs(df_melted.groupby("End_Use")["kWh"].sum().get("On-site_Generation", 0.0))
 
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader("Energy Use Intensity (kWh/m2.a)")
-            st.plotly_chart(energy_intensity_chart, use_container_width=True)
+            st_plotly_chart(energy_intensity_chart, use_container_width=True)
         with col2:
             st.subheader("Energy KPI's")
             st.metric(label="Monthly Average Energy Consumption", value=f"{monthly_avr:,.0f} kWh")
@@ -1996,23 +2371,23 @@ with tab1:
             st.metric(label="Net Annual Energy Consumption", value=f"{net_total:,.0f} kWh")
             st.metric(label="EUI", value=f"{eui:,.1f} kWh/m2.a")
             st.metric(label="Net EUI", value=f"{net_eui:,.1f} kWh/m2.a")
-            st.metric(label="PV Production", value=f"{pv_total:,.1f} kWh")
-            st.metric(label="PV Coverage", value=f"{pv_coverage:,.1f} %")
+            st.metric(label="On-site Generation Production", value=f"{pv_total:,.1f} kWh")
+            st.metric(label="On-site Generation Coverage", value=f"{pv_coverage:,.1f} %")
 
         st.markdown("---")
         st.write("## Energy Balance (per Energy Source)")
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader("Monthly Energy Demand")
-            st.plotly_chart(monthly_chart_source, use_container_width=True)
+            st_plotly_chart(monthly_chart_source, use_container_width=True)
         with col2:
             st.subheader("Annual Energy Demand")
-            st.plotly_chart(annual_chart_per_source, use_container_width=True)
+            st_plotly_chart(annual_chart_per_source, use_container_width=True)
 
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader("Energy Use Intensity (kWh/m2.a)")
-            st.plotly_chart(energy_intensity_chart_per_source, use_container_width=True)
+            st_plotly_chart(energy_intensity_chart_per_source, use_container_width=True)
         with col2:
             st.subheader("Energy KPI's")
             for _, row in totals_per_source.iterrows():
@@ -2121,7 +2496,7 @@ with tab6:
             else:
                 project_year_val = int(st.session_state.get("project_year", 2025))
                 # Use annual energy from the uploaded Energy_Balance sheet, adjusted by the active scenario:
-                df_crrem = energy_balance_sheet(uploaded_file.getvalue())
+                df_crrem = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
                 df_crrem_m = df_crrem.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
                 # Apply efficiency factors (scenario-specific)
@@ -2129,10 +2504,10 @@ with tab6:
                 df_crrem_m["Efficiency_Factor"] = df_crrem_m["End_Use"].map(eff_map_crrem).fillna(1.0)
                 df_crrem_m["kWh_adj"] = df_crrem_m["kWh"] / df_crrem_m["Efficiency_Factor"]
 
-                # Apply PV scaling (scenario-specific). For CRREM carbon, PV always offsets Electricity (EF=0).
+                # Apply PV scaling (scenario-specific). For CRREM carbon, On-site Generation always offsets Electricity (EF=0).
                 pv_apply_scale = bool(st.session_state.get("pv_sc_enabled", False))
                 pv_scale = float(st.session_state.get("pv_scale", 1.0))
-                pv_mask = df_crrem_m["End_Use"].astype(str) == "PV_Generation"
+                pv_mask = df_crrem_m["End_Use"].astype(str) == "On-site_Generation"
                 if pv_mask.any():
                     scale = pv_scale if pv_apply_scale else 1.0
                     df_crrem_m.loc[pv_mask, "kWh_adj"] = df_crrem_m.loc[pv_mask, "kWh_adj"] * scale
@@ -2145,17 +2520,17 @@ with tab6:
                 df_crrem_m["Energy_Source"] = df_crrem_m["End_Use"].map(src_map_crrem).fillna("Electricity")
                 # normalize unknown sources
                 df_crrem_m.loc[~df_crrem_m["Energy_Source"].isin(ENERGY_SOURCE_ORDER), "Energy_Source"] = "Electricity"
-                # PV always offsets Electricity
+                # On-site Generation always offsets Electricity
                 df_crrem_m.loc[pv_mask, "Energy_Source"] = "Electricity"
 
                 # Annual kWh per source (net, PV included as negative electricity)
                 annual_kwh_by_source = df_crrem_m.groupby("Energy_Source", as_index=True)["kWh_adj"].sum()
 
-                # Clamp net electricity to >= 0 (PV offsets electricity up to demand; no export credit)
+                # Clamp net electricity to >= 0 (On-site Generation offsets electricity up to demand; no export credit)
                 if "Electricity" in annual_kwh_by_source.index:
                     annual_kwh_by_source.loc["Electricity"] = max(float(annual_kwh_by_source.loc["Electricity"]), 0.0)
 
-                # CRREM EUI is consumption-only (exclude PV_Generation)
+                # CRREM EUI is consumption-only (exclude On-site_Generation)
                 annual_consumption_kwh = df_crrem_m.loc[~pv_mask, "kWh_adj"].sum()
                 eui_asset = float(annual_consumption_kwh) / project_area_val
 
@@ -2311,7 +2686,7 @@ with tab6:
                                                           x=0.5),
                                               margin=dict(l=40, r=20, t=50, b=85))
                         fig_tot.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_tot, use_container_width=True, key=f"crrem_tot_emis_{project_label}")
+                        st_plotly_chart(fig_tot, use_container_width=True, key=f"crrem_tot_emis_{project_label}")
 
                         st.write("#### Cumulative emissions")
                         fig_cum = go.Figure()
@@ -2344,7 +2719,7 @@ with tab6:
                                                           x=0.5),
                                               margin=dict(l=40, r=20, t=50, b=85))
                         fig_cum.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_cum, use_container_width=True, key=f"crrem_cum_emis_{project_label}")
+                        st_plotly_chart(fig_cum, use_container_width=True, key=f"crrem_cum_emis_{project_label}")
 
                     with c2:
                         st.write("#### Total annual site energy")
@@ -2378,7 +2753,7 @@ with tab6:
                                                             x=0.5),
                                                 margin=dict(l=40, r=20, t=50, b=85))
                         fig_e_tot.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_e_tot, use_container_width=True, key=f"crrem_tot_energy_{project_label}")
+                        st_plotly_chart(fig_e_tot, use_container_width=True, key=f"crrem_tot_energy_{project_label}")
 
                         st.write("#### Cumulative site energy")
                         fig_e_cum = go.Figure()
@@ -2411,7 +2786,7 @@ with tab6:
                                                             x=0.5),
                                                 margin=dict(l=40, r=20, t=50, b=85))
                         fig_e_cum.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_e_cum, use_container_width=True, key=f"crrem_cum_energy_{project_label}")
+                        st_plotly_chart(fig_e_cum, use_container_width=True, key=f"crrem_cum_energy_{project_label}")
 
                     # Cumulative exceedance (project − CRREM limit) — totals only
                     ex1, ex2 = st.columns(2)
@@ -2455,7 +2830,7 @@ with tab6:
                             margin=dict(l=40, r=20, t=50, b=85),
                         )
                         fig_exc_c.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_exc_c, use_container_width=True,
+                        st_plotly_chart(fig_exc_c, use_container_width=True,
                                         key=f"crrem_cum_exceed_carbon_{project_label}")
 
                     with ex2:
@@ -2489,13 +2864,13 @@ with tab6:
                             margin=dict(l=40, r=20, t=50, b=85),
                         )
                         fig_exc_e.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_exc_e, use_container_width=True,
+                        st_plotly_chart(fig_exc_e, use_container_width=True,
                                         key=f"crrem_cum_exceed_energy_{project_label}")
 
                     # Optional: headroom (limit - project)
                     show_headroom = st.checkbox(
                         "Show headroom (limit − project) charts",
-                        value=False,
+                        value=True,
                         key=f"crrem_show_headroom_{project_label}",
                         help="Positive values indicate compliance; negative values indicate exceedance.",
                     )
@@ -2509,7 +2884,7 @@ with tab6:
                                 go.Bar(x=years_list, y=headroom_c.values, marker_color=bar_colors, name="Headroom"))
                             fig_hc.update_layout(height=420, yaxis_title="kgCO₂e/m²·a", title="Carbon headroom",
                                                  margin=dict(l=40, r=20, t=45, b=45))
-                            st.plotly_chart(fig_hc, use_container_width=True,
+                            st_plotly_chart(fig_hc, use_container_width=True,
                                             key=f"crrem_headroom_carbon_{project_label}")
                         with h2:
                             headroom_e = (eui_limit_s - eui_project_s).astype(float)
@@ -2519,7 +2894,7 @@ with tab6:
                                 go.Bar(x=years_list, y=headroom_e.values, marker_color=bar_colors, name="Headroom"))
                             fig_he.update_layout(height=420, yaxis_title="kWh/m²·a", title="EUI headroom",
                                                  margin=dict(l=40, r=20, t=45, b=45))
-                            st.plotly_chart(fig_he, use_container_width=True,
+                            st_plotly_chart(fig_he, use_container_width=True,
                                             key=f"crrem_headroom_energy_{project_label}")
 
 
@@ -2558,7 +2933,7 @@ with tab6:
                             tr.update(line=dict(color=CRREM_COLOR_LIMIT), marker=dict(color=CRREM_COLOR_LIMIT))
                     if stranding_carbon is not None:
                         fig.add_vline(x=stranding_carbon, line_width=3, line_dash="dash", line_color="black")
-                    st.plotly_chart(fig, use_container_width=True)
+                    st_plotly_chart(fig, use_container_width=True)
 
                 with ecol:
                     st.write("#### EUI vs CRREM pathway")
@@ -2581,7 +2956,7 @@ with tab6:
                             tr.update(line=dict(color=CRREM_COLOR_LIMIT), marker=dict(color=CRREM_COLOR_LIMIT))
                     if stranding_eui is not None:
                         fig2.add_vline(x=stranding_eui, line_width=3, line_dash="dash", line_color="black")
-                    st.plotly_chart(fig2, use_container_width=True)
+                    st_plotly_chart(fig2, use_container_width=True)
 
                 with st.expander("Additional CRREM diagrams — Baseline", expanded=False):
                     st.caption(
@@ -2615,7 +2990,7 @@ with tab6:
 
                     # Build a parameter registry (dropdown options) from the existing sidebar parameters
                     end_uses_all = sorted(df_crrem_m["End_Use"].astype(str).unique().tolist())
-                    end_uses_no_pv = [u for u in end_uses_all if u != "PV_Generation"]
+                    end_uses_no_pv = [u for u in end_uses_all if u != "On-site_Generation"]
 
                     param_specs = {}
                     param_options = []
@@ -2650,7 +3025,12 @@ with tab6:
                                {"kind": "tariff", "source": "District Cooling", "dtype": "float"})
                     _add_param("Energy Tariffs → Biomass", {"kind": "tariff", "source": "Biomass", "dtype": "float"})
                     # PV (numeric; affects CRREM by offsetting Electricity)
-                    _add_param("PV_Generation → PV Annual Production (kWh/a)", {"kind": "pv", "dtype": "float"})
+                    _add_param("On-site_Generation → Annual Production (kWh/a)", {"kind": "pv", "dtype": "float"})
+                    # Backwards compatible label (legacy PV naming)
+                    try:
+                        param_specs["PV_Generation → PV Annual Production (kWh/a)"] = param_specs["On-site_Generation → Annual Production (kWh/a)"]
+                    except Exception:
+                        pass
 
                     # Efficiency Factors (numeric)
                     for u in end_uses_no_pv:
@@ -2861,7 +3241,7 @@ with tab6:
                         # Baseline maps (from current scenario state)
                         eff_base = {u: float(st.session_state.get(f"eff_{u}", 1.0)) for u in end_uses_all}
                         src_base = {u: str(st.session_state.get(f"source_{u}", "Electricity")) for u in end_uses_all}
-                        src_base["PV_Generation"] = "Electricity"
+                        src_base["On-site_Generation"] = "Electricity"
 
                         base_tariffs = {
                             "Electricity": float(st.session_state.get("cost_electricity", 0.0)),
@@ -2925,7 +3305,7 @@ with tab6:
                             src_y = dict(src_base)
                             tariffs_y = dict(base_tariffs)
 
-                            # PV annual production override (kWh/a). If set via measures, overrides baseline PV (and sidebar PV scale).
+                            # PV annual production override (kWh/a). If set via measures, overrides baseline PV (and sidebar On-site Generation scale).
                             pv_annual_override_y = None
 
                             def _cmp(ym: int) -> bool:
@@ -2962,10 +3342,10 @@ with tab6:
                                     effv = 1.0
                                 kwh_adj = float(kwh) / effv
 
-                                if eu == "PV_Generation":
-                                    # PV always offsets electricity; enforce negative generation
+                                if eu == "On-site_Generation":
+                                    # On-site Generation always offsets electricity; enforce negative generation
                                     if pv_annual_override_y is not None:
-                                        # Absolute annual PV production (kWh/a) provided by measures
+                                        # Absolute annual On-site Generation production (kWh/a) provided by measures
                                         kwh_adj = -abs(float(pv_annual_override_y))
                                     else:
                                         # Baseline PV (from uploaded data) scaled by sidebar PV factor (if enabled)
@@ -3002,7 +3382,7 @@ with tab6:
                                     df_meas_tl["Category"] = df_meas_tl["Parameter"].astype(str).str.split("→").str[
                                         0].str.strip()
                                     df_meas_tl["Parameter"] = df_meas_tl["Parameter"].astype(str).str.strip()
-                                    df_meas_tl = df_meas_tl.sort_values(by="Year", ascending=False)
+                                    df_meas_tl = df_meas_tl.sort_values(by="Year", ascending=True)
 
                                     fig_tl = px.scatter(
                                         df_meas_tl,
@@ -3015,8 +3395,9 @@ with tab6:
                                     fig_tl.update_layout(height=420, xaxis_title="Year", yaxis_title="",
                                                          legend_title="",
                                                          margin=dict(l=20, r=20, t=50, b=30))
-                                    fig_tl.update_traces(marker=dict(size=14, symbol="square"))
-                                    st.plotly_chart(fig_tl, use_container_width=True)
+
+                                    fig_tl.update_traces(marker=dict(size=20, symbol="square"))
+                                    st_plotly_chart(fig_tl, use_container_width=True)
                                 else:
                                     st.info("No valid measures to plot in the timeline.")
                             else:
@@ -3096,7 +3477,7 @@ with tab6:
                             if stranding_carbon_meas is not None:
                                 figm.add_vline(x=stranding_carbon_meas, line_width=3, line_dash="dash",
                                                line_color="black")
-                            st.plotly_chart(figm, use_container_width=True, key="crrem_carbon_measures_chart")
+                            st_plotly_chart(figm, use_container_width=True, key="crrem_carbon_measures_chart")
 
                         with ecol2:
                             st.write("#### EUI vs CRREM pathway")
@@ -3129,7 +3510,7 @@ with tab6:
                             fige.update_yaxes(rangemode="tozero")
                             if stranding_eui_meas is not None:
                                 fige.add_vline(x=stranding_eui_meas, line_width=3, line_dash="dash", line_color="black")
-                            st.plotly_chart(fige, use_container_width=True, key="crrem_eui_measures_chart")
+                            st_plotly_chart(fige, use_container_width=True, key="crrem_eui_measures_chart")
 
                         with st.expander("Additional CRREM diagrams — With measures", expanded=False):
                             st.caption(
@@ -3147,7 +3528,7 @@ with tab6:
                             )
 
                     st.caption(
-                        "Notes: Green Electricity and PV offset are treated with EF=0. PV offsets Electricity consumption (no export credit).")
+                        "Notes: Green Electricity and On-site Generation offset are treated with EF=0. On-site Generation offsets Electricity consumption (no export credit).")
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
@@ -3178,7 +3559,7 @@ with tab7:
             st.info("No scenarios found. Use the Scenario Manager in the sidebar to create scenarios.")
         else:
             # Base data (monthly energy balance)
-            df = energy_balance_sheet(uploaded_file.getvalue())
+            df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
             df_base = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
             rows = []
@@ -3204,35 +3585,41 @@ with tab7:
                 # Apply efficiency factors (kWh is divided by factor)
                 df_s["kWh_factored"] = df_s["kWh"] / df_s["Efficiency_Factor"]
 
-                # Apply per-scenario PV scale (PV_Generation only)
+                # Apply per-scenario On-site Generation scale (on-site generation end use(s))
                 # In Scenarios tab net KPIs, PV is always considered as an offset.
-                # To model a "no PV" scenario, set PV scale to 0.0.
+                # To model a "no on-site generation" scenario, set On-site Generation scale to 0.0.
                 pv_cfg = (payload.get("pv") or {}) if isinstance(payload, dict) else {}
                 pv_scale = float(pv_cfg.get("scale", 1.0))
-                pv_mask = df_s["End_Use"] == "PV_Generation"
+                onsite_enduses = get_onsite_generation_enduses(df_s["End_Use"].unique())
+                onsite_set = set(onsite_enduses)
+                pv_mask = df_s["End_Use"].isin(onsite_set)
                 if pv_mask.any():
                     df_s.loc[pv_mask, "kWh_factored"] = df_s.loc[pv_mask, "kWh_factored"] * pv_scale
 
                 # Enforce sign convention for net calculations:
-                # - PV_Generation is always treated as a negative credit (generation)
+                # - On-site_Generation is always treated as a negative credit (generation)
                 # - All other end uses are treated as consumption only (clip negatives to 0)
-                pv_mask = df_s["End_Use"] == "PV_Generation"
+                pv_mask = df_s["End_Use"].isin(onsite_set)
                 df_s["kWh_signed"] = df_s["kWh_factored"]
                 df_s.loc[pv_mask, "kWh_signed"] = -df_s.loc[pv_mask, "kWh_factored"].abs()
                 df_s.loc[~pv_mask, "kWh_signed"] = df_s.loc[~pv_mask, "kWh_factored"].clip(lower=0.0)
 
                 df_s["Energy_Source"] = df_s["End_Use"].map(lambda u: str(mapping.get(u, "Electricity")))
 
+                # On-site generation end uses always offset Electricity
+                if pv_mask.any():
+                    df_s.loc[pv_mask, "Energy_Source"] = "Electricity"
+
                 # Annual energy (net includes PV as a negative contribution)
                 totals_use = df_s.groupby("End_Use", as_index=False)["kWh_signed"].sum()
                 net_kwh = float(totals_use["kWh_signed"].sum())
                 gross_kwh = float(
                     totals_use.loc[
-                        (totals_use["End_Use"] != "PV_Generation") & (totals_use["kWh_signed"] > 0),
+                        (~totals_use["End_Use"].isin(onsite_set)) & (totals_use["kWh_signed"] > 0),
                         "kWh_signed"
                     ].sum()
                 )
-                pv_kwh = float(abs(totals_use.loc[totals_use["End_Use"] == "PV_Generation", "kWh_signed"].sum()))
+                pv_kwh = float(abs(totals_use.loc[totals_use["End_Use"].isin(onsite_set), "kWh_signed"].sum()))
 
                 # Net CO2 and net cost (including PV credit as signed kWh)
                 df_net = df_s.copy()
@@ -3241,8 +3628,8 @@ with tab7:
 
                 co2_kg = float((df_net["kWh_signed"] * df_net["co2_factor"]).sum())
                 cost_val = float((df_net["kWh_signed"] * df_net["tariff"]).sum())
-                # Gross CO2 and gross cost (excluding PV_Generation)
-                df_gross = df_s.loc[df_s["End_Use"] != "PV_Generation"].copy()
+                # Gross CO2 and gross cost (excluding On-site_Generation)
+                df_gross = df_s.loc[~pv_mask].copy()
                 df_gross["kWh_pos"] = df_gross["kWh_factored"].clip(lower=0.0)
                 df_gross["co2_factor"] = df_gross["Energy_Source"].map(lambda s: float(factors.get(s, 0.0))).fillna(0.0)
                 df_gross["tariff"] = df_gross["Energy_Source"].map(lambda s: float(tariffs.get(s, 0.0))).fillna(0.0)
@@ -3308,7 +3695,7 @@ with tab7:
                     "Scenario": str(name),
                     "Net Energy (kWh/a)": net_kwh,
                     "Gross Consumption (kWh/a)": gross_kwh,
-                    "PV Generation (kWh/a)": pv_kwh,
+                    "On-site Generation (kWh/a)": pv_kwh,
                     "Net CO2 (t/a)": co2_kg / 1000.0,
                     f"Net Cost ({_curr}/a)": cost_val,
                     # Hidden (used for Gross KPI charts)
@@ -3327,7 +3714,7 @@ with tab7:
                 "Scenario",
                 "Net Energy (kWh/a)",
                 "Gross Consumption (kWh/a)",
-                "PV Generation (kWh/a)",
+                "On-site Generation (kWh/a)",
                 "Net CO2 (t/a)",
                 f"Net Cost ({_curr}/a)",
                 "Net EUI (kWh/m²·a)",
@@ -3336,7 +3723,7 @@ with tab7:
             with st.expander("Raw Data", expanded=False):
                 st.dataframe(df_cmp_display, use_container_width=True)
 
-            # Net KPI charts (incl. PV_Generation) — values printed on bars
+            # Net KPI charts (incl. On-site_Generation) — values printed on bars
             if _area and _area > 0:
                 df_kpi = df_cmp.copy()
                 df_kpi["Scenario"] = df_kpi["Scenario"].astype(str)
@@ -3347,7 +3734,7 @@ with tab7:
                 if net_cost_col_a in df_kpi.columns:
                     df_kpi[net_cost_col_m2] = df_kpi[net_cost_col_a] / _area
 
-                st.markdown("### Net KPI comparison (incl. PV)")
+                st.markdown("### Net KPI comparison (incl. On-site Generation)")
 
                 scenario_color_map = {s: SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)] for i, s in
                                       enumerate(scenario_order)}
@@ -3373,7 +3760,7 @@ with tab7:
                         legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                         margin=dict(b=90),
                     )
-                    st.plotly_chart(fig_net_eui, use_container_width=True, key="scenario_net_eui")
+                    st_plotly_chart(fig_net_eui, use_container_width=True, key="scenario_net_eui")
 
                 with k2:
                     fig_net_emis = px.bar(
@@ -3395,7 +3782,7 @@ with tab7:
                         legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                         margin=dict(b=90),
                     )
-                    st.plotly_chart(fig_net_emis, use_container_width=True, key="scenario_net_emissions")
+                    st_plotly_chart(fig_net_emis, use_container_width=True, key="scenario_net_emissions")
 
                 with k3:
                     if net_cost_col_m2 in df_kpi.columns:
@@ -3418,9 +3805,9 @@ with tab7:
                             legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                             margin=dict(b=90),
                         )
-                        st.plotly_chart(fig_net_cost, use_container_width=True, key="scenario_net_cost")
+                        st_plotly_chart(fig_net_cost, use_container_width=True, key="scenario_net_cost")
 
-                # Gross KPI charts (excl. PV_Generation)
+                # Gross KPI charts (excl. On-site_Generation)
                 df_kpi["Gross Emissions (kgCO₂e/m²·a)"] = (df_kpi["Gross CO2 (t/a)"] * 1000.0) / _area
 
                 gross_cost_col_a = f"Gross Cost ({_curr}/a)"
@@ -3428,7 +3815,7 @@ with tab7:
                 if gross_cost_col_a in df_kpi.columns:
                     df_kpi[gross_cost_col_m2] = df_kpi[gross_cost_col_a] / _area
 
-                st.markdown("### Gross KPI comparison (excl. PV)")
+                st.markdown("### Gross KPI comparison (excl. On-site Generation)")
 
                 g1, g2, g3 = st.columns(3)
 
@@ -3452,7 +3839,7 @@ with tab7:
                         legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                         margin=dict(b=90),
                     )
-                    st.plotly_chart(fig_gross_eui, use_container_width=True, key="scenario_gross_eui")
+                    st_plotly_chart(fig_gross_eui, use_container_width=True, key="scenario_gross_eui")
 
                 with g2:
                     fig_gross_emis = px.bar(
@@ -3474,7 +3861,7 @@ with tab7:
                         legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                         margin=dict(b=90),
                     )
-                    st.plotly_chart(fig_gross_emis, use_container_width=True, key="scenario_gross_emissions")
+                    st_plotly_chart(fig_gross_emis, use_container_width=True, key="scenario_gross_emissions")
 
                 with g3:
                     if gross_cost_col_m2 in df_kpi.columns:
@@ -3497,7 +3884,7 @@ with tab7:
                             legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                             margin=dict(b=90),
                         )
-                        st.plotly_chart(fig_gross_cost, use_container_width=True, key="scenario_gross_cost")
+                        st_plotly_chart(fig_gross_cost, use_container_width=True, key="scenario_gross_cost")
                     else:
                         st.info("Gross cost not available for this project.")
 
@@ -3533,7 +3920,7 @@ with tab7:
                     )
                     fig_end_energy.update_traces(textfont_size=14, textfont_color="white")
                     fig_end_energy.update_xaxes(type="category")
-                    st.plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
+                    st_plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
 
                 # 2) Energy Emissions /m² (factored) by energy source
                 df_emis_src = pd.DataFrame(emissions_rows)
@@ -3558,7 +3945,7 @@ with tab7:
                     )
                     fig_emis.update_traces(textfont_size=14, textfont_color="white")
                     fig_emis.update_xaxes(type="category")
-                    st.plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
+                    st_plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
 
                 # 3) Energy Cost /m² (factored) by energy source
                 cost_col = f"Cost ({_curr}/m²·a)"
@@ -3584,7 +3971,7 @@ with tab7:
                     )
                     fig_cost.update_traces(textfont_size=14, textfont_color="white")
                     fig_cost.update_xaxes(type="category")
-                    st.plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
+                    st_plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
 
 
                 # Scenario comparison charts (factored values, stacked by End Use)
@@ -3610,7 +3997,7 @@ with tab7:
                     )
                     fig_end_energy_eu.update_traces(textfont_size=14, textfont_color="white")
                     fig_end_energy_eu.update_xaxes(type="category")
-                    st.plotly_chart(fig_end_energy_eu, use_container_width=True, key="scenario_end_energy_m2_by_enduse")
+                    st_plotly_chart(fig_end_energy_eu, use_container_width=True, key="scenario_end_energy_m2_by_enduse")
 
 
 
@@ -3636,7 +4023,7 @@ with tab7:
                     )
                     fig_emis_eu.update_traces(textfont_size=14, textfont_color="white")
                     fig_emis_eu.update_xaxes(type="category")
-                    st.plotly_chart(fig_emis_eu, use_container_width=True, key="scenario_emissions_m2_by_enduse")
+                    st_plotly_chart(fig_emis_eu, use_container_width=True, key="scenario_emissions_m2_by_enduse")
 
                 df_cost_eu = pd.DataFrame(cost_use_rows)
                 if not df_cost_eu.empty and cost_col in df_cost_eu.columns:
@@ -3660,7 +4047,7 @@ with tab7:
                     )
                     fig_cost_eu.update_traces(textfont_size=14, textfont_color="white")
                     fig_cost_eu.update_xaxes(type="category")
-                    st.plotly_chart(fig_cost_eu, use_container_width=True, key="scenario_cost_m2_by_enduse")
+                    st_plotly_chart(fig_cost_eu, use_container_width=True, key="scenario_cost_m2_by_enduse")
 
 
     if not uploaded_file:
@@ -3672,7 +4059,7 @@ with tab7:
 with tab1_factors:
     if uploaded_file:
         # ---- Load data
-        df_eff = energy_balance_sheet(uploaded_file.getvalue())
+        df_eff = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
 
         # ---- Wide->Long transform for plotting and grouping
         df_melted_eff = df_eff.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
@@ -3797,7 +4184,7 @@ with tab1_factors:
         )
         annual_chart_per_source_eff.update_traces(textfont_size=14, textfont_color="white")
 
-        totals_eff_clean = totals_eff[(totals_eff["End_Use"] != "PV_Generation")]
+        totals_eff_clean = totals_eff[(totals_eff["End_Use"] != "On-site_Generation")]
 
         # ---- Donuts (EUI shares)
         energy_intensity_chart_eff = px.pie(
@@ -3843,31 +4230,31 @@ with tab1_factors:
         energy_intensity_chart_per_source_eff.update_traces(textinfo="value+percent", textfont_size=18,
                                                             textfont_color="white")
 
-        # ---- PV coverage (share of PV vs consumption-only EUI)
+        # ---- On-site Generation coverage (share of on-site generation vs consumption-only EUI)
         totals_indexed_eff = totals_eff.set_index("End_Use")
         pv_value_eff = totals_indexed_eff.loc[
-            "PV_Generation", "kWh_per_m2"] if "PV_Generation" in totals_indexed_eff.index else 0.0
+            "On-site_Generation", "kWh_per_m2"] if "On-site_Generation" in totals_indexed_eff.index else 0.0
         pv_coverage_eff = abs((pv_value_eff / eui_eff) * 100) if eui_eff != 0 else 0.0
 
         # ---- Layout: charts and KPIs
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader("Monthly Energy")
-            st.plotly_chart(monthly_chart_eff, use_container_width=True, key="ebf_monthly_enduse")
+            st_plotly_chart(monthly_chart_eff, use_container_width=True, key="ebf_monthly_enduse")
         with col2:
             st.subheader("Annual Energy")
-            st.plotly_chart(annual_chart_eff, use_container_width=True, key="ebf_annual_enduse")
+            st_plotly_chart(annual_chart_eff, use_container_width=True, key="ebf_annual_enduse")
 
         # KPI calculations (kept identical logic)
         monthly_avr_eff = (totals_eff["kWh"].sum()) / 12
         net_total_eff = totals_eff["kWh"].sum()
         total_energy_eff = totals_eff.loc[totals_eff["kWh"] > 0, "kWh"].sum()
-        pv_total_eff = abs(df_melted_eff.groupby("End_Use")["kWh"].sum().get("PV_Generation", 0.0))
+        pv_total_eff = abs(df_melted_eff.groupby("End_Use")["kWh"].sum().get("On-site_Generation", 0.0))
 
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader("Energy Use Intensity (kWh/m2.a)")
-            st.plotly_chart(energy_intensity_chart_eff, use_container_width=True, key="ebf_eui_enduse")
+            st_plotly_chart(energy_intensity_chart_eff, use_container_width=True, key="ebf_eui_enduse")
         with col2:
             st.subheader("Energy KPI's")
             st.metric(label="Monthly Average Energy Consumption", value=f"{monthly_avr_eff:,.0f} kWh")
@@ -3875,23 +4262,23 @@ with tab1_factors:
             st.metric(label="Net Annual Energy Consumption", value=f"{net_total_eff:,.0f} kWh")
             st.metric(label="EUI", value=f"{eui_eff:,.1f} kWh/m2.a")
             st.metric(label="Net EUI", value=f"{net_eui_eff:,.1f} kWh/m2.a")
-            st.metric(label="PV Production", value=f"{pv_total_eff:,.1f} kWh")
-            st.metric(label="PV Coverage", value=f"{pv_coverage_eff:,.1f} %")
+            st.metric(label="On-site Generation Production", value=f"{pv_total_eff:,.1f} kWh")
+            st.metric(label="On-site Generation Coverage", value=f"{pv_coverage_eff:,.1f} %")
 
         st.markdown("---")
         st.write("## Energy Balance with Factors (per Energy Source)")
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader("Monthly Energy Demand")
-            st.plotly_chart(monthly_chart_source_eff, use_container_width=True, key="ebf_monthly_source")
+            st_plotly_chart(monthly_chart_source_eff, use_container_width=True, key="ebf_monthly_source")
         with col2:
             st.subheader("Annual Energy Demand")
-            st.plotly_chart(annual_chart_per_source_eff, use_container_width=True, key="ebf_annual_source")
+            st_plotly_chart(annual_chart_per_source_eff, use_container_width=True, key="ebf_annual_source")
 
         col1, col2 = st.columns([3, 1])
         with col1:
             st.subheader("Energy Use Intensity (kWh/m2.a)")
-            st.plotly_chart(energy_intensity_chart_per_source_eff, use_container_width=True, key="ebf_eui_source")
+            st_plotly_chart(energy_intensity_chart_per_source_eff, use_container_width=True, key="ebf_eui_source")
         with col2:
             st.subheader("Energy KPI's")
             for _, row in totals_per_source_eff.iterrows():
@@ -3909,7 +4296,7 @@ with tab1_factors:
 with tab2:
     if uploaded_file:
         # Ensure Energy_Source exists (same mapping as Tab 1)
-        df = energy_balance_sheet(uploaded_file.getvalue())
+        df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
         # ---- Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
         eff_map = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted["End_Use"].unique()}
@@ -4035,7 +4422,7 @@ with tab2:
         annual_chart_co2_source.update_traces(textfont_size=14, textfont_color="white")
 
         totals_co2_use_clean = totals_co2_use[
-            (totals_co2_use["End_Use"] != "PV_Generation")]
+            (totals_co2_use["End_Use"] != "On-site_Generation")]
 
         # Donuts: CO₂ intensity shares
         co2_intensity_pie_use = px.pie(
@@ -4095,15 +4482,15 @@ with tab2:
         c1, c2 = st.columns([3, 1])
         with c1:
             st.subheader("Monthly CO₂")
-            st.plotly_chart(monthly_chart_co2_use, use_container_width=True)
+            st_plotly_chart(monthly_chart_co2_use, use_container_width=True)
         with c2:
             st.subheader("Annual CO₂")
-            st.plotly_chart(annual_chart_co2_use, use_container_width=True)
+            st_plotly_chart(annual_chart_co2_use, use_container_width=True)
 
         c3, c4 = st.columns([3, 1])
         with c3:
             st.subheader("CO₂ Intensity (kgCO₂/m²·a)")
-            st.plotly_chart(co2_intensity_pie_use, use_container_width=True)
+            st_plotly_chart(co2_intensity_pie_use, use_container_width=True)
         with c4:
             st.subheader("CO₂ KPI's")
             st.metric("Monthly Average CO₂", f"{monthly_avg_co2:,.0f} kgCO₂")
@@ -4116,15 +4503,15 @@ with tab2:
         c5, c6 = st.columns([3, 1])
         with c5:
             st.subheader("Monthly CO₂")
-            st.plotly_chart(monthly_chart_co2_source, use_container_width=True)
+            st_plotly_chart(monthly_chart_co2_source, use_container_width=True)
         with c6:
             st.subheader("Annual CO₂")
-            st.plotly_chart(annual_chart_co2_source, use_container_width=True)
+            st_plotly_chart(annual_chart_co2_source, use_container_width=True)
 
         c7, c8 = st.columns([3, 1])
         with c7:
             st.subheader("CO₂ Intensity (kgCO₂/m²·a)")
-            st.plotly_chart(co2_intensity_pie_source, use_container_width=True)
+            st_plotly_chart(co2_intensity_pie_source, use_container_width=True)
         with c8:
             st.subheader("CO₂ KPI's")
             for _, row in totals_co2_source.iterrows():
@@ -4142,9 +4529,7 @@ with tab2:
 with tab3:
     if uploaded_file:
         # Ensure we have the same melted data + mapping used in other tabs
-        xls = pd.ExcelFile(uploaded_file)
-        df_cost_base = pd.read_excel(xls, sheet_name="Energy_Balance")
-        df_cost_base.columns = df_cost_base.columns.str.replace("_kWh", "", regex=False)
+        df_cost_base = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name).copy()
         df_melted_cost = df_cost_base.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
         # ---- Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
         eff_map_cost = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted_cost["End_Use"].unique()}
@@ -4248,7 +4633,7 @@ with tab3:
             height=800,
             category_orders={
                 "End_Use": ["Heating", "Cooling", "Ventilation", "Lighting", "Equipment", "HotWater", "Pumps", "Other",
-                            "PV_Generation"]},
+                            "On-site_Generation"]},
             text_auto=".0f",
         )
         net_cost = totals_cost_use["cost"].sum()
@@ -4279,7 +4664,7 @@ with tab3:
         # ---------- Donuts: Cost intensity (currency/m²·a) ----------
 
         totals_cost_use_clean = totals_cost_use[
-            (totals_cost_use["End_Use"] != "PV_Generation")]
+            (totals_cost_use["End_Use"] != "On-site_Generation")]
 
         cost_intensity_pie_use = px.pie(
             totals_cost_use_clean,
@@ -4335,15 +4720,15 @@ with tab3:
         c1, c2 = st.columns([3, 1])
         with c1:
             st.subheader("Monthly Cost")
-            st.plotly_chart(monthly_chart_cost_use, use_container_width=True)
+            st_plotly_chart(monthly_chart_cost_use, use_container_width=True)
         with c2:
             st.subheader("Annual Cost")
-            st.plotly_chart(annual_chart_cost_use, use_container_width=True)
+            st_plotly_chart(annual_chart_cost_use, use_container_width=True)
 
         c3, c4 = st.columns([3, 1])
         with c3:
             st.subheader(f"Cost Intensity ( {currency_symbol}/m²·a )")
-            st.plotly_chart(cost_intensity_pie_use, use_container_width=True)
+            st_plotly_chart(cost_intensity_pie_use, use_container_width=True)
         with c4:
             st.subheader("Cost KPI's")
             st.metric("Monthly Average Cost", f"{currency_symbol} {monthly_avg_cost:,.0f}")
@@ -4356,15 +4741,15 @@ with tab3:
         c5, c6 = st.columns([3, 1])
         with c5:
             st.subheader("Monthly Cost")
-            st.plotly_chart(monthly_chart_cost_source, use_container_width=True)
+            st_plotly_chart(monthly_chart_cost_source, use_container_width=True)
         with c6:
             st.subheader("Annual Cost")
-            st.plotly_chart(annual_chart_cost_source, use_container_width=True)
+            st_plotly_chart(annual_chart_cost_source, use_container_width=True)
 
         c7, c8 = st.columns([3, 1])
         with c7:
             st.subheader(f"Cost Intensity ( {currency_symbol}/m²·a )")
-            st.plotly_chart(cost_intensity_pie_source, use_container_width=True)
+            st_plotly_chart(cost_intensity_pie_source, use_container_width=True)
         with c8:
             st.subheader("Cost KPI's")
             for _, row in totals_cost_source.iterrows():
@@ -4382,7 +4767,7 @@ with tab3:
 with tab4:
     if uploaded_file:
         # ---- Load data
-        df_loads = loads_balace_sheet(uploaded_file.getvalue())
+        df_loads = get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name)
 
         # columns that are load metrics
         load_cols = [c for c in df_loads.columns if c not in ["hoy", "doy", "day", "month", "weekday", "hour"]]
@@ -4450,7 +4835,7 @@ with tab4:
         with col1:
 
             st.subheader(f"Monthly Load Sum — {selected_load} (kWh)")
-            st.plotly_chart(monthly_total_load_bar, use_container_width=True)
+            st_plotly_chart(monthly_total_load_bar, use_container_width=True)
 
         with col2:
 
@@ -4464,7 +4849,7 @@ with tab4:
             st.metric("80th Percentile Specific Load", f"{p80_specific_load:,.1f} W/m2")
 
         st.subheader(f"Hourly Load Heatmap — {selected_load} (kW)")
-        st.plotly_chart(load_heatmap, use_container_width=True)
+        st_plotly_chart(load_heatmap, use_container_width=True)
 
         # exceed threshold heat map
         peak_load = max_load_selected
@@ -4487,7 +4872,7 @@ with tab4:
             coloraxis_colorbar=dict(title="Exceed"),
             height=700
         )
-        st.plotly_chart(exceed_heatmap, use_container_width=True)
+        st_plotly_chart(exceed_heatmap, use_container_width=True)
 
         st.caption(f"Total Exceeded Hours {total_exceedance:,.1f}")
 
@@ -4562,7 +4947,7 @@ with tab4:
                                    fillcolor=f"rgba({r},{g},{b},0.25)")
 
         st.subheader(f"Peak Day — {selected_load}")
-        st.plotly_chart(peak_day_fig, use_container_width=True)
+        st_plotly_chart(peak_day_fig, use_container_width=True)
         st.caption(f"Daily Total on {date_label}: {peak_total:,.1f}")
 
         # --- Load Duration Curve (percentage of hours vs load) ---
@@ -4598,33 +4983,33 @@ with tab4:
         )
 
         st.subheader(f"Load Duration Curve — {selected_load}")
-        st.plotly_chart(ldc_fig, use_container_width=True)
+        st_plotly_chart(ldc_fig, use_container_width=True)
 
         # -------------------------
-        # PV Self-Consumption (hourly) — uses PV_Generation from Loads_Balance
+        # On-site Generation Self-Consumption (hourly) — uses On-site_Generation from Loads_Balance
         # -------------------------
-        st.subheader("PV Self-Consumption (hourly) — PV_Generation")
-        pv_col = "PV_Generation" if "PV_Generation" in df_loads.columns else None
+        st.subheader("On-site Generation Self-Consumption (hourly) — On-site Generation")
+        pv_col = "On-site_Generation" if "On-site_Generation" in df_loads.columns else None
         if pv_col is None:
             st.warning(
-                "No hourly PV generation column 'PV_Generation' found in Loads_Balance. Add it to enable PV self-consumption.")
+                "No hourly On-site Generation column 'On-site_Generation' found in Loads_Balance. Add it to enable on-site generation self-consumption.")
         else:
             pv_enabled = st.checkbox(
-                "Enable PV self-consumption using PV_Generation",
+                "Enable on-site generation self-consumption using On-site Generation",
                 value=bool(st.session_state.get("pv_sc_enabled", False)),
                 key="pv_sc_enabled",
             )
             pv_scale = numeric_input(
-                "PV scale factor (dimensionless)",
+                "On-site Generation scale factor (dimensionless)",
                 float(st.session_state.get("pv_scale", 1.0)),
                 key="pv_scale",
                 min_value=0.0,
                 max_value=1000.0,
                 fmt="{:.3f}",
-                help="Scales the PV_Generation profile (e.g., 0.5 = half size, 2.0 = double size)."
+                help="Scales the On-site Generation profile (e.g., 0.5 = half size, 2.0 = double size)."
             )
 
-            # Persist PV settings into the active scenario (without touching other scenario fields)
+            # Persist On-site generation settings into the active scenario (without touching other scenario fields)
             if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state[
                 "scenarios"]:
                 _act = st.session_state.get("active_scenario")
@@ -4654,14 +5039,14 @@ with tab4:
                 coverage_ratio = (self_total / load_total) if load_total > 0 else 0.0
 
                 k1, k2, k3, k4, k5, k6 = st.columns(6)
-                k1.metric("PV generation", f"{pv_total:,.0f} kWh")
-                k2.metric("Self-consumed PV", f"{self_total:,.0f} kWh")
-                k3.metric("PV export", f"{export_total:,.0f} kWh")
-                k4.metric("Grid import after PV", f"{import_total:,.0f} kWh")
+                k1.metric("On-site Generation", f"{pv_total:,.0f} kWh")
+                k2.metric("Self-consumed On-site Generation", f"{self_total:,.0f} kWh")
+                k3.metric("On-site Generation export", f"{export_total:,.0f} kWh")
+                k4.metric("Grid import after On-site Generation", f"{import_total:,.0f} kWh")
                 k5.metric("Self-consumption ratio", f"{sc_ratio * 100:,.1f} %")
-                k6.metric("PV coverage of load", f"{coverage_ratio * 100:,.1f} %")
+                k6.metric("On-site Generation coverage of load", f"{coverage_ratio * 100:,.1f} %")
 
-                # Peak-day overlay: load vs PV vs net import
+                # Peak-day overlay: load vs on-site generation vs net import
                 pv_day = (df_loads.loc[df_loads["doy"] == peak_doy, ["hour", pv_col]]
                           .copy())
                 pv_day["hour"] = pd.to_numeric(pv_day["hour"], errors="coerce")
@@ -4679,29 +5064,29 @@ with tab4:
                 fig_pv.add_trace(go.Scatter(x=day_profile["hour"], y=day_profile[selected_load], mode="lines+markers",
                                             name="Load", line=dict(color=bar_color, width=6)))
                 fig_pv.add_trace(go.Scatter(x=pv_day["hour"], y=pv_day[pv_col], mode="lines+markers",
-                                            name="PV",
-                                            line=dict(color=color_map.get("PV_Generation", "#a9c724"), width=5,
+                                            name=ONSITE_GENERATION_LABEL,
+                                            line=dict(color=color_map.get("On-site_Generation", "#a9c724"), width=5,
                                                       dash="dash")))
                 fig_pv.add_trace(go.Scatter(x=day_profile["hour"], y=net_day, mode="lines",
                                             name="Net import", line=dict(color="black", width=5)))
                 fig_pv.update_layout(
-                    title=f"PV Matching on Peak Day — {selected_load} | {date_label}",
+                    title=f"On-site Generation Matching on Peak Day — {selected_load} | {date_label}",
                     xaxis_title="Hour of Day",
                     yaxis_title="kW",
                     xaxis=dict(dtick=1),
                     height=700,
                 )
-                st.plotly_chart(fig_pv, use_container_width=True,
+                st_plotly_chart(fig_pv, use_container_width=True,
                                 key=f"pv_match_peak_{st.session_state.get('active_scenario', '')}_{selected_load}")
 
-                # Annual split: load covered by PV vs grid import
+                # Annual split: load covered by on-site generation vs grid import
                 split_df = pd.DataFrame({
-                    "Component": ["Covered by PV (self-consumed)", "Grid import"],
+                    "Component": ["Covered by On-site Generation (self-consumed)", "Grid import"],
                     "kWh": [self_total, import_total]
                 })
                 split_fig = px.pie(split_df, names="Component", values="kWh",
                                    title="Annual Electricity Supply Split (selected load)")
-                st.plotly_chart(split_fig, use_container_width=True,
+                st_plotly_chart(split_fig, use_container_width=True,
                                 key=f"pv_split_{st.session_state.get('active_scenario', '')}_{selected_load}")
 
     if not uploaded_file:
@@ -4725,7 +5110,7 @@ with tab5:
             # -------------------------
             # Recompute project KPIs (aligned with other tabs)
             # -------------------------
-            df_energy = energy_balance_sheet(uploaded_file.getvalue())
+            df_energy = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
             df_melted = df_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
             # Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
@@ -4820,7 +5205,7 @@ with tab5:
                     st.metric("Building Area", f"{project_area:,.0f} m²", help="User input (sidebar)")
                 with b3:
                     st.metric("On-site generation share", f"{pv_coverage * 100:.0f} %",
-                              help="Derived from negative energy balance entries (e.g., PV)")
+                              help="Derived from negative energy balance entries (e.g., on-site generation)")
                 with b3:
                     st.metric("EUI (Net)", f"{eui_net:.1f} kWh/m²·a")
                 with b2:
@@ -4978,7 +5363,7 @@ with tab5:
                         good_thr=good_thr,
                         excellent_thr=excellent_thr,
                     )
-                    st.plotly_chart(fig_band, use_container_width=True, key=f"bm_band_{tkey}")
+                    st_plotly_chart(fig_band, use_container_width=True, key=f"bm_band_{tkey}")
 
                 with c2:
                     if pd.notna(good_thr) and pd.notna(excellent_thr):
@@ -5058,9 +5443,9 @@ with tab5:
 
                 a1, a2 = st.columns(2, gap="large")
                 with a1:
-                    st.plotly_chart(fig_water, use_container_width=True, key="bm_waterfall_eui")
+                    st_plotly_chart(fig_water, use_container_width=True, key="bm_waterfall_eui")
                 with a2:
-                    st.plotly_chart(fig_end_use, use_container_width=True, key="bm_enduse_energy")
+                    st_plotly_chart(fig_end_use, use_container_width=True, key="bm_enduse_energy")
 
                 # Source split (energy & CO2) — handle negative entries explicitly as on-site generation
                 df_src = df_melted.copy()
@@ -5072,7 +5457,7 @@ with tab5:
                 _src_labels = list(pd.unique(df_src["Energy_Source_BM"]))
                 _src_cmap = {s: color_map_sources.get(s, color_map.get(s, "#999999")) for s in _src_labels}
                 if "On-site generation" in _src_cmap:
-                    _src_cmap["On-site generation"] = color_map.get("PV_Generation", CRREM_COLOR_MEASURES)
+                    _src_cmap["On-site generation"] = color_map.get("On-site_Generation", CRREM_COLOR_MEASURES)
 
                 src_energy = df_src.groupby("Energy_Source_BM", as_index=False)["kWh"].sum()
                 src_energy["kWh_per_m2"] = (src_energy["kWh"] / project_area).round(2)
@@ -5128,9 +5513,9 @@ with tab5:
 
                 b1, b2 = st.columns(2, gap="large")
                 with b1:
-                    st.plotly_chart(fig_src_energy, use_container_width=True, key="bm_source_energy")
+                    st_plotly_chart(fig_src_energy, use_container_width=True, key="bm_source_energy")
                 with b2:
-                    st.plotly_chart(fig_src_co2, use_container_width=True, key="bm_source_co2")
+                    st_plotly_chart(fig_src_co2, use_container_width=True, key="bm_source_co2")
 
                 with st.expander("Cost breakdown (Net accounting)", expanded=False):
                     df_src_cost = df_cost.copy()
@@ -5159,7 +5544,7 @@ with tab5:
                         legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                     )
                     fig_src_cost.add_vline(x=0, line_width=1, line_color="#666666")
-                    st.plotly_chart(fig_src_cost, use_container_width=True, key="bm_source_cost")
+                    st_plotly_chart(fig_src_cost, use_container_width=True, key="bm_source_cost")
 
                     # Optional: show raw numbers for transparency
                     st.dataframe(
@@ -5171,3 +5556,390 @@ with tab5:
 
     if not uploaded_file:
         st.write("Please upload the project Excel file to see benchmark results.")
+
+
+# =========================
+# Tab 8 — Raw Data (editable Energy_Balance + Loads_Balance)
+# =========================
+with tab8:
+    if uploaded_file:
+        file_bytes = uploaded_file.getvalue()
+        wb_hash = hashlib.md5(file_bytes).hexdigest()[:10]
+
+        st.write("## Raw Data")
+        st.caption(
+            "Edit raw sheets using the editors below. **Changes are applied only when you click `Update Data`**. "
+            "Applied changes update all calculations and will be saved back into the workbook when you use **Save Project**."
+        )
+
+        # Ensure drafts exist for this workbook
+        if _RAW_ENERGY_DRAFT_KEY not in st.session_state:
+            st.session_state[_RAW_ENERGY_DRAFT_KEY] = get_energy_balance_df(file_bytes, uploaded_file.name).copy(deep=True)
+        if _RAW_LOADS_DRAFT_KEY not in st.session_state:
+            st.session_state[_RAW_LOADS_DRAFT_KEY] = get_loads_balance_df(file_bytes, uploaded_file.name).copy(deep=True)
+
+        # ---------- Energy_Balance ----------
+        with st.expander("Energy_Balance (monthly, kWh)", expanded=True):
+            energy_editor_key = f"raw_energy_editor_{wb_hash}"
+            energy_flash_key = f"_raw_energy_flash_{wb_hash}"
+
+
+            energy_rename_key = f"raw_energy_rename_{wb_hash}"
+            # Flash messages (shown after rerun)
+            if st.session_state.get(energy_flash_key) == "updated":
+                st.success("Energy_Balance updated and applied to all calculations.")
+                del st.session_state[energy_flash_key]
+            elif st.session_state.get(energy_flash_key) == "reverted":
+                st.info("Energy_Balance edits reverted to the last applied version.")
+                del st.session_state[energy_flash_key]
+            elif st.session_state.get(energy_flash_key) == "renamed":
+                st.info("Energy_Balance columns renamed in draft. Click **Update Data** to apply to all calculations.")
+                del st.session_state[energy_flash_key]
+
+            # Work on draft copy (applied to calculations only after Update Data)
+            df_energy_raw = sanitize_energy_balance_df(st.session_state.get(_RAW_ENERGY_DRAFT_KEY, pd.DataFrame())).copy(deep=True)
+
+            c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+            with c1:
+                new_col_name = st.text_input("Add new End Use column", value="", key=f"raw_add_energy_col_{wb_hash}")
+            with c2:
+                new_col_default = numeric_input("Default value", 0.0, key=f"raw_add_energy_default_{wb_hash}", fmt="{:.3f}")
+            with c3:
+                if st.button("Add column", key=f"raw_add_energy_btn_{wb_hash}", use_container_width=True):
+                    if new_col_name and str(new_col_name).strip():
+                        col = str(new_col_name).strip()
+                        if col not in df_energy_raw.columns:
+                            df_energy_raw[col] = float(new_col_default)
+                            st.session_state[_RAW_ENERGY_DRAFT_KEY] = sanitize_energy_balance_df(df_energy_raw)
+                    # Force editor widget to rebuild so schema changes (new columns) are reflected immediately.
+                    st.session_state.pop(energy_editor_key, None)
+                    st.session_state.pop(energy_rename_key, None)
+                    st.rerun()
+
+            with c4:
+                if st.button(
+                    "Revert",
+                    key=f"raw_revert_energy_{wb_hash}",
+                    use_container_width=True,
+                    help="Discard unsaved edits and revert to last applied data.",
+                ):
+                    st.session_state[_RAW_ENERGY_DRAFT_KEY] = st.session_state.get(_RAW_ENERGY_KEY, pd.DataFrame()).copy(deep=True)
+                    st.session_state.pop(energy_editor_key, None)
+                    st.session_state.pop(energy_rename_key, None)
+                    st.session_state[energy_flash_key] = "reverted"
+                    st.rerun()
+
+            # --- Rename columns (End Uses) ---
+            with st.expander("Rename columns (End Uses)", expanded=False):
+                st.caption(
+                    "Rename End Use columns. Tip: the app uses End Use names without the `_kWh` suffix. If you enter `_kWh`, it will be removed; the suffix is added back automatically when saving to Excel."
+                )
+                renamable_cols = [c for c in df_energy_raw.columns if c != "Month"]
+                if len(renamable_cols) == 0:
+                    st.info("No End Use columns available to rename.")
+                else:
+                    with st.form(f"raw_energy_rename_form_{wb_hash}", clear_on_submit=False):
+                        rename_df = pd.DataFrame({"Current": renamable_cols, "New": renamable_cols})
+                        edited_rename_df = st.data_editor(
+                            rename_df,
+                            num_rows="fixed",
+                            use_container_width=True,
+                            key=energy_rename_key,
+                            disabled=["Current"],
+                        )
+                        apply_rename_energy = st.form_submit_button("Apply renaming to draft", use_container_width=True)
+
+                    if apply_rename_energy:
+                        def _norm_enduse_name(_s: str) -> str:
+                            s_ = str(_s or "").strip()
+                            # Match template convention: use '_' as separator
+                            s_ = re.sub(r"\s+", "_", s_)
+                            # App logic uses End Use names without suffix; strip if user typed it
+                            s_ = re.sub(r"(?i)_kwh$", "", s_)
+                            return s_
+
+                        mapping = {}
+                        final_cols = ["Month"]
+
+                        for _, r in edited_rename_df.iterrows():
+                            old = str(r["Current"]).strip()
+                            raw_new = str(r["New"]).strip()
+                            if not raw_new:
+                                raw_new = old
+
+                            new = _norm_enduse_name(raw_new)
+
+                            # Prevent blank / reserved names
+                            if not new or new == "Month":
+                                new = old
+
+                            mapping[old] = new
+                            final_cols.append(new)
+
+                        if len(set(final_cols)) != len(final_cols):
+                            st.error("Duplicate column names detected. Please use unique End Use names.")
+                        else:
+                            # Preserve End Use colors on rename
+                            try:
+                                cmap = st.session_state.get("color_map_enduse")
+                                if isinstance(cmap, dict):
+                                    for _old, _new in mapping.items():
+                                        if _old != _new and _old in cmap and _new not in cmap:
+                                            cmap[_new] = cmap[_old]
+                                    st.session_state["color_map_enduse"] = cmap
+                            except Exception:
+                                pass
+
+                            # Preserve On-site Generation tagging on rename (so NET logic follows the renamed column)
+                            try:
+                                onsite_lst = st.session_state.get(_ONSITE_ENDUSES_KEY, [ONSITE_GENERATION_ENDUSE])
+                                if not isinstance(onsite_lst, list) or len(onsite_lst) == 0:
+                                    onsite_lst = [ONSITE_GENERATION_ENDUSE]
+                                # normalize legacy token
+                                onsite_lst = [ONSITE_GENERATION_ENDUSE if str(x) == LEGACY_PV_ENDUSE else str(x) for x in onsite_lst]
+                                updated_lst = [mapping.get(x, x) for x in onsite_lst]
+                                uniq = []
+                                for x in updated_lst:
+                                    if x not in uniq:
+                                        uniq.append(x)
+                                st.session_state[_ONSITE_ENDUSES_KEY] = uniq
+                            except Exception:
+                                pass
+
+                            df_renamed = df_energy_raw.rename(columns=mapping)
+                            df_renamed = sanitize_energy_balance_df(df_renamed)
+                            st.session_state[_RAW_ENERGY_DRAFT_KEY] = df_renamed
+
+                            # Reset widget state so editors rebuild with the new schema immediately
+                            st.session_state.pop(energy_editor_key, None)
+                            st.session_state.pop(energy_rename_key, None)
+
+                            st.session_state[energy_flash_key] = "renamed"
+                            st.rerun()
+
+            # Batch apply edits: users can make multiple edits, then click Update Data once.
+            with st.form(f"raw_energy_form_{wb_hash}", clear_on_submit=False):
+                editor_kwargs = {
+                    "num_rows": "dynamic",
+                    "use_container_width": True,
+                    "key": energy_editor_key,
+                }
+                if hasattr(st, "column_config"):
+                    col_cfg = {"Month": st.column_config.TextColumn("Month", required=True)}
+                    for c in df_energy_raw.columns:
+                        if c == "Month":
+                            continue
+                        col_cfg[c] = st.column_config.NumberColumn(c, format="%.3f")
+                    editor_kwargs["column_config"] = col_cfg
+
+                edited_energy = st.data_editor(df_energy_raw, **editor_kwargs)
+
+                # Persist edits into the *draft* buffer on every rerun so values are not lost,
+                # but do NOT apply them to calculations until the user clicks "Update Data".
+                st.session_state[_RAW_ENERGY_DRAFT_KEY] = sanitize_energy_balance_df(edited_energy)
+
+                apply_energy = st.form_submit_button("Update Data", use_container_width=True)
+
+            if apply_energy:
+                committed_energy = sanitize_energy_balance_df(edited_energy)
+                st.session_state[_RAW_ENERGY_KEY] = committed_energy
+                st.session_state[_RAW_ENERGY_DRAFT_KEY] = committed_energy.copy(deep=True)
+                st.session_state[_RAW_COMMIT_VERSION_KEY] = st.session_state.get(_RAW_COMMIT_VERSION_KEY, 0) + 1
+
+                # Reset the editor widget state so it always reflects committed data after apply.
+                st.session_state.pop(energy_editor_key, None)
+                st.session_state.pop(energy_rename_key, None)
+
+                # Force a full rerun so upstream tabs/plots recompute from the updated committed data.
+                st.session_state[energy_flash_key] = "updated"
+                st.rerun()
+
+# ---------- Loads_Balance ----------
+        with st.expander("Loads_Balance (hourly, kW)", expanded=False):
+            loads_editor_key = f"raw_loads_editor_{wb_hash}"
+            loads_flash_key = f"_raw_loads_flash_{wb_hash}"
+
+
+            loads_rename_key = f"raw_loads_rename_{wb_hash}"
+            # Flash messages (shown after rerun)
+            if st.session_state.get(loads_flash_key) == "updated":
+                st.success("Loads_Balance updated and applied to all calculations.")
+                del st.session_state[loads_flash_key]
+            elif st.session_state.get(loads_flash_key) == "reverted":
+                st.info("Loads_Balance edits reverted to the last applied version.")
+                del st.session_state[loads_flash_key]
+            elif st.session_state.get(loads_flash_key) == "renamed":
+                st.info("Loads_Balance columns renamed in draft. Click **Update Data** to apply to all calculations.")
+                del st.session_state[loads_flash_key]
+
+            df_loads_raw = sanitize_loads_balance_df(st.session_state.get(_RAW_LOADS_DRAFT_KEY, pd.DataFrame())).copy(deep=True)
+
+            c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+            with c1:
+                new_load_col = st.text_input(
+                    "Add new Load column",
+                    value="",
+                    key=f"raw_add_load_col_{wb_hash}",
+                    help="Column will be treated as a load profile (kW).",
+                )
+            with c2:
+                new_load_default = numeric_input("Default value", 0.0, key=f"raw_add_load_default_{wb_hash}", fmt="{:.3f}")
+            with c3:
+                if st.button("Add column", key=f"raw_add_load_btn_{wb_hash}", use_container_width=True):
+                    if new_load_col and str(new_load_col).strip():
+                        col = str(new_load_col).strip()
+                        if col not in df_loads_raw.columns:
+                            df_loads_raw[col] = float(new_load_default)
+                            st.session_state[_RAW_LOADS_DRAFT_KEY] = sanitize_loads_balance_df(df_loads_raw)
+                    st.session_state.pop(loads_editor_key, None)
+                    st.session_state.pop(loads_rename_key, None)
+                    st.rerun()
+
+            with c4:
+                if st.button(
+                    "Revert",
+                    key=f"raw_revert_loads_{wb_hash}",
+                    use_container_width=True,
+                    help="Discard unsaved edits and revert to last applied data.",
+                ):
+                    st.session_state[_RAW_LOADS_DRAFT_KEY] = st.session_state.get(_RAW_LOADS_KEY, pd.DataFrame()).copy(deep=True)
+                    st.session_state.pop(loads_editor_key, None)
+                    st.session_state.pop(loads_rename_key, None)
+                    st.session_state[loads_flash_key] = "reverted"
+                    st.rerun()
+
+            # --- Rename columns (Loads) ---
+            with st.expander("Rename columns (Loads)", expanded=False):
+                fixed_cols = ["hoy", "doy", "day", "month", "weekday", "hour", "Grid_Injection"]
+                fixed_in_df = [c for c in fixed_cols if c in df_loads_raw.columns]
+                renamable_cols = [c for c in df_loads_raw.columns if c not in fixed_in_df]
+
+                st.caption(
+                    "Rename load columns. Tip: the app uses Load names without the `_load` suffix. If you enter `_load`, it will be removed; the suffix is added back automatically when saving to Excel. The time/meta columns "
+                    f"({', '.join(fixed_in_df)}) are fixed and cannot be renamed."
+                )
+
+                if len(renamable_cols) == 0:
+                    st.info("No load columns available to rename.")
+                else:
+                    with st.form(f"raw_loads_rename_form_{wb_hash}", clear_on_submit=False):
+                        rename_df = pd.DataFrame({"Current": renamable_cols, "New": renamable_cols})
+                        edited_rename_df = st.data_editor(
+                            rename_df,
+                            num_rows="fixed",
+                            use_container_width=True,
+                            key=loads_rename_key,
+                            disabled=["Current"],
+                        )
+                        apply_rename_loads = st.form_submit_button("Apply renaming to draft", use_container_width=True)
+
+                    if apply_rename_loads:
+                        def _norm_load_name(_s: str) -> str:
+                            s_ = str(_s or "").strip()
+                            # Match template convention: use '_' as separator
+                            s_ = re.sub(r"\s+", "_", s_)
+                            # App logic uses Load names without suffix; strip if user typed it
+                            s_ = re.sub(r"(?i)_load$", "", s_)
+                            return s_
+
+                        mapping = {}
+                        final_cols = list(fixed_in_df)
+
+                        # Validate + build mapping
+                        for _, r in edited_rename_df.iterrows():
+                            old = str(r["Current"]).strip()
+                            raw_new = str(r["New"]).strip()
+                            if not raw_new:
+                                raw_new = old
+
+                            new = _norm_load_name(raw_new)
+
+                            if not new:
+                                new = old
+
+                            if new in fixed_in_df:
+                                st.error(f"'{new}' is reserved for time/meta columns and cannot be used as a load name.")
+                                mapping = None
+                                break
+
+                            mapping[old] = new
+                            final_cols.append(new)
+
+                        if mapping is not None:
+                            if len(set(final_cols)) != len(final_cols):
+                                st.error("Duplicate column names detected. Please use unique load names.")
+                            else:
+                                # Preserve Load colors on rename
+                                try:
+                                    cmap = st.session_state.get("color_map_loads")
+                                    if isinstance(cmap, dict):
+                                        for _old, _new in mapping.items():
+                                            if _old != _new and _old in cmap and _new not in cmap:
+                                                cmap[_new] = cmap[_old]
+                                        st.session_state["color_map_loads"] = cmap
+                                except Exception:
+                                    pass
+
+                                # Preserve On-site Generation tagging on rename (loads)
+                                try:
+                                    onsite_lst = st.session_state.get(_ONSITE_ENDUSES_KEY, [ONSITE_GENERATION_ENDUSE])
+                                    if not isinstance(onsite_lst, list) or len(onsite_lst) == 0:
+                                        onsite_lst = [ONSITE_GENERATION_ENDUSE]
+                                    onsite_lst = [ONSITE_GENERATION_ENDUSE if str(x) == LEGACY_PV_ENDUSE else str(x) for x in onsite_lst]
+                                    updated_lst = [mapping.get(x, x) for x in onsite_lst]
+                                    uniq = []
+                                    for x in updated_lst:
+                                        if x not in uniq:
+                                            uniq.append(x)
+                                    st.session_state[_ONSITE_ENDUSES_KEY] = uniq
+                                except Exception:
+                                    pass
+
+                                df_renamed = df_loads_raw.rename(columns=mapping)
+                                df_renamed = sanitize_loads_balance_df(df_renamed)
+                                st.session_state[_RAW_LOADS_DRAFT_KEY] = df_renamed
+
+                                # Reset widget state so editors rebuild with the new schema immediately
+                                st.session_state.pop(loads_editor_key, None)
+                                st.session_state.pop(loads_rename_key, None)
+
+                                st.session_state[loads_flash_key] = "renamed"
+                                st.rerun()
+
+
+            with st.form(f"raw_loads_form_{wb_hash}", clear_on_submit=False):
+                editor_kwargs = {
+                    "num_rows": "dynamic",
+                    "use_container_width": True,
+                    "key": loads_editor_key,
+                }
+                if hasattr(st, "column_config") and not df_loads_raw.empty:
+                    col_cfg = {}
+                    for c in df_loads_raw.columns:
+                        if c == "weekday":
+                            col_cfg[c] = st.column_config.TextColumn(c)
+                        else:
+                            col_cfg[c] = st.column_config.NumberColumn(c, format="%.3f")
+                    editor_kwargs["column_config"] = col_cfg
+
+                edited_loads = st.data_editor(df_loads_raw, **editor_kwargs)
+
+                # Persist edits into draft on every rerun (do not apply to calculations yet).
+                st.session_state[_RAW_LOADS_DRAFT_KEY] = sanitize_loads_balance_df(edited_loads)
+
+                apply_loads = st.form_submit_button("Update Data", use_container_width=True)
+
+            if apply_loads:
+                committed_loads = sanitize_loads_balance_df(edited_loads)
+                st.session_state[_RAW_LOADS_KEY] = committed_loads
+                st.session_state[_RAW_LOADS_DRAFT_KEY] = committed_loads.copy(deep=True)
+                st.session_state[_RAW_COMMIT_VERSION_KEY] = st.session_state.get(_RAW_COMMIT_VERSION_KEY, 0) + 1
+
+                st.session_state.pop(loads_editor_key, None)
+                st.session_state.pop(loads_rename_key, None)
+
+                st.session_state[loads_flash_key] = "updated"
+                st.rerun()
+
+    else:
+        st.write("### ← Please upload data on side bar")
