@@ -107,6 +107,13 @@ color_map_sources = {
     "Biomass": "#8b5a2b",
 }
 
+# --- NEW: keep immutable defaults for the Color Settings sidebar
+DEFAULT_COLOR_MAP = dict(color_map)
+DEFAULT_COLOR_MAP_SOURCES = dict(color_map_sources)
+
+# --- NEW: default palette for Loads (used in Loads Analysis and Color Settings)
+DEFAULT_COLOR_MAP_LOADS = {k: v for k, v in DEFAULT_COLOR_MAP.items() if k not in set(DEFAULT_COLOR_MAP_SOURCES.keys())}
+
 # --- NEW: ensure a default project name exists before rendering the title
 if "project_name" not in st.session_state:
     st.session_state["project_name"] = "Building Performance Dashboard"
@@ -169,6 +176,7 @@ SHEET_TARIFFS = "Energy_Tariffs"
 SHEET_MAPPING = "EndUse_to_Source"
 SHEET_EFFICIENCY = "Efficiency_Factors"
 SHEET_SCENARIOS = "Scenarios"
+SHEET_COLORS = "Color_Settings"
 
 
 def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame]]:
@@ -182,6 +190,7 @@ def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame
         "mapping": sheets.get(SHEET_MAPPING),
         "efficiency": sheets.get(SHEET_EFFICIENCY),
         "scenarios": sheets.get(SHEET_SCENARIOS),
+        "colors": sheets.get(SHEET_COLORS),
         "all_sheets": sheets,  # keep to preserve everything when writing back
     }
 
@@ -245,6 +254,130 @@ def parse_efficiency_df(df: Optional[pd.DataFrame]) -> Dict[str, float]:
             except Exception:
                 pass
     return out
+
+
+
+def parse_color_settings_df(df: Optional[pd.DataFrame]) -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
+    """Parse Color_Settings sheet into (End_Use colors, Energy_Source colors, Load colors)."""
+    end_use_map: Dict[str, str] = {}
+    source_map: Dict[str, str] = {}
+    load_map: Dict[str, str] = {}
+
+    if df is None or df.empty:
+        return end_use_map, source_map, load_map
+
+    # Preferred schema: Type | Name | Color
+    if {"Type", "Name", "Color"}.issubset(df.columns):
+        for _, row in df.iterrows():
+            typ = str(row.get("Type", "")).strip()
+            name = str(row.get("Name", "")).strip()
+            col = str(row.get("Color", "")).strip()
+            if not name or not col:
+                continue
+            if not col.startswith("#"):
+                col = f"#{col}"
+            typ_l = typ.lower()
+
+            if typ_l in ["end_use", "end use", "enduse", "end-use"]:
+                end_use_map[name] = col
+            elif typ_l in ["energy_source", "energy source", "energysource", "energy-source", "source"]:
+                source_map[name] = col
+            elif typ_l in ["load", "loads"]:
+                load_map[name] = col
+
+        return end_use_map, source_map, load_map
+
+    # Fallback schema(s)
+    if {"End_Use", "Color"}.issubset(df.columns):
+        for _, row in df.iterrows():
+            name = str(row.get("End_Use", "")).strip()
+            col = str(row.get("Color", "")).strip()
+            if not name or not col:
+                continue
+            if not col.startswith("#"):
+                col = f"#{col}"
+            end_use_map[name] = col
+
+    if {"Energy_Source", "Color"}.issubset(df.columns):
+        for _, row in df.iterrows():
+            name = str(row.get("Energy_Source", "")).strip()
+            col = str(row.get("Color", "")).strip()
+            if not name or not col:
+                continue
+            if not col.startswith("#"):
+                col = f"#{col}"
+            source_map[name] = col
+
+    if {"Load", "Color"}.issubset(df.columns):
+        for _, row in df.iterrows():
+            name = str(row.get("Load", "")).strip()
+            col = str(row.get("Color", "")).strip()
+            if not name or not col:
+                continue
+            if not col.startswith("#"):
+                col = f"#{col}"
+            load_map[name] = col
+
+    return end_use_map, source_map, load_map
+
+
+    # Preferred schema: Type | Name | Color
+    if {"Type", "Name", "Color"}.issubset(df.columns):
+        for _, row in df.iterrows():
+            typ = str(row.get("Type", "")).strip()
+            name = str(row.get("Name", "")).strip()
+            col = str(row.get("Color", "")).strip()
+            if not name or not col:
+                continue
+            if not col.startswith("#"):
+                col = f"#{col}"
+            typ_l = typ.lower()
+            if typ_l in ["end_use", "end use", "enduse", "end-use"]:
+                end_use_map[name] = col
+            elif typ_l in ["energy_source", "energy source", "energysource", "energy-source", "source"]:
+                source_map[name] = col
+        return end_use_map, source_map
+
+    # Fallback schema(s)
+    if {"End_Use", "Color"}.issubset(df.columns):
+        for _, row in df.iterrows():
+            name = str(row.get("End_Use", "")).strip()
+            col = str(row.get("Color", "")).strip()
+            if not name or not col:
+                continue
+            if not col.startswith("#"):
+                col = f"#{col}"
+            end_use_map[name] = col
+
+    if {"Energy_Source", "Color"}.issubset(df.columns):
+        for _, row in df.iterrows():
+            name = str(row.get("Energy_Source", "")).strip()
+            col = str(row.get("Color", "")).strip()
+            if not name or not col:
+                continue
+            if not col.startswith("#"):
+                col = f"#{col}"
+            source_map[name] = col
+
+    return end_use_map, source_map
+
+
+
+def build_color_settings_df(
+        color_map_end_use: Dict[str, str],
+        color_map_sources_in: Dict[str, str],
+        color_map_loads_in: Optional[Dict[str, str]] = None
+) -> pd.DataFrame:
+    """Build Color_Settings sheet from the current color maps."""
+    rows = []
+    for k, v in (color_map_end_use or {}).items():
+        rows.append({"Type": "End_Use", "Name": str(k), "Color": str(v)})
+    for k, v in (color_map_sources_in or {}).items():
+        rows.append({"Type": "Energy_Source", "Name": str(k), "Color": str(v)})
+    for k, v in (color_map_loads_in or {}).items():
+        rows.append({"Type": "Load", "Name": str(k), "Color": str(v)})
+    return pd.DataFrame(rows)
+
 
 
 # =========================
@@ -822,7 +955,8 @@ def write_config_to_excel(original_bytes: bytes,
                           tariffs_df: pd.DataFrame,
                           mapping_df: pd.DataFrame,
                           efficiency_df: pd.DataFrame,
-                          scenarios_df: Optional[pd.DataFrame] = None) -> bytes:
+                          scenarios_df: Optional[pd.DataFrame] = None,
+                          colors_df: Optional[pd.DataFrame] = None) -> bytes:
     """Return a new workbook (bytes) with all original sheets + updated config sheets."""
     cfg = read_config_from_excel(original_bytes)
     sheets = cfg["all_sheets"]  # dict[name] -> df
@@ -835,6 +969,8 @@ def write_config_to_excel(original_bytes: bytes,
     sheets[SHEET_EFFICIENCY] = efficiency_df
     if scenarios_df is not None:
         sheets[SHEET_SCENARIOS] = scenarios_df
+    if colors_df is not None:
+        sheets[SHEET_COLORS] = colors_df
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
@@ -1063,6 +1199,7 @@ if uploaded_file:
     saved_tariffs = parse_tariffs_df(cfg_saved["tariffs"])
     saved_mapping_df = cfg_saved["mapping"]
     saved_efficiency = parse_efficiency_df(cfg_saved.get("efficiency"))
+    saved_colors_enduse, saved_colors_sources, saved_colors_loads = parse_color_settings_df(cfg_saved.get("colors"))
     has_any_saved = any([
         saved_name, saved_area, saved_currency, saved_building_use, saved_country, bool(saved_factors),
         bool(saved_tariffs),
@@ -1086,6 +1223,9 @@ if uploaded_file:
         "tariffs": saved_tariffs,
         "mapping_df": saved_mapping_df,
         "efficiency": saved_efficiency,
+        "colors_enduse": saved_colors_enduse,
+        "colors_sources": saved_colors_sources,
+        "colors_loads": saved_colors_loads,
         "scenarios_df": cfg_saved.get("scenarios"),
         "file_bytes": file_bytes,
     }
@@ -1141,6 +1281,22 @@ if uploaded_file:
         if preloaded.get("currency") in ["€", "$", "£"]:
             st.session_state["currency_symbol"] = str(preloaded["currency"])
 
+        # --- Seed Color Settings from file (or defaults)
+        try:
+            enduse_base = dict(DEFAULT_COLOR_MAP)
+            enduse_base.update(preloaded.get("colors_enduse") or {})
+            source_base = dict(DEFAULT_COLOR_MAP_SOURCES)
+            source_base.update(preloaded.get("colors_sources") or {})
+            loads_base = dict(DEFAULT_COLOR_MAP_LOADS)
+            loads_base.update(preloaded.get("colors_loads") or {})
+            st.session_state["color_map_enduse"] = enduse_base
+            st.session_state["color_map_sources"] = source_base
+            st.session_state["color_map_loads"] = loads_base
+        except Exception:
+            st.session_state["color_map_enduse"] = dict(DEFAULT_COLOR_MAP)
+            st.session_state["color_map_sources"] = dict(DEFAULT_COLOR_MAP_SOURCES)
+            st.session_state["color_map_loads"] = dict(DEFAULT_COLOR_MAP_LOADS)
+
         st.session_state["_loaded_workbook_token"] = wb_token
 
 # =========================
@@ -1159,7 +1315,7 @@ st.title(st.session_state["project_name"])
 # Tabs
 # =========================
 tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-    ["Energy Balance", "Energy Balance with Factors", "CO2 Emissions", "Energy Cost", "Loads Analysis", "Benchmark",
+    ["Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)", "Energy Cost (with Factors)", "Loads Analysis", "Benchmark",
      "CRREM-Analysis", "Scenarios"])
 
 # =========================
@@ -1191,6 +1347,7 @@ with tab1:
 
         # ---- Sidebar: scenario manager UI
         with st.sidebar.expander("Scenario Manager", expanded=True):
+            st.caption("Manage and select active project's scenario")
             scenarios = st.session_state.get("scenarios", {})
             scenario_names = list(scenarios.keys()) if scenarios else ["Base"]
 
@@ -1273,7 +1430,7 @@ with tab1:
 
         # ---- Sidebar: project info (prefill from saved if available)
         with st.sidebar.expander("Project Data"):
-            st.write("Enter Project's Basic Informations")
+            st.caption("Enter Project's Basic Informations")
 
             # Prefer current session values (so Project Data stays global across scenarios)
             default_name = st.session_state.get("project_name")
@@ -1332,7 +1489,7 @@ with tab1:
                 "Country",
                 options=country_options if country_options else ["Germany"],
                 index=(country_options.index(default_country) if (
-                            country_options and default_country in country_options) else 0),
+                        country_options and default_country in country_options) else 0),
                 key="project_country",
             )
 
@@ -1363,7 +1520,7 @@ with tab1:
 
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
-            st.write("Assign Emission Factors")
+            st.caption("Assign Emission Factors per source")
             def_f = preloaded["factors"] if preloaded else {}
             co2_Emissions_Electricity = numeric_input("CO2 Factor Electricity", float(def_f.get("Electricity", 0.300)),
                                                       key="co2_Emissions_Electricity", min_value=0.0, max_value=1.0,
@@ -1384,7 +1541,7 @@ with tab1:
 
         # --- Energy Cost (€/kWh) ---
         with st.sidebar.expander("Energy Tariffs"):
-            st.write("Assign energy cost per source (per kWh)")
+            st.caption("Assign energy cost per source (per kWh)")
             default_currency = preloaded["currency"] if (
                     preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
             currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency),
@@ -1412,7 +1569,7 @@ with tab1:
 
         # ---- Sidebar: efficiency factors per End_Use (used in 'Energy Balance with Factors' tab)
         with st.sidebar.expander("Efficiency Factors"):
-            st.write("Assign efficiency factors per End Use (dimensionless; kWh is divided by factor)")
+            st.caption("Assign efficiency factors per End Use (dimensionless; kWh is divided by factor)")
             def_eff = preloaded["efficiency"] if (preloaded and preloaded.get("efficiency")) else {}
             for use in df_melted["End_Use"].unique().tolist():
                 numeric_input(
@@ -1426,7 +1583,7 @@ with tab1:
 
         # ---- Sidebar: map End_Use -> Energy_Source (user-controlled)
         with st.sidebar.expander("Assign Energy Sources"):
-            st.write("Assign Energy Sources")
+            st.caption("Assign Energy Sources per End Use")
             end_uses = df_melted["End_Use"].unique().tolist()
 
             # If we have a saved mapping sheet, parse it to set defaults:
@@ -1445,6 +1602,109 @@ with tab1:
                     key=f"source_{use}",  # distinct widget keys
                 )
                 mapping_dict[use] = source
+
+        # ---- Sidebar: Color Settings (global; used across all charts)
+        with st.sidebar.expander("Color Settings", expanded=False):
+            # Ensure the dicts exist (seeded from workbook if available)
+            if "color_map_enduse" not in st.session_state or not isinstance(st.session_state.get("color_map_enduse"), dict):
+                st.session_state["color_map_enduse"] = dict(DEFAULT_COLOR_MAP)
+            if "color_map_sources" not in st.session_state or not isinstance(st.session_state.get("color_map_sources"), dict):
+                st.session_state["color_map_sources"] = dict(DEFAULT_COLOR_MAP_SOURCES)
+            if "color_map_loads" not in st.session_state or not isinstance(st.session_state.get("color_map_loads"), dict):
+                st.session_state["color_map_loads"] = dict(DEFAULT_COLOR_MAP_LOADS)
+
+            def _rand_hex(_name: str) -> str:
+                try:
+                    return "#" + hashlib.md5(str(_name).encode("utf-8")).hexdigest()[:6]
+                except Exception:
+                    return "#777777"
+
+            def _k_safe(s: str) -> str:
+                s = str(s)
+                return "".join([(c if c.isalnum() else "_") for c in s])[:60]
+
+            # Ensure colors exist for all End Uses found in the workbook
+            for _eu in end_uses:
+                if _eu not in st.session_state["color_map_enduse"]:
+                    st.session_state["color_map_enduse"][_eu] = _rand_hex(f"enduse::{_eu}")
+
+            # Ensure colors exist for all Energy Sources in use (or selectable)
+            try:
+                _sources_in_use = sorted(set(list(mapping_dict.values())) | set(ENERGY_SOURCE_ORDER))
+            except Exception:
+                _sources_in_use = list(ENERGY_SOURCE_ORDER)
+
+            for _src in _sources_in_use:
+                if _src not in st.session_state["color_map_sources"]:
+                    st.session_state["color_map_sources"][_src] = _rand_hex(f"source::{_src}")
+
+            # Detect loads from Loads_Balance (if present)
+            try:
+                _df_loads_sidebar = loads_balace_sheet(uploaded_file.getvalue())
+                _load_cols = [c for c in _df_loads_sidebar.columns if c not in ["hoy", "doy", "day", "month", "weekday", "hour"]]
+            except Exception:
+                _load_cols = []
+
+            for _ld in _load_cols:
+                if _ld not in st.session_state["color_map_loads"]:
+                    # Prefer same palette as End Uses when names overlap; otherwise deterministic color
+                    st.session_state["color_map_loads"][_ld] = st.session_state["color_map_enduse"].get(_ld, _rand_hex(f"load::{_ld}"))
+
+            # Key prefix stable per workbook (prevents stale color-picker state after uploading a new file)
+            _tok = st.session_state.get("_loaded_workbook_token", "default")
+            try:
+                _tok_short = hashlib.md5(str(_tok).encode("utf-8")).hexdigest()[:8]
+            except Exception:
+                _tok_short = "default"
+
+            # Reset button — restores original palettes defined in the app code
+            if st.button("Reset Colors", use_container_width=True, key=f"reset_colors_{_tok_short}"):
+                st.session_state["color_map_enduse"] = dict(DEFAULT_COLOR_MAP)
+                st.session_state["color_map_sources"] = dict(DEFAULT_COLOR_MAP_SOURCES)
+                st.session_state["color_map_loads"] = dict(DEFAULT_COLOR_MAP_LOADS)
+
+                # Clear color-picker widget state so new defaults are reflected immediately
+                for _k in list(st.session_state.keys()):
+                    if str(_k).startswith(("cp_eu_", "cp_src_", "cp_ld_")):
+                        try:
+                            del st.session_state[_k]
+                        except Exception:
+                            pass
+                st.rerun()
+
+            st.caption("Customize colors for End Uses, Energy Sources, and Loads. These settings are saved with the project.")
+
+            st.markdown("**End Uses**")
+            for _eu in end_uses:
+                _key = f"cp_eu_{_tok_short}_{_k_safe(_eu)}"
+                _val = st.session_state["color_map_enduse"].get(_eu, _rand_hex(f"enduse::{_eu}"))
+                _new = st.color_picker(str(_eu), value=_val, key=_key)
+                st.session_state["color_map_enduse"][_eu] = _new
+
+            st.markdown("---")
+            st.markdown("**Energy Sources**")
+            for _src in _sources_in_use:
+                _key = f"cp_src_{_tok_short}_{_k_safe(_src)}"
+                _val = st.session_state["color_map_sources"].get(_src, _rand_hex(f"source::{_src}"))
+                _new = st.color_picker(str(_src), value=_val, key=_key)
+                st.session_state["color_map_sources"][_src] = _new
+
+            st.markdown("---")
+            st.markdown("**Loads**")
+            if _load_cols:
+                for _ld in _load_cols:
+                    _key = f"cp_ld_{_tok_short}_{_k_safe(_ld)}"
+                    _val = st.session_state["color_map_loads"].get(_ld, _rand_hex(f"load::{_ld}"))
+                    _new = st.color_picker(str(_ld), value=_val, key=_key)
+                    st.session_state["color_map_loads"][_ld] = _new
+            else:
+                st.caption("No Loads_Balance sheet found (or no load columns detected).")
+
+
+        # ---- Apply current color settings to plotting maps
+        color_map = st.session_state.get("color_map_enduse", color_map)
+        color_map_sources = st.session_state.get("color_map_sources", color_map_sources)
+        color_map_loads = st.session_state.get("color_map_loads", DEFAULT_COLOR_MAP_LOADS)
 
         # ---- Persist current widget values back into the active scenario (for switching/comparison/save)
         if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
@@ -1512,8 +1772,15 @@ with tab1:
                         st.session_state.get("active_scenario")
                     )
 
+                colors_df = build_color_settings_df(
+                    st.session_state.get("color_map_enduse", DEFAULT_COLOR_MAP),
+                    st.session_state.get("color_map_sources", DEFAULT_COLOR_MAP_SOURCES),
+                    st.session_state.get("color_map_loads", DEFAULT_COLOR_MAP_LOADS),
+                )
+
                 updated_bytes = write_config_to_excel(preloaded["file_bytes"], project_df, factors_df, tariffs_df,
-                                                      mapping_df, efficiency_df, scenarios_df=scenarios_df)
+                                                      mapping_df, efficiency_df, scenarios_df=scenarios_df,
+                                                      colors_df=colors_df)
 
                 st.success("Project settings saved to workbook.")
                 st.download_button(
@@ -1599,6 +1866,7 @@ with tab1:
         monthly_chart_source.update_traces(textfont_size=14, textfont_color="white")
 
         st.write("## Energy Balance (per End Use)")
+        st.metric("Active Scenario", active_selected)
 
         # ---- Annual totals per End_Use and per Energy_Source (+ intensities)
         totals = df_melted.groupby("End_Use", as_index=False)["kWh"].sum()
@@ -1687,7 +1955,7 @@ with tab1:
         )
         energy_intensity_chart_per_source.update_layout(
             annotations=[dict(
-                text=f"{eui:,.1f}<br>kWh/m²·a",
+                text=f"{net_eui:,.1f}<br>kWh/m²·a",
                 x=0.5, y=0.5, xref="paper", yref="paper",
                 showarrow=False,
                 font=dict(size=50, color="black"),
@@ -1766,6 +2034,7 @@ with tab1:
 with tab6:
     if uploaded_file:
         st.write(f"## CRREM-Analysis ({st.session_state.get('project_country', 'Germany')})")
+        st.metric("Active Scenario", active_selected)
 
         crrem = load_crrem_dataset(st.session_state.get("project_country", "Germany"))
         if crrem is None:
@@ -1973,6 +2242,7 @@ with tab6:
                 stranding_carbon = find_stranding_year(carbon_asset, carbon_limit)
                 stranding_eui = find_stranding_year(eui_asset_series, eui_limit)
 
+
                 # --- Helper: additional CRREM charts (totals & cumulative)
                 def _render_crrem_totals_and_cumulative(
                         years_list,
@@ -2037,7 +2307,8 @@ with tab6:
                             marker=dict(color=project_color),
                         ))
                         fig_tot.update_layout(height=420, yaxis_title="tCO₂e/a", legend_title="",
-                                              legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                              legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
+                                                          x=0.5),
                                               margin=dict(l=40, r=20, t=50, b=85))
                         fig_tot.update_yaxes(rangemode="tozero")
                         st.plotly_chart(fig_tot, use_container_width=True, key=f"crrem_tot_emis_{project_label}")
@@ -2069,7 +2340,8 @@ with tab6:
                             marker=dict(color=project_color),
                         ))
                         fig_cum.update_layout(height=420, yaxis_title="tCO₂e", legend_title="",
-                                              legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                              legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
+                                                          x=0.5),
                                               margin=dict(l=40, r=20, t=50, b=85))
                         fig_cum.update_yaxes(rangemode="tozero")
                         st.plotly_chart(fig_cum, use_container_width=True, key=f"crrem_cum_emis_{project_label}")
@@ -2102,7 +2374,8 @@ with tab6:
                             marker=dict(color=project_color),
                         ))
                         fig_e_tot.update_layout(height=420, yaxis_title="MWh/a", legend_title="",
-                                                legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                                legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
+                                                            x=0.5),
                                                 margin=dict(l=40, r=20, t=50, b=85))
                         fig_e_tot.update_yaxes(rangemode="tozero")
                         st.plotly_chart(fig_e_tot, use_container_width=True, key=f"crrem_tot_energy_{project_label}")
@@ -2134,7 +2407,8 @@ with tab6:
                             marker=dict(color=project_color),
                         ))
                         fig_e_cum.update_layout(height=420, yaxis_title="MWh", legend_title="",
-                                                legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                                legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center",
+                                                            x=0.5),
                                                 margin=dict(l=40, r=20, t=50, b=85))
                         fig_e_cum.update_yaxes(rangemode="tozero")
                         st.plotly_chart(fig_e_cum, use_container_width=True, key=f"crrem_cum_energy_{project_label}")
@@ -2181,7 +2455,8 @@ with tab6:
                             margin=dict(l=40, r=20, t=50, b=85),
                         )
                         fig_exc_c.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_exc_c, use_container_width=True, key=f"crrem_cum_exceed_carbon_{project_label}")
+                        st.plotly_chart(fig_exc_c, use_container_width=True,
+                                        key=f"crrem_cum_exceed_carbon_{project_label}")
 
                     with ex2:
                         st.write("#### Cumulative exceedance — Energy (project − CRREM limit)")
@@ -2214,7 +2489,8 @@ with tab6:
                             margin=dict(l=40, r=20, t=50, b=85),
                         )
                         fig_exc_e.update_yaxes(rangemode="tozero")
-                        st.plotly_chart(fig_exc_e, use_container_width=True, key=f"crrem_cum_exceed_energy_{project_label}")
+                        st.plotly_chart(fig_exc_e, use_container_width=True,
+                                        key=f"crrem_cum_exceed_energy_{project_label}")
 
                     # Optional: headroom (limit - project)
                     show_headroom = st.checkbox(
@@ -2227,21 +2503,27 @@ with tab6:
                         h1, h2 = st.columns(2)
                         with h1:
                             headroom_c = (carbon_limit_s - carbon_project_s).astype(float)
-                            bar_colors = [CRREM_COLOR_MEASURES if v >= 0 else CRREM_COLOR_LIMIT for v in headroom_c.values]
-                            fig_hc = go.Figure(go.Bar(x=years_list, y=headroom_c.values, marker_color=bar_colors, name="Headroom"))
+                            bar_colors = [CRREM_COLOR_MEASURES if v >= 0 else CRREM_COLOR_LIMIT for v in
+                                          headroom_c.values]
+                            fig_hc = go.Figure(
+                                go.Bar(x=years_list, y=headroom_c.values, marker_color=bar_colors, name="Headroom"))
                             fig_hc.update_layout(height=420, yaxis_title="kgCO₂e/m²·a", title="Carbon headroom",
                                                  margin=dict(l=40, r=20, t=45, b=45))
-                            st.plotly_chart(fig_hc, use_container_width=True, key=f"crrem_headroom_carbon_{project_label}")
+                            st.plotly_chart(fig_hc, use_container_width=True,
+                                            key=f"crrem_headroom_carbon_{project_label}")
                         with h2:
                             headroom_e = (eui_limit_s - eui_project_s).astype(float)
-                            bar_colors = [CRREM_COLOR_MEASURES if v >= 0 else CRREM_COLOR_LIMIT for v in headroom_e.values]
-                            fig_he = go.Figure(go.Bar(x=years_list, y=headroom_e.values, marker_color=bar_colors, name="Headroom"))
+                            bar_colors = [CRREM_COLOR_MEASURES if v >= 0 else CRREM_COLOR_LIMIT for v in
+                                          headroom_e.values]
+                            fig_he = go.Figure(
+                                go.Bar(x=years_list, y=headroom_e.values, marker_color=bar_colors, name="Headroom"))
                             fig_he.update_layout(height=420, yaxis_title="kWh/m²·a", title="EUI headroom",
                                                  margin=dict(l=40, r=20, t=45, b=45))
-                            st.plotly_chart(fig_he, use_container_width=True, key=f"crrem_headroom_energy_{project_label}")
+                            st.plotly_chart(fig_he, use_container_width=True,
+                                            key=f"crrem_headroom_energy_{project_label}")
+
 
                 st.write("## Prognose without measures")
-                st.metric(label="Selected Scenario",value=f"{st.session_state.get('active_scenario')}")
                 # --- Display
                 kpi1, kpi2, kpi3 = st.columns(3)
                 with kpi1:
@@ -2302,7 +2584,8 @@ with tab6:
                     st.plotly_chart(fig2, use_container_width=True)
 
                 with st.expander("Additional CRREM diagrams — Baseline", expanded=False):
-                    st.caption("Totals and cumulative charts use your Project Area (m²) and the same CRREM pathway years as the intensity plots.")
+                    st.caption(
+                        "Totals and cumulative charts use your Project Area (m²) and the same CRREM pathway years as the intensity plots.")
                     _render_crrem_totals_and_cumulative(
                         years_avail,
                         carbon_asset,
@@ -2344,7 +2627,8 @@ with tab6:
 
 
                     # Emission Factors (numeric)
-                    _add_param("Emission Factors → Electricity", {"kind": "ef", "source": "Electricity", "dtype": "float"})
+                    _add_param("Emission Factors → Electricity",
+                               {"kind": "ef", "source": "Electricity", "dtype": "float"})
                     _add_param("Emission Factors → Green Electricity",
                                {"kind": "ef", "source": "Green Electricity", "dtype": "float"})
                     _add_param("Emission Factors → Gas", {"kind": "ef", "source": "Gas", "dtype": "float"})
@@ -2385,7 +2669,8 @@ with tab6:
 
                         if "crrem_measures_df" not in st.session_state or not isinstance(
                                 st.session_state.get("crrem_measures_df"), pd.DataFrame):
-                            st.session_state["crrem_measures_df"] = pd.DataFrame(columns=["Parameter", "Year", "New Value"])
+                            st.session_state["crrem_measures_df"] = pd.DataFrame(
+                                columns=["Parameter", "Year", "New Value"])
 
                         if st.button("Add measure", key="crrem_add_measure_btn", use_container_width=False):
                             df_tmp = st.session_state["crrem_measures_df"].copy()
@@ -2420,7 +2705,8 @@ with tab6:
                                 "New Value": st.column_config.TextColumn("New Value", required=True),
                             }
 
-                        measures_df = st.data_editor(st.session_state["crrem_measures_df"], **editor_kwargs)
+                        measures_df = st.data_editor(st.session_state["crrem_measures_df"].copy(deep=True),
+                                                     **editor_kwargs)
                         st.session_state["crrem_measures_df"] = measures_df
                         # Deleting measures (explicit controls to support Streamlit versions where row-delete UI is not exposed)
                         if not measures_df.empty:
@@ -2476,7 +2762,8 @@ with tab6:
                         except Exception:
                             pass
 
-                        st.caption("Note: tariff measures are stored but do not affect the CRREM Carbon/EUI charts yet.")
+                        st.caption(
+                            "Note: tariff measures are stored but do not affect the CRREM Carbon/EUI charts yet.")
 
                     # --- Compute trajectories WITH measures (step changes)
                     measures_df = st.session_state.get("crrem_measures_df")
@@ -2602,7 +2889,8 @@ with tab6:
                             y0 = int(project_year_val)
                             v0 = float(base_factors.get(str(src), 0.0))
                             for ym, vm in ef_measures.get(str(src), []):
-                                if ((int(ym) <= int(year)) if inclusive else (int(ym) < int(year))) and int(ym) >= int(y0):
+                                if ((int(ym) <= int(year)) if inclusive else (int(ym) < int(year))) and int(ym) >= int(
+                                        y0):
                                     y0 = int(ym)
                                     v0 = float(vm)
 
@@ -2705,12 +2993,14 @@ with tab6:
                             eui_int = float(consumption_kwh_y) / project_area_val
                             return carbon_int, eui_int
 
+
                         with st.expander("Measures timeline", expanded=True):
                             if measures_records:
                                 df_meas_tl = pd.DataFrame(measures_records)
                                 df_meas_tl = df_meas_tl.dropna(subset=["Year"])
                                 if not df_meas_tl.empty:
-                                    df_meas_tl["Category"] = df_meas_tl["Parameter"].astype(str).str.split("→").str[0].str.strip()
+                                    df_meas_tl["Category"] = df_meas_tl["Parameter"].astype(str).str.split("→").str[
+                                        0].str.strip()
                                     df_meas_tl["Parameter"] = df_meas_tl["Parameter"].astype(str).str.strip()
                                     df_meas_tl = df_meas_tl.sort_values(by="Year", ascending=False)
 
@@ -2722,7 +3012,8 @@ with tab6:
                                         hover_data={"New Value": True, "Year": True, "Category": True,
                                                     "Parameter": True},
                                     )
-                                    fig_tl.update_layout(height=420, xaxis_title="Year", yaxis_title="", legend_title="",
+                                    fig_tl.update_layout(height=420, xaxis_title="Year", yaxis_title="",
+                                                         legend_title="",
                                                          margin=dict(l=20, r=20, t=50, b=30))
                                     fig_tl.update_traces(marker=dict(size=14, symbol="square"))
                                     st.plotly_chart(fig_tl, use_container_width=True)
@@ -2747,7 +3038,6 @@ with tab6:
                         carbon_meas_s = pd.Series(carbon_meas).reindex(years_avail)
                         eui_meas_s = pd.Series(eui_meas).reindex(years_avail)
 
-
                         # Plot series for with-measures: one value per year (no duplicate x-values).
                         # Plotly will draw straight line segments between consecutive years.
                         carbon_meas_x = years_avail
@@ -2758,7 +3048,6 @@ with tab6:
                         stranding_eui_meas = find_stranding_year(eui_meas_s, eui_limit)
 
                         st.write("## Prognose with measures")
-                        st.metric(label="Selected Scenario", value=f"{st.session_state.get('active_scenario')}")
                         mk1, mk2, mk3 = st.columns(3)
                         with mk1:
                             st.metric("Measures defined", str(len(measures_records)))
@@ -2805,7 +3094,8 @@ with tab6:
                                                            x=0.5), margin=dict(l=40, r=20, t=50, b=85))
                             figm.update_yaxes(rangemode="tozero")
                             if stranding_carbon_meas is not None:
-                                figm.add_vline(x=stranding_carbon_meas, line_width=3, line_dash="dash", line_color="black")
+                                figm.add_vline(x=stranding_carbon_meas, line_width=3, line_dash="dash",
+                                               line_color="black")
                             st.plotly_chart(figm, use_container_width=True, key="crrem_carbon_measures_chart")
 
                         with ecol2:
@@ -2842,7 +3132,8 @@ with tab6:
                             st.plotly_chart(fige, use_container_width=True, key="crrem_eui_measures_chart")
 
                         with st.expander("Additional CRREM diagrams — With measures", expanded=False):
-                            st.caption("Totals and cumulative charts are computed from the with-measures trajectories shown above.")
+                            st.caption(
+                                "Totals and cumulative charts are computed from the with-measures trajectories shown above.")
                             _render_crrem_totals_and_cumulative(
                                 years_avail,
                                 carbon_meas_s,
@@ -2854,8 +3145,6 @@ with tab6:
                                 project_color=CRREM_COLOR_MEASURES,
                                 overlay_baseline=(carbon_asset, eui_asset_series) if show_overlay else None,
                             )
-
-
 
                     st.caption(
                         "Notes: Green Electricity and PV offset are treated with EF=0. PV offsets Electricity consumption (no export credit).")
@@ -2896,6 +3185,11 @@ with tab7:
             energy_rows = []  # per-source, per-scenario (factored) end energy intensity
             cost_rows = []  # per-source, per-scenario (factored) cost intensity
             emissions_rows = []  # per-source, per-scenario (factored) emissions intensity
+
+            # per-end-use, per-scenario (factored) intensities (used for secondary charts)
+            energy_use_rows = []
+            cost_use_rows = []
+            emissions_use_rows = []
 
             for name, payload in scenarios.items():
                 payload = payload or {}
@@ -2985,6 +3279,31 @@ with tab7:
                             "Emissions (kgCO₂e/m²·a)": float(r["co2_kg"]) / _area,
                         })
 
+
+                    # Per-end-use breakdown (net, including PV) for secondary charts (intensities)
+                    grp_eu = df_src.groupby("End_Use", as_index=False).agg(
+                        kWh=("kWh_signed", "sum"),
+                        cost=("cost", "sum"),
+                        co2_kg=("co2_kg", "sum"),
+                    )
+                    for _, r in grp_eu.iterrows():
+                        eu = r["End_Use"]
+                        energy_use_rows.append({
+                            "Scenario": str(name),
+                            "End_Use": eu,
+                            "End Energy (kWh/m²·a)": float(r["kWh"]) / _area,
+                        })
+                        cost_use_rows.append({
+                            "Scenario": str(name),
+                            "End_Use": eu,
+                            f"Cost ({_curr}/m²·a)": float(r["cost"]) / _area,
+                        })
+                        emissions_use_rows.append({
+                            "Scenario": str(name),
+                            "End_Use": eu,
+                            "Emissions (kgCO₂e/m²·a)": float(r["co2_kg"]) / _area,
+                        })
+
                 rows.append({
                     "Scenario": str(name),
                     "Net Energy (kWh/a)": net_kwh,
@@ -3014,7 +3333,8 @@ with tab7:
                 "Net EUI (kWh/m²·a)",
                 "Gross EUI (kWh/m²·a)",
             ]].copy()
-            st.dataframe(df_cmp_display, use_container_width=True)
+            with st.expander("Raw Data", expanded=False):
+                st.dataframe(df_cmp_display, use_container_width=True)
 
             # Net KPI charts (incl. PV_Generation) — values printed on bars
             if _area and _area > 0:
@@ -3200,10 +3520,11 @@ with tab7:
                         y="End Energy (kWh/m²·a)",
                         color="Energy_Source",
                         barmode="relative",
-                        title="End Energy /m² (factored) by Energy Source and Scenario",
+                        title="End Energy /m² by Energy Source and Scenario (Net)",
                         category_orders={"Scenario": scenario_order},
                         color_discrete_map=color_map_sources,
                         text_auto=".1f",
+                        height=600,
                     )
                     fig_end_energy.update_layout(
                         xaxis_title="Scenario",
@@ -3214,7 +3535,32 @@ with tab7:
                     fig_end_energy.update_xaxes(type="category")
                     st.plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
 
-                # 2) Energy Cost /m² (factored) by energy source
+                # 2) Energy Emissions /m² (factored) by energy source
+                df_emis_src = pd.DataFrame(emissions_rows)
+                if not df_emis_src.empty:
+                    df_emis_src["Scenario"] = df_emis_src["Scenario"].astype(str)
+                    fig_emis = px.bar(
+                        df_emis_src,
+                        x="Scenario",
+                        y="Emissions (kgCO₂e/m²·a)",
+                        color="Energy_Source",
+                        barmode="relative",
+                        title="Energy Emissions /m² by Energy Source and Scenario (Net)",
+                        category_orders={"Scenario": scenario_order},
+                        color_discrete_map=color_map_sources,
+                        text_auto=".1f",
+                        height=600,
+                    )
+                    fig_emis.update_layout(
+                        xaxis_title="Scenario",
+                        yaxis_title="kgCO₂e/m²·a",
+                        legend_title_text="Energy Source",
+                    )
+                    fig_emis.update_traces(textfont_size=14, textfont_color="white")
+                    fig_emis.update_xaxes(type="category")
+                    st.plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
+
+                # 3) Energy Cost /m² (factored) by energy source
                 cost_col = f"Cost ({_curr}/m²·a)"
                 df_cost_src = pd.DataFrame(cost_rows)
                 if not df_cost_src.empty and cost_col in df_cost_src.columns:
@@ -3225,10 +3571,11 @@ with tab7:
                         y=cost_col,
                         color="Energy_Source",
                         barmode="relative",
-                        title=f"Energy Cost /m² (factored) by Energy Source and Scenario [{_curr}]",
+                        title=f"Energy Cost /m² by Energy Source and Scenario [{_curr}] (Net)",
                         category_orders={"Scenario": scenario_order},
                         color_discrete_map=color_map_sources,
-                        text_auto=".2f",
+                        text_auto=".1f",
+                        height=600,
                     )
                     fig_cost.update_layout(
                         xaxis_title="Scenario",
@@ -3239,29 +3586,82 @@ with tab7:
                     fig_cost.update_xaxes(type="category")
                     st.plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
 
-                # 3) Energy Emissions /m² (factored) by energy source
-                df_emis_src = pd.DataFrame(emissions_rows)
-                if not df_emis_src.empty:
-                    df_emis_src["Scenario"] = df_emis_src["Scenario"].astype(str)
-                    fig_emis = px.bar(
-                        df_emis_src,
+
+                # Scenario comparison charts (factored values, stacked by End Use)
+                df_energy_eu = pd.DataFrame(energy_use_rows)
+                if not df_energy_eu.empty:
+                    df_energy_eu["Scenario"] = df_energy_eu["Scenario"].astype(str)
+                    fig_end_energy_eu = px.bar(
+                        df_energy_eu,
+                        x="Scenario",
+                        y="End Energy (kWh/m²·a)",
+                        color="End_Use",
+                        barmode="relative",
+                        title="End Energy /m² by End Use and Scenario (Gross)",
+                        category_orders={"Scenario": scenario_order, "End_Use": END_USE_ORDER},
+                        color_discrete_map=color_map,
+                        text_auto=".1f",
+                        height=600,
+                    )
+                    fig_end_energy_eu.update_layout(
+                        xaxis_title="Scenario",
+                        yaxis_title="kWh/m²·a",
+                        legend_title_text="End Use",
+                    )
+                    fig_end_energy_eu.update_traces(textfont_size=14, textfont_color="white")
+                    fig_end_energy_eu.update_xaxes(type="category")
+                    st.plotly_chart(fig_end_energy_eu, use_container_width=True, key="scenario_end_energy_m2_by_enduse")
+
+
+
+                df_emis_eu = pd.DataFrame(emissions_use_rows)
+                if not df_emis_eu.empty:
+                    df_emis_eu["Scenario"] = df_emis_eu["Scenario"].astype(str)
+                    fig_emis_eu = px.bar(
+                        df_emis_eu,
                         x="Scenario",
                         y="Emissions (kgCO₂e/m²·a)",
-                        color="Energy_Source",
+                        color="End_Use",
                         barmode="relative",
-                        title="Energy Emissions /m² (factored) by Energy Source and Scenario",
-                        category_orders={"Scenario": scenario_order},
-                        color_discrete_map=color_map_sources,
-                        text_auto=".2f",
+                        title="Energy Emissions /m² by End Use and Scenario (Gross)",
+                        category_orders={"Scenario": scenario_order, "End_Use": END_USE_ORDER},
+                        color_discrete_map=color_map,
+                        text_auto=".1f",
+                        height=600,
                     )
-                    fig_emis.update_layout(
+                    fig_emis_eu.update_layout(
                         xaxis_title="Scenario",
                         yaxis_title="kgCO₂e/m²·a",
-                        legend_title_text="Energy Source",
+                        legend_title_text="End Use",
                     )
-                    fig_emis.update_traces(textfont_size=14, textfont_color="white")
-                    fig_emis.update_xaxes(type="category")
-                    st.plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
+                    fig_emis_eu.update_traces(textfont_size=14, textfont_color="white")
+                    fig_emis_eu.update_xaxes(type="category")
+                    st.plotly_chart(fig_emis_eu, use_container_width=True, key="scenario_emissions_m2_by_enduse")
+
+                df_cost_eu = pd.DataFrame(cost_use_rows)
+                if not df_cost_eu.empty and cost_col in df_cost_eu.columns:
+                    df_cost_eu["Scenario"] = df_cost_eu["Scenario"].astype(str)
+                    fig_cost_eu = px.bar(
+                        df_cost_eu,
+                        x="Scenario",
+                        y=cost_col,
+                        color="End_Use",
+                        barmode="relative",
+                        title=f"Energy Cost /m² by End Use and Scenario [{_curr}] (Gross)",
+                        category_orders={"Scenario": scenario_order, "End_Use": END_USE_ORDER},
+                        color_discrete_map=color_map,
+                        text_auto=".1f",
+                        height=600,
+                    )
+                    fig_cost_eu.update_layout(
+                        xaxis_title="Scenario",
+                        yaxis_title=f"{_curr}/m²·a",
+                        legend_title_text="End Use",
+                    )
+                    fig_cost_eu.update_traces(textfont_size=14, textfont_color="white")
+                    fig_cost_eu.update_xaxes(type="category")
+                    st.plotly_chart(fig_cost_eu, use_container_width=True, key="scenario_cost_m2_by_enduse")
+
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
@@ -3345,6 +3745,7 @@ with tab1_factors:
         monthly_chart_source_eff.update_traces(textfont_size=14, textfont_color="white")
 
         st.write("## Energy Balance with Factors (per End Use)")
+        st.metric("Active Scenario", active_selected)
 
         # ---- Annual totals per End_Use and per Energy_Source (+ intensities)
         totals_eff = df_melted_eff.groupby("End_Use", as_index=False)["kWh"].sum()
@@ -3432,7 +3833,7 @@ with tab1_factors:
         )
         energy_intensity_chart_per_source_eff.update_layout(
             annotations=[dict(
-                text=f"{eui_eff:,.1f}<br>kWh/m²·a",
+                text=f"{net_eui_eff:,.1f}<br>kWh/m²·a",
                 x=0.5, y=0.5, xref="paper", yref="paper",
                 showarrow=False,
                 font=dict(size=50, color="black"),
@@ -3668,10 +4069,11 @@ with tab2:
         annual_total_co2 = totals_co2_use["kgCO2"].sum()
         co2_intensity_total = totals_co2_use["kgCO2_per_m2"].sum()
 
+        co2_intensity_gross = totals_co2_use.loc[totals_co2_use["kgCO2_per_m2"] > 0, "kgCO2_per_m2"].sum()
         # Center annotations (show total intensity in donut centers)
         co2_intensity_pie_use.update_layout(
             annotations=[dict(
-                text=f"{co2_intensity_total:,.1f}<br>kgCO₂/m²·a",
+                text=f"{co2_intensity_gross:,.1f}<br>kgCO₂/m²·a",
                 x=0.5, y=0.5, xref="paper", yref="paper",
                 showarrow=False,
                 font=dict(size=50, color="black"),
@@ -3689,6 +4091,7 @@ with tab2:
         # Layout (kept identical)
 
         st.write("## CO₂ Emissions (per End Use)")
+        st.metric("Active Scenario", active_selected)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.subheader("Monthly CO₂")
@@ -3705,7 +4108,8 @@ with tab2:
             st.subheader("CO₂ KPI's")
             st.metric("Monthly Average CO₂", f"{monthly_avg_co2:,.0f} kgCO₂")
             st.metric("Total Annual CO₂", f"{annual_total_co2:,.0f} kgCO₂")
-            st.metric("CO₂ Intensity", f"{co2_intensity_total:,.1f} kgCO₂/m²·a")
+            st.metric("CO₂ Intensity (Net)", f"{co2_intensity_total:,.1f} kgCO₂/m²·a")
+            st.metric("CO₂ Intensity (Gross)", f"{co2_intensity_gross:,.1f} kgCO₂/m²·a")
 
         st.markdown("---")
         st.write("## CO₂ Emissions (per Energy Source)")
@@ -3905,10 +4309,11 @@ with tab3:
 
         # Center totals (sum of intensities)
         cost_intensity_total = totals_cost_use["cost_per_m2"].sum()
+        cost_intensity_gross = totals_cost_use.loc[totals_cost_use["cost_per_m2"] > 0, "cost_per_m2"].sum()
         cost_intensity_pie_use.update_layout(
             showlegend=True,
             annotations=[dict(
-                text=f"{currency_symbol} {cost_intensity_total:,.2f}<br>per m²·a",
+                text=f"{currency_symbol} {cost_intensity_gross:,.2f}<br>per m²·a",
                 x=0.5, y=0.5, xref="paper", yref="paper", showarrow=False, font=dict(size=50, color="black"),
             )]
         )
@@ -3926,6 +4331,7 @@ with tab3:
 
         # ---------- Layout (mirrors other tabs) ----------
         st.write(f"## Energy Cost {currency_symbol} (per End Use)")
+        st.metric("Active Scenario", active_selected)
         c1, c2 = st.columns([3, 1])
         with c1:
             st.subheader("Monthly Cost")
@@ -3943,6 +4349,7 @@ with tab3:
             st.metric("Monthly Average Cost", f"{currency_symbol} {monthly_avg_cost:,.0f}")
             st.metric("Total Annual Cost", f"{currency_symbol} {annual_total_cost:,.0f}")
             st.metric("Cost Intensity (Total)", f"{currency_symbol} {cost_intensity_total:,.2f} /m²·a")
+            st.metric("Cost Intensity (Gross)", f"{currency_symbol} {cost_intensity_gross:,.2f} /m²·a")
 
         st.markdown("---")
         st.write(f"## Energy Cost {currency_symbol} (per Energy Source)")
@@ -3985,6 +4392,7 @@ with tab4:
         df_loads["hour"] = pd.to_numeric(df_loads["hour"], errors="coerce")
 
         st.write("## Load Analysis")
+        st.metric("Active Scenario", active_selected)
         selected_load = st.selectbox("Select Load", load_cols, index=0)
 
         load_heatmap = px.density_heatmap(
@@ -4030,7 +4438,7 @@ with tab4:
         )
 
         key = selected_load.replace("_load", "")  # in case the name still has the suffix
-        bar_color = color_map.get(key, "#c02419")  # fallback color
+        bar_color = color_map_loads.get(key, color_map.get(key, "#c02419"))  # fallback color
 
         monthly_total_load_bar.update_traces(textfont_size=14, textfont_color="white")
 
@@ -4041,7 +4449,7 @@ with tab4:
 
         with col1:
 
-            st.subheader(f"Monthly Load — {selected_load} (kWh)")
+            st.subheader(f"Monthly Load Sum — {selected_load} (kWh)")
             st.plotly_chart(monthly_total_load_bar, use_container_width=True)
 
         with col2:
@@ -4402,7 +4810,8 @@ with tab5:
             total_consumption_kwh = float(df_melted.loc[df_melted["kWh"] > 0, "kWh"].sum())
             total_generation_kwh = float(-df_melted.loc[df_melted["kWh"] < 0, "kWh"].sum())
             pv_coverage = (total_generation_kwh / total_consumption_kwh) if total_consumption_kwh > 0 else 0.0
-            a1, a2 = st.columns([3,1])
+            st.metric("Active Scenario", active_selected)
+            a1, a2 = st.columns([3, 1])
             with a1:
                 b1, b2, b3 = st.columns(3)
                 with b1:
@@ -4418,6 +4827,13 @@ with tab5:
                     st.metric("Energy Cost Intensity (Net)", f"{cost_intensity_net:.1f} €/m²·a")
                 with b1:
                     st.metric("CO₂ Intensity (Net)", f"{co2_intensity_net:.1f} kgCO₂/m²·a")
+                with b1:
+                    st.metric("CO₂ Intensity (Gross)", f"{co2_intensity_gross:.1f} kgCO₂/m²·a")
+                with b2:
+                    st.metric("Energy Cost Intensity (Gross)", f"{cost_intensity_gross:.1f} €/m²·a")
+                with b3:
+                    st.metric("EUI (Gross)", f"{eui_gross:.1f} kWh/m²·a")
+
 
             with a2:
                 try:
@@ -4425,23 +4841,24 @@ with tab5:
                     longitude_map = float(longitude)
                     df_map = pd.DataFrame({"lat": [latitude_map], "lon": [longitude_map]})
                     st.metric("Project Location", "", help="User input (sidebar)")
-                    st.map(data=df_map, latitude="lat", longitude="lon", height=300, zoom=9)
+                    st.map(data=df_map, latitude="lat", longitude="lon", height=220, zoom=9)
                 except Exception:
                     st.metric("Project Location", "–")
                     st.caption("Latitude/Longitude not available.")
 
             st.markdown("---")
 
+
             # -------------------------
             # KPI benchmark visuals (no more speedometers)
             # -------------------------
             def _benchmark_band_chart(
-                title: str,
-                unit: str,
-                value_net: float,
-                value_gross: float,
-                good_thr: float,
-                excellent_thr: float,
+                    title: str,
+                    unit: str,
+                    value_net: float,
+                    value_gross: float,
+                    good_thr: float,
+                    excellent_thr: float,
             ) -> go.Figure:
                 # Range: extend beyond good threshold for readability
                 candidates = [v for v in [value_net, value_gross, good_thr, excellent_thr] if pd.notna(v)]
@@ -4465,7 +4882,8 @@ with tab5:
                         fillcolor=get_benchmark_color("Poor"), opacity=0.12, line_width=0
                     )
                     # Threshold lines
-                    fig.add_vline(x=excellent_thr, line_width=2, line_dash="dot", line_color=get_benchmark_color("Excellent"))
+                    fig.add_vline(x=excellent_thr, line_width=2, line_dash="dot",
+                                  line_color=get_benchmark_color("Excellent"))
                     fig.add_vline(x=good_thr, line_width=2, line_dash="dot", line_color=get_benchmark_color("Poor"))
 
                 if value_net < excellent_thr:
@@ -4486,7 +4904,8 @@ with tab5:
                 fig.add_trace(go.Scatter(
                     x=[value_gross], y=[0.3],
                     mode="markers",
-                    marker=dict(size=40, symbol="square-open", color=MARKER_GROSS_COLOR, line=dict(width=2, color=MARKER_GROSS_COLOR)),
+                    marker=dict(size=40, symbol="square-open", color=MARKER_GROSS_COLOR,
+                                line=dict(width=2, color=MARKER_GROSS_COLOR)),
                     name="Gross",
                     hovertemplate=f"Gross: %{{x:.2f}} {unit}<extra></extra>",
                 ))
@@ -4494,7 +4913,8 @@ with tab5:
                 fig.add_trace(go.Scatter(
                     x=[value_net], y=[0.7],
                     mode="markers",
-                    marker=dict(size=40, symbol="square", color=MARKER_NET_COLOR, line=dict(width=2, color=MARKER_NET_COLOR)),
+                    marker=dict(size=40, symbol="square", color=MARKER_NET_COLOR,
+                                line=dict(width=2, color=MARKER_NET_COLOR)),
                     name="Net",
                     hovertemplate=f"Net: %{{x:.2f}} {unit}<extra></extra>",
                 ))
@@ -4508,6 +4928,7 @@ with tab5:
                     legend=dict(orientation="h", yanchor="top", y=-0.35, xanchor="center", x=0.5),
                 )
                 return fig
+
 
             st.write("## Core benchmark KPIs")
 
@@ -4584,7 +5005,7 @@ with tab5:
             # -------------------------
             # Drivers / breakdowns (aligned with other tabs' chart style)
             # -------------------------
-            with st.expander(label="Validation Diagrams (under development)",expanded=False):
+            with st.expander(label="Validation Diagrams (under development)", expanded=False):
                 st.subheader("Drivers and breakdowns")
 
                 # Energy waterfall: Gross -> On-site generation -> Net
@@ -4742,7 +5163,8 @@ with tab5:
 
                     # Optional: show raw numbers for transparency
                     st.dataframe(
-                        src_cost.rename(columns={"Energy_Source_BM": "Energy Source", "cost_per_m2": f"Cost intensity ({_curr}/m²·a)"}),
+                        src_cost.rename(columns={"Energy_Source_BM": "Energy Source",
+                                                 "cost_per_m2": f"Cost intensity ({_curr}/m²·a)"}),
                         use_container_width=True,
                         hide_index=True,
                     )
