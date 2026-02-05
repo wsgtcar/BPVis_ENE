@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.3.0",
+    page_title="WSGT_BPVis_ENE 1.3.1",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.3.0")
+st.sidebar.write("Version 1.3.1")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -3046,14 +3046,29 @@ with tab6:
                             "Each row is one measure. From the selected year onwards, the parameter takes the new value. "
                             "Multiple measures for the same parameter in different years are allowed."
                         )
+                        st.caption(
+                            "Edits in this table are **applied only when you click `Update Measures`** (same logic as in `Raw Data`). "
+                            "This avoids recalculating the CRREM measures charts on every cell edit."
+                        )
 
+                        # Flash message (shown after rerun)
+                        if st.session_state.get("_crrem_measures_flash") == "updated":
+                            st.success("Measures updated and applied to CRREM calculations.")
+                            del st.session_state["_crrem_measures_flash"]
+
+                        # Ensure committed + draft measures exist
                         if "crrem_measures_df" not in st.session_state or not isinstance(
                                 st.session_state.get("crrem_measures_df"), pd.DataFrame):
                             st.session_state["crrem_measures_df"] = pd.DataFrame(
                                 columns=["Parameter", "Year", "New Value"])
 
+                        if "crrem_measures_draft_df" not in st.session_state or not isinstance(
+                                st.session_state.get("crrem_measures_draft_df"), pd.DataFrame):
+                            st.session_state["crrem_measures_draft_df"] = st.session_state["crrem_measures_df"].copy(deep=True)
+
+                        # Add measure row to DRAFT (does not affect calculations until Update Measures)
                         if st.button("Add measure", key="crrem_add_measure_btn", use_container_width=False):
-                            df_tmp = st.session_state["crrem_measures_df"].copy()
+                            df_tmp = st.session_state["crrem_measures_draft_df"].copy()
                             default_param = param_options[0] if param_options else ""
                             df_tmp = pd.concat(
                                 [
@@ -3063,7 +3078,7 @@ with tab6:
                                 ],
                                 ignore_index=True,
                             )
-                            st.session_state["crrem_measures_df"] = df_tmp
+                            st.session_state["crrem_measures_draft_df"] = df_tmp
 
                         editor_kwargs = {
                             "num_rows": "dynamic",
@@ -3085,20 +3100,30 @@ with tab6:
                                 "New Value": st.column_config.TextColumn("New Value", required=True),
                             }
 
-                        measures_df = st.data_editor(st.session_state["crrem_measures_df"].copy(deep=True),
-                                                     **editor_kwargs)
-                        st.session_state["crrem_measures_df"] = measures_df
-                        # Deleting measures (explicit controls to support Streamlit versions where row-delete UI is not exposed)
-                        if not measures_df.empty:
+                        with st.form("crrem_measures_form", clear_on_submit=False):
+                            edited_measures = st.data_editor(
+                                st.session_state["crrem_measures_draft_df"].copy(deep=True),
+                                **editor_kwargs
+                            )
+
+                            # Persist edits into DRAFT on every rerun (do not apply to calculations yet).
+                            st.session_state["crrem_measures_draft_df"] = edited_measures
+
+                            apply_measures = st.form_submit_button("Update Measures", use_container_width=False)
+
+                        # Deleting measures works on DRAFT (apply afterwards to affect calculations)
+                        draft_df = st.session_state.get("crrem_measures_draft_df", pd.DataFrame()).copy()
+
+                        if not draft_df.empty:
 
                             def _fmt_measure_idx(i):
                                 try:
-                                    p = str(measures_df.loc[i, "Parameter"]) if pd.notna(
-                                        measures_df.loc[i, "Parameter"]) else ""
+                                    p = str(draft_df.loc[i, "Parameter"]) if pd.notna(
+                                        draft_df.loc[i, "Parameter"]) else ""
                                 except Exception:
                                     p = ""
                                 try:
-                                    yv = measures_df.loc[i, "Year"]
+                                    yv = draft_df.loc[i, "Year"]
                                     y = str(int(float(yv))) if pd.notna(yv) and str(yv).strip() != "" else ""
                                 except Exception:
                                     y = ""
@@ -3108,20 +3133,20 @@ with tab6:
                             def _crrem_delete_selected_measures():
                                 sel = st.session_state.get("crrem_measures_delete_idx", [])
                                 if sel:
-                                    df = st.session_state.get("crrem_measures_df", pd.DataFrame()).copy()
+                                    df = st.session_state.get("crrem_measures_draft_df", pd.DataFrame()).copy()
                                     try:
                                         df = df.drop(sel).reset_index(drop=True)
                                     except Exception:
                                         df = df.iloc[[j for j in range(len(df)) if j not in set(sel)]].reset_index(
                                             drop=True)
-                                    st.session_state["crrem_measures_df"] = df
+                                    st.session_state["crrem_measures_draft_df"] = df
                                 # Clear selection (safe to mutate in callback)
                                 st.session_state["crrem_measures_delete_idx"] = []
 
 
                             st.multiselect(
                                 "Select measure rows to delete",
-                                options=list(measures_df.index),
+                                options=list(draft_df.index),
                                 format_func=_fmt_measure_idx,
                                 key="crrem_measures_delete_idx",
                             )
@@ -3132,15 +3157,23 @@ with tab6:
                                 use_container_width=False,
                             )
 
-                        # Persist measures into the active scenario payload (saved in Scenarios sheet)
-                        try:
-                            _sc = st.session_state.get("scenarios", {})
-                            _act = st.session_state.get("active_scenario")
-                            if _act in _sc:
-                                _sc[_act]["crrem_measures"] = _measures_df_to_records(measures_df)
-                                st.session_state["scenarios"] = _sc
-                        except Exception:
-                            pass
+                        if apply_measures:
+                            committed = edited_measures.copy(deep=True)
+                            st.session_state["crrem_measures_df"] = committed
+                            st.session_state["crrem_measures_draft_df"] = committed.copy(deep=True)
+
+                            # Persist measures into the active scenario payload (saved in Scenarios sheet)
+                            try:
+                                _sc = st.session_state.get("scenarios", {})
+                                _act = st.session_state.get("active_scenario")
+                                if _act in _sc:
+                                    _sc[_act]["crrem_measures"] = _measures_df_to_records(committed)
+                                    st.session_state["scenarios"] = _sc
+                            except Exception:
+                                pass
+
+                            st.session_state["_crrem_measures_flash"] = "updated"
+                            st.rerun()
 
                         st.caption(
                             "Note: tariff measures are stored but do not affect the CRREM Carbon/EUI charts yet.")
@@ -4733,7 +4766,7 @@ with tab3:
             st.subheader("Cost KPI's")
             st.metric("Monthly Average Cost", f"{currency_symbol} {monthly_avg_cost:,.0f}")
             st.metric("Total Annual Cost", f"{currency_symbol} {annual_total_cost:,.0f}")
-            st.metric("Cost Intensity (Total)", f"{currency_symbol} {cost_intensity_total:,.2f} /m²·a")
+            st.metric("Cost Intensity (Net)", f"{currency_symbol} {cost_intensity_total:,.2f} /m²·a")
             st.metric("Cost Intensity (Gross)", f"{currency_symbol} {cost_intensity_gross:,.2f} /m²·a")
 
         st.markdown("---")
@@ -5943,4 +5976,3 @@ with tab8:
 
     else:
         st.write("### ← Please upload data on side bar")
-
