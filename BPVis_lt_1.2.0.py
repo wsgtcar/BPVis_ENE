@@ -996,6 +996,8 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
 
     # CRREM measures (scenario-specific)
     st.session_state["crrem_measures_df"] = _measures_records_to_df(payload.get("crrem_measures", []))
+    # Keep the measures editor in sync after loading a project/scenario (so the table shows saved measures)
+    st.session_state["crrem_measures_draft_df"] = st.session_state["crrem_measures_df"].copy(deep=True)
 
     # CRREM use settings (scenario-specific; defaults to Office if absent)
     try:
