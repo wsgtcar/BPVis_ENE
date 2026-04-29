@@ -1917,21 +1917,21 @@ with tab1:
 
             def_t = preloaded["tariffs"] if preloaded else {}
             cost_electricity = numeric_input(f"Cost Electricity ({currency_symbol}/kWh)",
-                                             float(def_t.get("Electricity", 0.35)), key="cost_electricity",
+                                             float(def_t.get("Electricity", 0.3500)), key="cost_electricity",
                                              min_value=0.0, max_value=100.0, fmt="{:.4f}")
             cost_green_electricity = numeric_input(f"Cost Green Electricity ({currency_symbol}/kWh)",
-                                                   float(def_t.get("Green Electricity", 0.40)),
+                                                   float(def_t.get("Green Electricity", 0.4000)),
                                                    key="cost_green_electricity", min_value=0.0, max_value=100.0,
                                                    fmt="{:.4f}")
             cost_dh = numeric_input(f"Cost District Heating ({currency_symbol}/kWh)",
-                                    float(def_t.get("District Heating", 0.16)), key="cost_dh", min_value=0.0,
+                                    float(def_t.get("District Heating", 0.1600)), key="cost_dh", min_value=0.0,
                                     max_value=100.0, fmt="{:.4f}")
             cost_dc = numeric_input(f"Cost District Cooling ({currency_symbol}/kWh)",
-                                    float(def_t.get("District Cooling", 0.16)), key="cost_dc", min_value=0.0,
+                                    float(def_t.get("District Cooling", 0.1600)), key="cost_dc", min_value=0.0,
                                     max_value=100.0, fmt="{:.4f}")
-            cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.12)), key="cost_gas",
+            cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.1200)), key="cost_gas",
                                      min_value=0.0, max_value=100.0, fmt="{:.4f}")
-            cost_biomass = numeric_input(f"Cost Biomass ({currency_symbol}/kWh)", float(def_t.get("Biomass", 0.10)),
+            cost_biomass = numeric_input(f"Cost Biomass ({currency_symbol}/kWh)", float(def_t.get("Biomass", 0.1000)),
                                          key="cost_biomass",
                                          min_value=0.0, max_value=100.0, fmt="{:.4f}")
 
