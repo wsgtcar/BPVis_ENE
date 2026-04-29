@@ -973,25 +973,25 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
     e = payload.get("efficiency", {})
     pv = payload.get("pv", {})
 
-    _set_num("co2_Emissions_Electricity", float(f.get("Electricity", 0.300)), "{:.3f}")
-    _set_num("co2_Emissions_Green_Electricity", float(f.get("Green Electricity", 0.000)), "{:.3f}")
-    _set_num("co2_emissions_dh", float(f.get("District Heating", 0.260)), "{:.3f}")
-    _set_num("co2_emissions_dc", float(f.get("District Cooling", 0.280)), "{:.3f}")
-    _set_num("co2_emissions_gas", float(f.get("Gas", 0.180)), "{:.3f}")
-    _set_num("co2_emissions_biomass", float(f.get("Biomass", 0.000)), "{:.3f}")
+    _set_num("co2_Emissions_Electricity", float(f.get("Electricity", 0.300)), "{:.4f}")
+    _set_num("co2_Emissions_Green_Electricity", float(f.get("Green Electricity", 0.000)), "{:.4f}")
+    _set_num("co2_emissions_dh", float(f.get("District Heating", 0.260)), "{:.4f}")
+    _set_num("co2_emissions_dc", float(f.get("District Cooling", 0.280)), "{:.4f}")
+    _set_num("co2_emissions_gas", float(f.get("Gas", 0.180)), "{:.4f}")
+    _set_num("co2_emissions_biomass", float(f.get("Biomass", 0.000)), "{:.4f}")
 
-    _set_num("cost_electricity", float(t.get("Electricity", 0.35)), "{:.2f}")
-    _set_num("cost_green_electricity", float(t.get("Green Electricity", 0.40)), "{:.2f}")
-    _set_num("cost_dh", float(t.get("District Heating", 0.16)), "{:.2f}")
-    _set_num("cost_dc", float(t.get("District Cooling", 0.16)), "{:.2f}")
-    _set_num("cost_gas", float(t.get("Gas", 0.12)), "{:.2f}")
-    _set_num("cost_biomass", float(t.get("Biomass", 0.10)), "{:.2f}")
+    _set_num("cost_electricity", float(t.get("Electricity", 0.35)), "{:.4f}")
+    _set_num("cost_green_electricity", float(t.get("Green Electricity", 0.40)), "{:.4f}")
+    _set_num("cost_dh", float(t.get("District Heating", 0.16)), "{:.4f}")
+    _set_num("cost_dc", float(t.get("District Cooling", 0.16)), "{:.4f}")
+    _set_num("cost_gas", float(t.get("Gas", 0.12)), "{:.4f}")
+    _set_num("cost_biomass", float(t.get("Biomass", 0.10)), "{:.4f}")
 
     for use in end_uses:
         st.session_state[f"source_{use}"] = str(m.get(use, "Electricity"))
-        _set_num(f"eff_{use}", float(e.get(use, 1.0)), "{:.3f}")
+        _set_num(f"eff_{use}", float(e.get(use, 1.0)), "{:.4f}")
 
-    _set_num("pv_scale", float(pv.get("scale", 1.0)), "{:.3f}")
+    _set_num("pv_scale", float(pv.get("scale", 1.0)), "{:.4f}")
     st.session_state["pv_sc_enabled"] = bool(pv.get("enabled", False))
 
     # CRREM measures (scenario-specific)
@@ -1944,7 +1944,7 @@ with tab1:
                     f"Efficiency Factor {use}",
                     float(def_eff.get(use, 1.0)),
                     key=f"eff_{use}",
-                    min_value=0.001,
+                    min_value=0.0001,
                     max_value=1000.0,
                     fmt="{:.4f}",
                 )
