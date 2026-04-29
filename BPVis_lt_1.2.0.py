@@ -973,25 +973,25 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
     e = payload.get("efficiency", {})
     pv = payload.get("pv", {})
 
-    _set_num("co2_Emissions_Electricity", float(f.get("Electricity", 0.300)), "{:.4f}")
-    _set_num("co2_Emissions_Green_Electricity", float(f.get("Green Electricity", 0.000)), "{:.4f}")
-    _set_num("co2_emissions_dh", float(f.get("District Heating", 0.260)), "{:.4f}")
-    _set_num("co2_emissions_dc", float(f.get("District Cooling", 0.280)), "{:.4f}")
-    _set_num("co2_emissions_gas", float(f.get("Gas", 0.180)), "{:.4f}")
-    _set_num("co2_emissions_biomass", float(f.get("Biomass", 0.000)), "{:.4f}")
+    _set_num("co2_Emissions_Electricity", float(f.get("Electricity", 0.300)), "{:.5f}")
+    _set_num("co2_Emissions_Green_Electricity", float(f.get("Green Electricity", 0.000)), "{:.5f}")
+    _set_num("co2_emissions_dh", float(f.get("District Heating", 0.260)), "{:.5f}")
+    _set_num("co2_emissions_dc", float(f.get("District Cooling", 0.280)), "{:.5f}")
+    _set_num("co2_emissions_gas", float(f.get("Gas", 0.180)), "{:.5f}")
+    _set_num("co2_emissions_biomass", float(f.get("Biomass", 0.000)), "{:.5f}")
 
-    _set_num("cost_electricity", float(t.get("Electricity", 0.35)), "{:.4f}")
-    _set_num("cost_green_electricity", float(t.get("Green Electricity", 0.40)), "{:.4f}")
-    _set_num("cost_dh", float(t.get("District Heating", 0.16)), "{:.4f}")
-    _set_num("cost_dc", float(t.get("District Cooling", 0.16)), "{:.4f}")
-    _set_num("cost_gas", float(t.get("Gas", 0.12)), "{:.4f}")
-    _set_num("cost_biomass", float(t.get("Biomass", 0.10)), "{:.4f}")
+    _set_num("cost_electricity", float(t.get("Electricity", 0.35)), "{:.5f}")
+    _set_num("cost_green_electricity", float(t.get("Green Electricity", 0.40)), "{:.5f}")
+    _set_num("cost_dh", float(t.get("District Heating", 0.16)), "{:.5f}")
+    _set_num("cost_dc", float(t.get("District Cooling", 0.16)), "{:.5f}")
+    _set_num("cost_gas", float(t.get("Gas", 0.12)), "{:.5f}")
+    _set_num("cost_biomass", float(t.get("Biomass", 0.10)), "{:.5f}")
 
     for use in end_uses:
         st.session_state[f"source_{use}"] = str(m.get(use, "Electricity"))
-        _set_num(f"eff_{use}", float(e.get(use, 1.0)), "{:.4f}")
+        _set_num(f"eff_{use}", float(e.get(use, 1.0)), "{:.5f}")
 
-    _set_num("pv_scale", float(pv.get("scale", 1.0)), "{:.4f}")
+    _set_num("pv_scale", float(pv.get("scale", 1.0)), "{:.5f}")
     st.session_state["pv_sc_enabled"] = bool(pv.get("enabled", False))
 
     # CRREM measures (scenario-specific)
@@ -1892,20 +1892,20 @@ with tab1:
             def_f = preloaded["factors"] if preloaded else {}
             co2_Emissions_Electricity = numeric_input("CO2 Factor Electricity", float(def_f.get("Electricity", 0.300)),
                                                       key="co2_Emissions_Electricity", min_value=0.0, max_value=1.0,
-                                                      fmt="{:.4f}")
+                                                      fmt="{:.5f}")
             co2_Emissions_Green_Electricity = numeric_input("CO2 Factor Green Electricity",
                                                             float(def_f.get("Green Electricity", 0.000)),
                                                             key="co2_Emissions_Green_Electricity", min_value=0.0,
-                                                            max_value=1.0, fmt="{:.4f}")
+                                                            max_value=1.0, fmt="{:.5f}")
             co2_emissions_dh = numeric_input("CO2 Factor District Heating", float(def_f.get("District Heating", 0.260)),
-                                             key="co2_emissions_dh", min_value=0.0, max_value=1.0, fmt="{:.4f}")
+                                             key="co2_emissions_dh", min_value=0.0, max_value=1.0, fmt="{:.5f}")
             co2_emissions_dc = numeric_input("CO2 Factor District Cooling", float(def_f.get("District Cooling", 0.280)),
-                                             key="co2_emissions_dc", min_value=0.0, max_value=1.0, fmt="{:.4f}")
+                                             key="co2_emissions_dc", min_value=0.0, max_value=1.0, fmt="{:.5f}")
             co2_emissions_gas = numeric_input("CO2 Factor Gas", float(def_f.get("Gas", 0.180)), key="co2_emissions_gas",
-                                              min_value=0.0, max_value=1.0, fmt="{:.4f}")
+                                              min_value=0.0, max_value=1.0, fmt="{:.5f}")
             co2_emissions_biomass = numeric_input("CO2 Factor Biomass", float(def_f.get("Biomass", 0.000)),
                                                   key="co2_emissions_biomass",
-                                                  min_value=0.0, max_value=5.0, fmt="{:.4f}")
+                                                  min_value=0.0, max_value=5.0, fmt="{:.5f}")
 
         # --- Energy Cost (€/kWh) ---
         with st.sidebar.expander("Energy Tariffs"):
@@ -1918,22 +1918,22 @@ with tab1:
             def_t = preloaded["tariffs"] if preloaded else {}
             cost_electricity = numeric_input(f"Cost Electricity ({currency_symbol}/kWh)",
                                              float(def_t.get("Electricity", 0.3500)), key="cost_electricity",
-                                             min_value=0.0, max_value=100.0, fmt="{:.4f}")
+                                             min_value=0.0, max_value=100.0, fmt="{:.5f}")
             cost_green_electricity = numeric_input(f"Cost Green Electricity ({currency_symbol}/kWh)",
                                                    float(def_t.get("Green Electricity", 0.4000)),
                                                    key="cost_green_electricity", min_value=0.0, max_value=100.0,
-                                                   fmt="{:.4f}")
+                                                   fmt="{:.5f}")
             cost_dh = numeric_input(f"Cost District Heating ({currency_symbol}/kWh)",
                                     float(def_t.get("District Heating", 0.1600)), key="cost_dh", min_value=0.0,
-                                    max_value=100.0, fmt="{:.4f}")
+                                    max_value=100.0, fmt="{:.5f}")
             cost_dc = numeric_input(f"Cost District Cooling ({currency_symbol}/kWh)",
                                     float(def_t.get("District Cooling", 0.1600)), key="cost_dc", min_value=0.0,
-                                    max_value=100.0, fmt="{:.4f}")
+                                    max_value=100.0, fmt="{:.5f}")
             cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.1200)), key="cost_gas",
-                                     min_value=0.0, max_value=100.0, fmt="{:.4f}")
+                                     min_value=0.0, max_value=100.0, fmt="{:.5f}")
             cost_biomass = numeric_input(f"Cost Biomass ({currency_symbol}/kWh)", float(def_t.get("Biomass", 0.1000)),
                                          key="cost_biomass",
-                                         min_value=0.0, max_value=100.0, fmt="{:.4f}")
+                                         min_value=0.0, max_value=100.0, fmt="{:.5f}")
 
         # ---- Sidebar: efficiency factors per End_Use (used in 'Energy Balance with Factors' tab)
         with st.sidebar.expander("Efficiency Factors"):
@@ -1946,7 +1946,7 @@ with tab1:
                     key=f"eff_{use}",
                     min_value=0.0001,
                     max_value=1000.0,
-                    fmt="{:.4f}",
+                    fmt="{:.5f}",
                 )
 
         # ---- Sidebar: map End_Use -> Energy_Source (user-controlled)
