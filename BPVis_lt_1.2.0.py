@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.1",
+    page_title="WSGT_BPVis_ENE 1.4.2",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.1")
+st.sidebar.write("Version 1.4.2")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -933,6 +933,10 @@ LCC_COST_TYPE_COLORS = {
     "Replacement": "#833fd1",
 }
 
+# Global LCC assumptions are stored once in session state and then duplicated into
+# each scenario payload only for workbook persistence/backwards compatibility.
+LCC_GLOBAL_STATE_KEY = "lcc_global_payload"
+
 
 def _safe_state_key(text: str) -> str:
     """Return a stable Streamlit-safe key fragment."""
@@ -1181,6 +1185,54 @@ def _capture_lcc_global_from_widgets(end_uses: list) -> dict:
     }
 
 
+def _get_lcc_global_state_payload(end_uses: list) -> dict:
+    """Return the single global LCC payload used for every scenario calculation.
+
+    If the global widgets have already been initialized, this reads the current widget
+    values and refreshes the global session payload. If not, it falls back to a saved
+    global payload or safe defaults.
+    """
+    if st.session_state.get("_lcc_global_initialized"):
+        payload = _capture_lcc_global_from_widgets(end_uses)
+        st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(payload)
+        return payload
+
+    saved = st.session_state.get(LCC_GLOBAL_STATE_KEY)
+
+    # Before the LCC tab initializes its widgets, prefer a saved global payload from the
+    # workbook/scenario store instead of falling back to defaults. This avoids overwriting
+    # global assumptions during ordinary scenario captures in other tabs.
+    if not isinstance(saved, dict):
+        scenarios = st.session_state.get("scenarios", {})
+        active_name = st.session_state.get("active_scenario")
+        if isinstance(scenarios, dict):
+            active_payload = scenarios.get(active_name, {}) if active_name else {}
+            if isinstance(active_payload, dict) and isinstance(active_payload.get("lcc_global"), dict):
+                saved = active_payload.get("lcc_global")
+            if not isinstance(saved, dict):
+                for payload_i in scenarios.values():
+                    if isinstance(payload_i, dict) and isinstance(payload_i.get("lcc_global"), dict):
+                        saved = payload_i.get("lcc_global")
+                        break
+            if not isinstance(saved, dict):
+                # Backwards compatibility with v1.4.0 where global fields could be inside `lcc`.
+                for payload_i in scenarios.values():
+                    if isinstance(payload_i, dict) and isinstance(payload_i.get("lcc"), dict):
+                        lcc_i = payload_i.get("lcc")
+                        if any(k in lcc_i for k in ["analysis_period", "selected_operational_end_uses", "energy_inflation_pct"]):
+                            saved = lcc_i
+                            break
+
+    if isinstance(saved, dict):
+        payload = _normalize_lcc_global_payload(saved, end_uses)
+        st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(payload)
+        return payload
+
+    payload = _default_lcc_global_payload(end_uses)
+    st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(payload)
+    return payload
+
+
 def _capture_lcc_from_widgets(end_uses: list) -> dict:
     """Capture current scenario-specific LCC investment assumptions."""
     return {
@@ -1211,6 +1263,7 @@ def _load_lcc_global_into_widgets(lcc_global_payload: dict, end_uses: list) -> N
         lcc_global.get("selected_operational_end_uses", _lcc_default_selected_enduses(end_uses))
     )
     st.session_state["lcc_payback_reference_scenario"] = str(lcc_global.get("payback_reference_scenario", "") or "")
+    st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(lcc_global)
     st.session_state["_lcc_global_initialized"] = True
 
 
@@ -1255,7 +1308,7 @@ def _apply_lcc_global_to_all_scenarios(end_uses: list) -> None:
         scenarios = st.session_state.get("scenarios", {})
         if not isinstance(scenarios, dict):
             return
-        lcc_global = _capture_lcc_global_from_widgets(end_uses)
+        lcc_global = _get_lcc_global_state_payload(end_uses)
         for name, payload in list(scenarios.items()):
             if not isinstance(payload, dict):
                 payload = {}
@@ -1529,7 +1582,7 @@ def capture_scenario_from_widgets(end_uses: list) -> dict:
         "crrem_use_type": str(st.session_state.get("crrem_use_type", "Office")),
         "crrem_mixed_use": _mixed_use_df_to_records(st.session_state.get("crrem_mixed_use_df")),
         "lcc": _capture_lcc_from_widgets(end_uses),
-        "lcc_global": _capture_lcc_global_from_widgets(end_uses),
+        "lcc_global": _get_lcc_global_state_payload(end_uses),
     }
     return payload
 
@@ -2657,6 +2710,8 @@ with tab1:
         # ---- Persist current widget values back into the active scenario (for switching/comparison/save)
         if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
             st.session_state["scenarios"][st.session_state["active_scenario"]] = capture_scenario_from_widgets(end_uses)
+            if st.session_state.get("_lcc_global_initialized"):
+                _apply_lcc_global_to_all_scenarios(end_uses)
 
         # ---- Save Project button (exports current inputs into the workbook)
         with st.sidebar:
@@ -4183,6 +4238,11 @@ with tab_lcc:
         if not selected_lcc:
             selected_lcc = _lcc_default_selected_enduses(valid_enduses_lcc)
         st.session_state["lcc_selected_operational_end_uses"] = selected_lcc
+        # Keep the global LCC payload synchronized before any scenario/reference calculation.
+        st.session_state[LCC_GLOBAL_STATE_KEY] = _capture_lcc_global_from_widgets(valid_enduses_lcc)
+        _apply_lcc_global_to_all_scenarios(valid_enduses_lcc)
+        scenarios_lcc = st.session_state.get("scenarios", {}) or {}
+        active_payload_lcc = scenarios_lcc.get(active_selected, active_payload_lcc)
 
         with st.expander("LCC-Analysis", expanded=True):
             st.caption(
@@ -4349,6 +4409,7 @@ with tab_lcc:
                     if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
                         _act_lcc = st.session_state.get("active_scenario")
                         st.session_state["scenarios"][_act_lcc]["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
+                        st.session_state[LCC_GLOBAL_STATE_KEY] = _capture_lcc_global_from_widgets(valid_enduses_lcc)
                         _apply_lcc_global_to_all_scenarios(valid_enduses_lcc)
                 except Exception:
                     pass
@@ -4357,11 +4418,17 @@ with tab_lcc:
                 st.rerun()
 
         # Use the latest committed values for calculations. Global LCC assumptions are shared by all scenarios.
-        lcc_global_active = _capture_lcc_global_from_widgets(valid_enduses_lcc)
+        lcc_global_active = _get_lcc_global_state_payload(valid_enduses_lcc)
+        _apply_lcc_global_to_all_scenarios(valid_enduses_lcc)
+        scenarios_lcc = st.session_state.get("scenarios", {}) or {}
         if "scenarios" in st.session_state and active_selected in st.session_state["scenarios"]:
             st.session_state["scenarios"][active_selected]["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
             st.session_state["scenarios"][active_selected]["lcc_global"] = deepcopy(lcc_global_active)
-            active_payload_lcc = st.session_state["scenarios"][active_selected]
+            # Re-apply after updating the active scenario so the operational filter and all other
+            # global LCC assumptions remain identical in every scenario payload.
+            _apply_lcc_global_to_all_scenarios(valid_enduses_lcc)
+            scenarios_lcc = st.session_state.get("scenarios", {}) or {}
+            active_payload_lcc = scenarios_lcc.get(active_selected, st.session_state["scenarios"][active_selected])
         else:
             active_payload_lcc["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
             active_payload_lcc["lcc_global"] = deepcopy(lcc_global_active)
