@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.7",
+    page_title="WSGT_BPVis_ENE 1.4.8",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.7")
+st.sidebar.write("Version 1.4.8")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -356,6 +356,7 @@ _RAW_LOADS_DRAFT_KEY = "raw_loads_balance_df_draft"
 _RAW_COMMIT_VERSION_KEY = "_raw_data_commit_version"
 _RAW_ENERGY_SCENARIO_OVERRIDES_KEY = "raw_energy_balance_scenario_overrides"
 _RAW_ENERGY_SCENARIO_DRAFTS_KEY = "raw_energy_balance_scenario_drafts"
+_RAW_ENERGY_SCENARIO_DIRTY_KEY = "raw_energy_balance_scenario_dirty"
 RAW_SCENARIO_ENERGY_SHEET = "Energy_Balance_Scenarios"
 
 
@@ -439,6 +440,91 @@ def _scenario_energy_drafts() -> Dict[str, pd.DataFrame]:
     return drafts
 
 
+def _scenario_energy_dirty_flags() -> Dict[str, bool]:
+    """Return scenario-specific dirty flags for Energy_Balance drafts.
+
+    A dirty draft is a user-edited scenario Energy_Balance that has been captured
+    in session state but has not necessarily been committed with Update Data yet.
+    Dirty drafts are preserved across scenario switching and included in project export.
+    """
+    flags = st.session_state.get(_RAW_ENERGY_SCENARIO_DIRTY_KEY)
+    if not isinstance(flags, dict):
+        flags = {}
+        st.session_state[_RAW_ENERGY_SCENARIO_DIRTY_KEY] = flags
+    return flags
+
+
+def _energy_df_equal(a: pd.DataFrame, b: pd.DataFrame) -> bool:
+    """Robust equality check for sanitized Energy_Balance dataframes."""
+    try:
+        aa = sanitize_energy_balance_df(a).copy()
+        bb = sanitize_energy_balance_df(b).copy()
+        if set(aa.columns) != set(bb.columns):
+            return False
+        # Preserve the column order from aa and append any missing columns defensively.
+        cols = list(aa.columns)
+        bb = bb[cols]
+        aa = aa.reset_index(drop=True)
+        bb = bb.reset_index(drop=True)
+        return aa.equals(bb)
+    except Exception:
+        return False
+
+
+def _mark_scenario_energy_draft_dirty(scenario_name: str, is_dirty: bool = True) -> None:
+    if scenario_name is None or not str(scenario_name).strip():
+        return
+    flags = _scenario_energy_dirty_flags()
+    if is_dirty:
+        flags[str(scenario_name)] = True
+    else:
+        flags.pop(str(scenario_name), None)
+    st.session_state[_RAW_ENERGY_SCENARIO_DIRTY_KEY] = flags
+
+
+def promote_scenario_energy_drafts_to_overrides(scenario_name: Optional[str] = None, only_dirty: bool = True) -> None:
+    """Promote captured scenario Energy_Balance drafts to committed overrides.
+
+    This protects user-entered scenario raw data when switching scenarios before saving/reloading.
+    It only uses drafts that already reached Python session_state; edits inside a form that were never
+    submitted cannot be captured, so the Energy_Balance editor is intentionally rendered outside a form.
+    """
+    drafts = _scenario_energy_drafts()
+    flags = _scenario_energy_dirty_flags()
+    overrides = _scenario_energy_overrides()
+
+    names = [str(scenario_name)] if scenario_name is not None and str(scenario_name).strip() else list(drafts.keys())
+    changed = False
+    for name in names:
+        if name not in drafts or not isinstance(drafts.get(name), pd.DataFrame):
+            continue
+        if only_dirty and not bool(flags.get(name, False)):
+            continue
+        overrides[name] = sanitize_energy_balance_df(drafts[name]).copy(deep=True)
+        flags.pop(name, None)
+        changed = True
+
+    if changed:
+        st.session_state[_RAW_ENERGY_SCENARIO_OVERRIDES_KEY] = overrides
+        st.session_state[_RAW_ENERGY_SCENARIO_DIRTY_KEY] = flags
+
+
+def effective_scenario_energy_overrides_for_export() -> Dict[str, pd.DataFrame]:
+    """Return committed overrides plus captured dirty drafts for workbook export."""
+    out: Dict[str, pd.DataFrame] = {}
+    overrides = _scenario_energy_overrides()
+    for name, df in overrides.items():
+        if isinstance(df, pd.DataFrame):
+            out[str(name)] = sanitize_energy_balance_df(df).copy(deep=True)
+
+    drafts = _scenario_energy_drafts()
+    flags = _scenario_energy_dirty_flags()
+    for name, dirty in flags.items():
+        if dirty and name in drafts and isinstance(drafts.get(name), pd.DataFrame):
+            out[str(name)] = sanitize_energy_balance_df(drafts[name]).copy(deep=True)
+    return out
+
+
 def get_global_energy_balance_df(file_bytes: bytes, filename: str = "") -> pd.DataFrame:
     """Return the global/base Energy_Balance dataframe, ignoring scenario overrides."""
     tok = _workbook_token(file_bytes, filename)
@@ -477,10 +563,13 @@ def delete_scenario_energy_balance_override(scenario_name: str) -> None:
         return
     overrides = _scenario_energy_overrides()
     drafts = _scenario_energy_drafts()
+    dirty = _scenario_energy_dirty_flags()
     overrides.pop(str(scenario_name), None)
     drafts.pop(str(scenario_name), None)
+    dirty.pop(str(scenario_name), None)
     st.session_state[_RAW_ENERGY_SCENARIO_OVERRIDES_KEY] = overrides
     st.session_state[_RAW_ENERGY_SCENARIO_DRAFTS_KEY] = drafts
+    st.session_state[_RAW_ENERGY_SCENARIO_DIRTY_KEY] = dirty
 
 
 def get_energy_balance_df(
@@ -2568,6 +2657,7 @@ if uploaded_file:
         except Exception:
             st.session_state[_RAW_ENERGY_SCENARIO_OVERRIDES_KEY] = {}
         st.session_state[_RAW_ENERGY_SCENARIO_DRAFTS_KEY] = {}
+        st.session_state[_RAW_ENERGY_SCENARIO_DIRTY_KEY] = {}
 
         # Draft copies are edited in the UI; committed copies drive calculations.
         st.session_state[_RAW_ENERGY_DRAFT_KEY] = st.session_state[_RAW_ENERGY_KEY].copy(deep=True)
@@ -2582,6 +2672,8 @@ if uploaded_file:
         st.session_state[_RAW_ENERGY_DRAFT_KEY] = st.session_state[_RAW_ENERGY_KEY].copy(deep=True)
     if _RAW_LOADS_DRAFT_KEY not in st.session_state and _RAW_LOADS_KEY in st.session_state:
         st.session_state[_RAW_LOADS_DRAFT_KEY] = st.session_state[_RAW_LOADS_KEY].copy(deep=True)
+    if _RAW_ENERGY_SCENARIO_DIRTY_KEY not in st.session_state or not isinstance(st.session_state.get(_RAW_ENERGY_SCENARIO_DIRTY_KEY), dict):
+        st.session_state[_RAW_ENERGY_SCENARIO_DIRTY_KEY] = {}
 
     if st.session_state.get("_loaded_workbook_token") != wb_token:
         if preloaded.get("name"):
@@ -2736,6 +2828,13 @@ with tab1:
                 prev = active_selected
 
             if active_selected != prev:
+                # Preserve scenario-specific raw-data drafts before switching scenarios.
+                # This prevents edited Energy_Balance data from being lost before Save Project / workbook reload.
+                try:
+                    promote_scenario_energy_drafts_to_overrides(prev, only_dirty=True)
+                except Exception:
+                    pass
+
                 # persist current widgets into previous scenario, then load new scenario into widgets
                 if prev in scenarios:
                     try:
@@ -2753,6 +2852,10 @@ with tab1:
             # Scenario actions (stacked vertically for clarity)
             if st.button("New", use_container_width=True, key="scenario_btn_new"):
                 # Save current first
+                try:
+                    promote_scenario_energy_drafts_to_overrides(active_selected, only_dirty=True)
+                except Exception:
+                    pass
                 scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
                 base_name = "Scenario"
                 n = 1
@@ -2769,6 +2872,10 @@ with tab1:
                 st.rerun()
 
             if st.button("Duplicate", use_container_width=True, key="scenario_btn_duplicate"):
+                try:
+                    promote_scenario_energy_drafts_to_overrides(active_selected, only_dirty=True)
+                except Exception:
+                    pass
                 scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
                 base_name = f"{active_selected} Copy"
                 new_name = base_name
@@ -2794,6 +2901,10 @@ with tab1:
             if st.button("Rename", use_container_width=True, key="scenario_btn_rename"):
                 rename_to_clean = str(rename_to).strip()
                 if rename_to_clean and rename_to_clean not in scenarios:
+                    try:
+                        promote_scenario_energy_drafts_to_overrides(active_selected, only_dirty=True)
+                    except Exception:
+                        pass
                     scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
                     scenarios[rename_to_clean] = scenarios.pop(active_selected)
                     try:
@@ -2803,8 +2914,12 @@ with tab1:
                             overrides[rename_to_clean] = overrides.pop(active_selected)
                         if active_selected in drafts:
                             drafts[rename_to_clean] = drafts.pop(active_selected)
+                        dirty = _scenario_energy_dirty_flags()
+                        if active_selected in dirty:
+                            dirty[rename_to_clean] = dirty.pop(active_selected)
                         st.session_state[_RAW_ENERGY_SCENARIO_OVERRIDES_KEY] = overrides
                         st.session_state[_RAW_ENERGY_SCENARIO_DRAFTS_KEY] = drafts
+                        st.session_state[_RAW_ENERGY_SCENARIO_DIRTY_KEY] = dirty
                     except Exception:
                         pass
                     st.session_state["scenarios"] = scenarios
@@ -2815,6 +2930,10 @@ with tab1:
 
             if st.button("Delete", use_container_width=True, key="scenario_btn_delete"):
                 if len(scenarios) > 1 and active_selected in scenarios:
+                    try:
+                        promote_scenario_energy_drafts_to_overrides(active_selected, only_dirty=True)
+                    except Exception:
+                        pass
                     scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
                     scenarios.pop(active_selected, None)
                     try:
@@ -3116,6 +3235,14 @@ with tab1:
         # ---- Save Project button (exports current inputs into the workbook)
         with st.sidebar:
             if st.button("Save Project", use_container_width=True):
+                # Preserve all captured scenario-specific raw-data drafts before exporting.
+                # This makes temporary Energy_Balance overrides survive Save Project even if
+                # the user switched scenarios before downloading the workbook.
+                try:
+                    promote_scenario_energy_drafts_to_overrides(None, only_dirty=True)
+                except Exception:
+                    pass
+
                 # Ensure the active scenario payload is up-to-date (including CRREM measures)
                 try:
                     if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state[
@@ -3211,7 +3338,7 @@ with tab1:
                     lcc_investments_df=lcc_investments_df,
                     energy_balance_df=st.session_state.get(_RAW_ENERGY_KEY),
                     scenario_energy_overrides_df=build_scenario_energy_overrides_df(
-                        st.session_state.get(_RAW_ENERGY_SCENARIO_OVERRIDES_KEY, {})
+                        effective_scenario_energy_overrides_for_export()
                     ),
                     loads_balance_df=st.session_state.get(_RAW_LOADS_KEY),
                 )
@@ -7178,9 +7305,9 @@ with tab8:
 
         st.write("## Raw Data")
         st.caption(
-            "Edit raw sheets using the editors below. **Changes are applied only when you click `Update Data`**. "
-            "Energy_Balance can be updated globally or only for the active scenario. "
-            "Applied changes update calculations and will be saved back into the workbook when you use **Save Project**."
+            "Edit raw sheets using the editors below. Energy_Balance can be updated globally or only for the active scenario. "
+            "Scenario-specific Energy_Balance edits are stored as temporary drafts immediately so they survive scenario switching. "
+            "Click **Update Data** to apply the selected draft to calculations; **Save Project** exports committed overrides and captured scenario drafts."
         )
 
         # Ensure drafts exist for this workbook
@@ -7214,7 +7341,7 @@ with tab8:
                 has_override = get_scenario_energy_balance_override(active_raw_scenario) is not None
                 st.caption(
                     f"Editing scope: **{active_raw_scenario}** only. "
-                    + ("This scenario already has its own Energy_Balance override." if has_override else "No override exists yet; the draft starts from the global/base Energy_Balance.")
+                    + ("This scenario already has its own Energy_Balance override." if has_override else "No committed override exists yet; the draft starts from the global/base Energy_Balance.")
                 )
             else:
                 st.caption("Editing scope: **global/base Energy_Balance**. Scenario-specific overrides, if any, are not changed.")
@@ -7248,12 +7375,14 @@ with tab8:
                     return sanitize_energy_balance_df(drafts.get(active_raw_scenario, pd.DataFrame())).copy(deep=True)
                 return sanitize_energy_balance_df(st.session_state.get(_RAW_ENERGY_DRAFT_KEY, pd.DataFrame())).copy(deep=True)
 
-            def _set_energy_draft_for_scope(df_in: pd.DataFrame) -> None:
+            def _set_energy_draft_for_scope(df_in: pd.DataFrame, mark_dirty: bool = False) -> None:
                 clean = sanitize_energy_balance_df(df_in)
                 if use_scenario_energy_scope:
                     drafts = _scenario_energy_drafts()
                     drafts[active_raw_scenario] = clean.copy(deep=True)
                     st.session_state[_RAW_ENERGY_SCENARIO_DRAFTS_KEY] = drafts
+                    if mark_dirty:
+                        _mark_scenario_energy_draft_dirty(active_raw_scenario, True)
                 else:
                     st.session_state[_RAW_ENERGY_DRAFT_KEY] = clean.copy(deep=True)
 
@@ -7279,7 +7408,7 @@ with tab8:
                         col = str(new_col_name).strip()
                         if col not in df_energy_raw.columns:
                             df_energy_raw[col] = float(new_col_default)
-                            _set_energy_draft_for_scope(df_energy_raw)
+                            _set_energy_draft_for_scope(df_energy_raw, mark_dirty=True)
                     # Force editor widget to rebuild so schema changes (new columns) are reflected immediately.
                     st.session_state.pop(energy_editor_key, None)
                     st.session_state.pop(energy_rename_key, None)
@@ -7292,7 +7421,9 @@ with tab8:
                     use_container_width=True,
                     help="Discard unsaved edits and revert to the last applied data for the selected scope.",
                 ):
-                    _set_energy_draft_for_scope(_last_applied_energy_for_scope())
+                    _set_energy_draft_for_scope(_last_applied_energy_for_scope(), mark_dirty=False)
+                    if use_scenario_energy_scope:
+                        _mark_scenario_energy_draft_dirty(active_raw_scenario, False)
                     st.session_state.pop(energy_editor_key, None)
                     st.session_state.pop(energy_rename_key, None)
                     st.session_state[energy_flash_key] = "reverted"
@@ -7393,7 +7524,7 @@ with tab8:
 
                             df_renamed = df_energy_raw.rename(columns=mapping)
                             df_renamed = sanitize_energy_balance_df(df_renamed)
-                            _set_energy_draft_for_scope(df_renamed)
+                            _set_energy_draft_for_scope(df_renamed, mark_dirty=True)
 
                             # Reset widget state so editors rebuild with the new schema immediately
                             st.session_state.pop(energy_editor_key, None)
@@ -7402,34 +7533,42 @@ with tab8:
                             st.session_state[energy_flash_key] = "renamed"
                             st.rerun()
 
-            # Batch apply edits: users can make multiple edits, then click Update Data once.
-            with st.form(f"raw_energy_form_{wb_hash}_{scope_suffix}", clear_on_submit=False):
-                editor_kwargs = {
-                    "num_rows": "dynamic",
-                    "use_container_width": True,
-                    "key": energy_editor_key,
-                }
-                if hasattr(st, "column_config"):
-                    col_cfg = {"Month": st.column_config.TextColumn("Month", required=True)}
-                    for c in df_energy_raw.columns:
-                        if c == "Month":
-                            continue
-                        col_cfg[c] = st.column_config.NumberColumn(c, format="%.3f")
-                    editor_kwargs["column_config"] = col_cfg
+            # Live draft editor: edits are stored in session_state immediately so they survive
+            # scenario switching. They are applied to calculations only after "Update Data".
+            editor_kwargs = {
+                "num_rows": "dynamic",
+                "use_container_width": True,
+                "key": energy_editor_key,
+            }
+            if hasattr(st, "column_config"):
+                col_cfg = {"Month": st.column_config.TextColumn("Month", required=True)}
+                for c in df_energy_raw.columns:
+                    if c == "Month":
+                        continue
+                    col_cfg[c] = st.column_config.NumberColumn(c, format="%.3f")
+                editor_kwargs["column_config"] = col_cfg
 
-                edited_energy = st.data_editor(df_energy_raw, **editor_kwargs)
+            edited_energy = st.data_editor(df_energy_raw, **editor_kwargs)
 
-                # Persist edits into the *draft* buffer on every rerun so values are not lost,
-                # but do NOT apply them to calculations until the user clicks "Update Data".
+            # Persist edits into the selected draft buffer. For scenario scope, mark the draft
+            # as dirty only when it differs from the draft that initialized the editor. Dirty
+            # drafts are protected during scenario switching and included in project export.
+            if use_scenario_energy_scope:
+                if not _energy_df_equal(edited_energy, df_energy_raw):
+                    _set_energy_draft_for_scope(edited_energy, mark_dirty=True)
+                else:
+                    _set_energy_draft_for_scope(edited_energy, mark_dirty=False)
+            else:
                 _set_energy_draft_for_scope(edited_energy)
 
-                apply_energy = st.form_submit_button("Update Data", use_container_width=True)
+            apply_energy = st.button("Update Data", key=f"raw_energy_update_btn_{wb_hash}_{scope_suffix}", use_container_width=True)
 
             if apply_energy:
                 committed_energy = sanitize_energy_balance_df(edited_energy)
                 if use_scenario_energy_scope:
                     set_scenario_energy_balance_override(active_raw_scenario, committed_energy)
-                    _set_energy_draft_for_scope(committed_energy)
+                    _set_energy_draft_for_scope(committed_energy, mark_dirty=False)
+                    _mark_scenario_energy_draft_dirty(active_raw_scenario, False)
                 else:
                     st.session_state[_RAW_ENERGY_KEY] = committed_energy
                     st.session_state[_RAW_ENERGY_DRAFT_KEY] = committed_energy.copy(deep=True)
