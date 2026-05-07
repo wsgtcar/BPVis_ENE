@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.0.3",
+    page_title="WSGT_BPVis_ENE 2.0.4",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.0.3")
+st.sidebar.write("Version 2.0.4")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -5896,25 +5896,9 @@ with tab7:
                                 "Cumulative Net CO₂ (t)": float(_cum_emissions_series_t.loc[_y_cmp]),
                             })
 
-                    # First row: LCC diagrams
+                    # First row: LCC diagrams (annual first, cumulative second)
                     lc1, lc2 = st.columns(2)
                     with lc1:
-                        st.subheader("Cumulative LCC")
-                        if fig_lcc_cmp.data:
-                            fig_lcc_cmp.update_layout(
-                                height=600,
-                                xaxis_title="Year",
-                                yaxis_title=f"Cumulative cost ({_curr})",
-                                legend_title_text="Scenario / cost basis",
-                                legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
-                                margin=dict(l=40, r=20, t=50, b=120),
-                            )
-                            fig_lcc_cmp.update_yaxes(rangemode="tozero")
-                            st_plotly_chart(fig_lcc_cmp, use_container_width=True, key="scenario_lcc_cumulative_all")
-                        else:
-                            st.info("No LCC cash flows available. Add LCC inputs in the LCC-Analysis tab.")
-
-                    with lc2:
                         st.subheader("Annual Energy Cost")
                         if fig_energy_cost_annual_cmp.data:
                             fig_energy_cost_annual_cmp.update_layout(
@@ -5929,6 +5913,22 @@ with tab7:
                             st_plotly_chart(fig_energy_cost_annual_cmp, use_container_width=True, key="scenario_energy_cost_annual_all")
                         else:
                             st.info("No annual energy cost data available for comparison.")
+
+                    with lc2:
+                        st.subheader("Cumulative LCC")
+                        if fig_lcc_cmp.data:
+                            fig_lcc_cmp.update_layout(
+                                height=600,
+                                xaxis_title="Year",
+                                yaxis_title=f"Cumulative cost ({_curr})",
+                                legend_title_text="Scenario / cost basis",
+                                legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
+                                margin=dict(l=40, r=20, t=50, b=120),
+                            )
+                            fig_lcc_cmp.update_yaxes(rangemode="tozero")
+                            st_plotly_chart(fig_lcc_cmp, use_container_width=True, key="scenario_lcc_cumulative_all")
+                        else:
+                            st.info("No LCC cash flows available. Add LCC inputs in the LCC-Analysis tab.")
 
                     # Second row: emission diagrams
                     em1, em2 = st.columns(2)
