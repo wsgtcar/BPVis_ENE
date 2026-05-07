@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.8",
+    page_title="WSGT_BPVis_ENE 1.4.9",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.8")
+st.sidebar.write("Version 1.4.9")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -483,11 +483,11 @@ def _mark_scenario_energy_draft_dirty(scenario_name: str, is_dirty: bool = True)
 
 
 def promote_scenario_energy_drafts_to_overrides(scenario_name: Optional[str] = None, only_dirty: bool = True) -> None:
-    """Promote captured scenario Energy_Balance drafts to committed overrides.
+    """Legacy helper for old captured scenario Energy_Balance drafts.
 
-    This protects user-entered scenario raw data when switching scenarios before saving/reloading.
-    It only uses drafts that already reached Python session_state; edits inside a form that were never
-    submitted cannot be captured, so the Energy_Balance editor is intentionally rendered outside a form.
+    The Raw Data editor now commits scenario-specific Energy_Balance overrides only
+    when the user clicks **Update Data**. This helper is intentionally not used by
+    normal scenario switching, because unsubmitted form edits must not be promoted.
     """
     drafts = _scenario_energy_drafts()
     flags = _scenario_energy_dirty_flags()
@@ -510,20 +510,19 @@ def promote_scenario_energy_drafts_to_overrides(scenario_name: Optional[str] = N
 
 
 def effective_scenario_energy_overrides_for_export() -> Dict[str, pd.DataFrame]:
-    """Return committed overrides plus captured dirty drafts for workbook export."""
+    """Return committed scenario-specific Energy_Balance overrides for workbook export.
+
+    Raw-data table edits are intentionally committed only when the user clicks
+    **Update Data**. This keeps the editor from triggering full app reruns on
+    every cell edit and prevents unsubmitted browser-side edits from being
+    mixed into project export.
+    """
     out: Dict[str, pd.DataFrame] = {}
     overrides = _scenario_energy_overrides()
     for name, df in overrides.items():
         if isinstance(df, pd.DataFrame):
             out[str(name)] = sanitize_energy_balance_df(df).copy(deep=True)
-
-    drafts = _scenario_energy_drafts()
-    flags = _scenario_energy_dirty_flags()
-    for name, dirty in flags.items():
-        if dirty and name in drafts and isinstance(drafts.get(name), pd.DataFrame):
-            out[str(name)] = sanitize_energy_balance_df(drafts[name]).copy(deep=True)
     return out
-
 
 def get_global_energy_balance_df(file_bytes: bytes, filename: str = "") -> pd.DataFrame:
     """Return the global/base Energy_Balance dataframe, ignoring scenario overrides."""
@@ -2828,13 +2827,6 @@ with tab1:
                 prev = active_selected
 
             if active_selected != prev:
-                # Preserve scenario-specific raw-data drafts before switching scenarios.
-                # This prevents edited Energy_Balance data from being lost before Save Project / workbook reload.
-                try:
-                    promote_scenario_energy_drafts_to_overrides(prev, only_dirty=True)
-                except Exception:
-                    pass
-
                 # persist current widgets into previous scenario, then load new scenario into widgets
                 if prev in scenarios:
                     try:
@@ -2852,10 +2844,6 @@ with tab1:
             # Scenario actions (stacked vertically for clarity)
             if st.button("New", use_container_width=True, key="scenario_btn_new"):
                 # Save current first
-                try:
-                    promote_scenario_energy_drafts_to_overrides(active_selected, only_dirty=True)
-                except Exception:
-                    pass
                 scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
                 base_name = "Scenario"
                 n = 1
@@ -2872,10 +2860,6 @@ with tab1:
                 st.rerun()
 
             if st.button("Duplicate", use_container_width=True, key="scenario_btn_duplicate"):
-                try:
-                    promote_scenario_energy_drafts_to_overrides(active_selected, only_dirty=True)
-                except Exception:
-                    pass
                 scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
                 base_name = f"{active_selected} Copy"
                 new_name = base_name
@@ -2901,10 +2885,6 @@ with tab1:
             if st.button("Rename", use_container_width=True, key="scenario_btn_rename"):
                 rename_to_clean = str(rename_to).strip()
                 if rename_to_clean and rename_to_clean not in scenarios:
-                    try:
-                        promote_scenario_energy_drafts_to_overrides(active_selected, only_dirty=True)
-                    except Exception:
-                        pass
                     scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
                     scenarios[rename_to_clean] = scenarios.pop(active_selected)
                     try:
@@ -2930,10 +2910,6 @@ with tab1:
 
             if st.button("Delete", use_container_width=True, key="scenario_btn_delete"):
                 if len(scenarios) > 1 and active_selected in scenarios:
-                    try:
-                        promote_scenario_energy_drafts_to_overrides(active_selected, only_dirty=True)
-                    except Exception:
-                        pass
                     scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
                     scenarios.pop(active_selected, None)
                     try:
@@ -3235,14 +3211,6 @@ with tab1:
         # ---- Save Project button (exports current inputs into the workbook)
         with st.sidebar:
             if st.button("Save Project", use_container_width=True):
-                # Preserve all captured scenario-specific raw-data drafts before exporting.
-                # This makes temporary Energy_Balance overrides survive Save Project even if
-                # the user switched scenarios before downloading the workbook.
-                try:
-                    promote_scenario_energy_drafts_to_overrides(None, only_dirty=True)
-                except Exception:
-                    pass
-
                 # Ensure the active scenario payload is up-to-date (including CRREM measures)
                 try:
                     if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state[
@@ -7306,8 +7274,8 @@ with tab8:
         st.write("## Raw Data")
         st.caption(
             "Edit raw sheets using the editors below. Energy_Balance can be updated globally or only for the active scenario. "
-            "Scenario-specific Energy_Balance edits are stored as temporary drafts immediately so they survive scenario switching. "
-            "Click **Update Data** to apply the selected draft to calculations; **Save Project** exports committed overrides and captured scenario drafts."
+            "Energy_Balance table edits are buffered in the editor and are committed only when **Update Data** is clicked. "
+            "Committed scenario-specific overrides survive scenario switching and are exported with **Save Project**."
         )
 
         # Ensure drafts exist for this workbook
@@ -7533,8 +7501,10 @@ with tab8:
                             st.session_state[energy_flash_key] = "renamed"
                             st.rerun()
 
-            # Live draft editor: edits are stored in session_state immediately so they survive
-            # scenario switching. They are applied to calculations only after "Update Data".
+            # Draft editor: the data_editor is inside a form to prevent Streamlit from
+            # rerunning the full app on every cell edit. Edits are sent to Python only
+            # when the user clicks **Update Data**. Once committed, scenario-specific
+            # overrides survive scenario switching and are included in Save Project.
             editor_kwargs = {
                 "num_rows": "dynamic",
                 "use_container_width": True,
@@ -7548,20 +7518,9 @@ with tab8:
                     col_cfg[c] = st.column_config.NumberColumn(c, format="%.3f")
                 editor_kwargs["column_config"] = col_cfg
 
-            edited_energy = st.data_editor(df_energy_raw, **editor_kwargs)
-
-            # Persist edits into the selected draft buffer. For scenario scope, mark the draft
-            # as dirty only when it differs from the draft that initialized the editor. Dirty
-            # drafts are protected during scenario switching and included in project export.
-            if use_scenario_energy_scope:
-                if not _energy_df_equal(edited_energy, df_energy_raw):
-                    _set_energy_draft_for_scope(edited_energy, mark_dirty=True)
-                else:
-                    _set_energy_draft_for_scope(edited_energy, mark_dirty=False)
-            else:
-                _set_energy_draft_for_scope(edited_energy)
-
-            apply_energy = st.button("Update Data", key=f"raw_energy_update_btn_{wb_hash}_{scope_suffix}", use_container_width=True)
+            with st.form(f"raw_energy_update_form_{wb_hash}_{scope_suffix}", clear_on_submit=False):
+                edited_energy = st.data_editor(df_energy_raw, **editor_kwargs)
+                apply_energy = st.form_submit_button("Update Data", use_container_width=True)
 
             if apply_energy:
                 committed_energy = sanitize_energy_balance_df(edited_energy)
@@ -7578,7 +7537,7 @@ with tab8:
                 st.session_state.pop(energy_editor_key, None)
                 st.session_state.pop(energy_rename_key, None)
 
-                # Force a full rerun so upstream tabs/plots recompute from the updated committed data.
+                # Force a full rerun only after an explicit user commit.
                 st.session_state[energy_flash_key] = "updated"
                 st.rerun()
 
