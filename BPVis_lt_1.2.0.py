@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.3",
+    page_title="WSGT_BPVis_ENE 1.4.4",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.3")
+st.sidebar.write("Version 1.4.4")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1192,15 +1192,14 @@ def _capture_lcc_global_from_widgets(end_uses: list) -> dict:
 def _get_lcc_global_state_payload(end_uses: list) -> dict:
     """Return the single global LCC payload used for every scenario calculation.
 
-    If the global widgets have already been initialized, this reads the current widget
-    values and refreshes the global session payload. If not, it falls back to a saved
-    global payload or safe defaults.
+    Important Streamlit rule:
+    Once a widget with a given key has been instantiated in the current run, the app
+    must not assign to that same key in ``st.session_state`` later in the run. This
+    getter therefore only reads widget keys and writes the consolidated payload to the
+    non-widget global payload key.
     """
     if st.session_state.get("_lcc_global_initialized"):
-        if not isinstance(st.session_state.get(LCC_GLOBAL_STATE_KEY), dict):
-            st.session_state[LCC_GLOBAL_STATE_KEY] = _default_lcc_global_payload(end_uses)
-        _sync_lcc_global_widget_state(end_uses)
-        payload = _capture_lcc_global_from_widgets(end_uses)
+        payload = _normalize_lcc_global_payload(_capture_lcc_global_from_widgets(end_uses), end_uses)
         st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(payload)
         return payload
 
@@ -1329,20 +1328,21 @@ def _apply_lcc_global_to_all_scenarios(end_uses: list) -> None:
 
 
 def _sync_lcc_global_widget_state(end_uses: list) -> None:
-    """Keep global LCC widget keys populated from the persisted global payload.
+    """Seed missing global LCC widget keys without mutating existing widget keys.
 
-    This prevents Streamlit from recreating the Analysis Period widget at its minimum
-    value after a scenario switch, which would otherwise shrink the LCC charts to one year.
+    Streamlit forbids assigning to a widget-bound key after that widget has been
+    instantiated in the current run. For that reason this function only creates keys
+    that are still missing. Existing widget values are treated as the source of truth
+    and are consolidated into ``LCC_GLOBAL_STATE_KEY``.
     """
+    valid = [str(u) for u in end_uses]
     saved = st.session_state.get(LCC_GLOBAL_STATE_KEY)
     if not isinstance(saved, dict):
-        saved = _get_lcc_global_state_payload(end_uses)
-    lcc_global = _normalize_lcc_global_payload(saved, end_uses)
+        saved = _default_lcc_global_payload(valid)
+    lcc_global = _normalize_lcc_global_payload(saved, valid)
 
     if "lcc_analysis_period" not in st.session_state:
         st.session_state["lcc_analysis_period"] = int(lcc_global.get("analysis_period", 30))
-    else:
-        st.session_state["lcc_analysis_period"] = max(1, _to_int_lcc(st.session_state.get("lcc_analysis_period"), int(lcc_global.get("analysis_period", 30))))
 
     for key, payload_key, default_val in [
         ("lcc_interest_rate_pct", "interest_rate_pct", 4.0),
@@ -1365,19 +1365,15 @@ def _sync_lcc_global_widget_state(end_uses: list) -> None:
         elif f"{key}_txt" not in st.session_state:
             st.session_state[f"{key}_txt"] = f"{_to_float_lcc(st.session_state.get(key), 2.0):.4f}"
 
-    valid = [str(u) for u in end_uses]
-    selected = st.session_state.get("lcc_selected_operational_end_uses", lcc_global.get("selected_operational_end_uses"))
-    if not isinstance(selected, list):
+    if "lcc_selected_operational_end_uses" not in st.session_state:
         selected = lcc_global.get("selected_operational_end_uses", _lcc_default_selected_enduses(valid))
-    selected = [_canon_enduse_name(str(u)) for u in selected if _canon_enduse_name(str(u)) in set(valid)]
-    if not selected:
-        selected = _lcc_default_selected_enduses(valid)
-    st.session_state["lcc_selected_operational_end_uses"] = selected
+        selected = [_canon_enduse_name(str(u)) for u in selected if _canon_enduse_name(str(u)) in set(valid)]
+        st.session_state["lcc_selected_operational_end_uses"] = selected or _lcc_default_selected_enduses(valid)
 
     if "lcc_payback_reference_scenario" not in st.session_state:
         st.session_state["lcc_payback_reference_scenario"] = str(lcc_global.get("payback_reference_scenario", "") or "")
 
-    st.session_state[LCC_GLOBAL_STATE_KEY] = _capture_lcc_global_from_widgets(valid)
+    st.session_state[LCC_GLOBAL_STATE_KEY] = _normalize_lcc_global_payload(_capture_lcc_global_from_widgets(valid), valid)
 
 
 def parse_lcc_global_df(df: Optional[pd.DataFrame], end_uses: list) -> Optional[dict]:
