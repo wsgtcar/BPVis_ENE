@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.9",
+    page_title="WSGT_BPVis_ENE 1.4.10",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.9")
+st.sidebar.write("Version 1.4.10")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2815,36 +2815,83 @@ with tab1:
             scenarios = st.session_state.get("scenarios", {})
             scenario_names = list(scenarios.keys()) if scenarios else ["Base"]
 
-            # active scenario selector
-            active_idx = scenario_names.index(
-                st.session_state.get("active_scenario", scenario_names[0])) if st.session_state.get(
-                "active_scenario") in scenario_names else 0
-            active_selected = st.selectbox("Active Scenario", scenario_names, index=active_idx, key="active_scenario")
+            # ------------------------------------------------------------------
+            # Robust active-scenario handling
+            # ------------------------------------------------------------------
+            # IMPORTANT:
+            # The selectbox uses its own widget key ("active_scenario_selector").
+            # The canonical active scenario is stored in "active_scenario".
+            # This avoids StreamlitAPIException errors caused by assigning to a
+            # widget-bound key after the widget has been instantiated in the same run
+            # (which happened when creating, renaming or deleting scenarios).
+            current_active = str(st.session_state.get("active_scenario", scenario_names[0]))
+            if current_active not in scenario_names:
+                current_active = scenario_names[0]
+                st.session_state["active_scenario"] = current_active
 
-            prev = st.session_state.get("_prev_active_scenario")
-            if prev is None:
-                st.session_state["_prev_active_scenario"] = active_selected
-                prev = active_selected
+            # Keep the selector in sync BEFORE the widget is rendered.
+            # This is safe because "active_scenario_selector" has not been instantiated yet in this run.
+            if st.session_state.get("active_scenario_selector") not in scenario_names or st.session_state.get("active_scenario_selector") != current_active:
+                st.session_state["active_scenario_selector"] = current_active
 
-            if active_selected != prev:
-                # persist current widgets into previous scenario, then load new scenario into widgets
-                if prev in scenarios:
-                    try:
-                        prev_df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=prev)
-                        prev_end_uses = prev_df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")["End_Use"].unique().tolist()
-                    except Exception:
-                        prev_end_uses = end_uses
-                    scenarios[prev] = capture_scenario_from_widgets(prev_end_uses)
-                if active_selected in scenarios:
-                    load_scenario_into_widgets(scenarios[active_selected], end_uses)
-                st.session_state["_prev_active_scenario"] = active_selected
-                st.session_state["scenarios"] = scenarios
+            active_idx = scenario_names.index(current_active) if current_active in scenario_names else 0
+            active_selected = st.selectbox(
+                "Active Scenario",
+                scenario_names,
+                index=active_idx,
+                key="active_scenario_selector",
+            )
+
+            def _end_uses_for_scenario(_scenario_name: str, _fallback_end_uses: list) -> list:
+                """Return End Uses from the scenario-specific Energy_Balance if available."""
+                try:
+                    _df = get_energy_balance_df(
+                        uploaded_file.getvalue(),
+                        uploaded_file.name,
+                        scenario_name=_scenario_name,
+                    )
+                    if isinstance(_df, pd.DataFrame) and "Month" in _df.columns:
+                        return _df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")["End_Use"].unique().tolist()
+                except Exception:
+                    pass
+                return list(_fallback_end_uses)
+
+            def _save_current_scenario_payload(_scenario_name: str) -> None:
+                """Persist current sidebar/widget values to the canonical active scenario payload."""
+                try:
+                    if _scenario_name in scenarios:
+                        _eu = _end_uses_for_scenario(_scenario_name, end_uses)
+                        scenarios[_scenario_name] = capture_scenario_from_widgets(_eu)
+                        st.session_state["scenarios"] = scenarios
+                except Exception:
+                    pass
+
+            def _activate_scenario(_scenario_name: str) -> None:
+                """Set canonical active scenario and load its widget state.
+
+                Do not assign to active_scenario_selector here. The selector will be
+                synchronized at the beginning of the next run before widget rendering.
+                """
+                try:
+                    _scenario_name = str(_scenario_name)
+                    if _scenario_name in scenarios:
+                        _eu = _end_uses_for_scenario(_scenario_name, end_uses)
+                        load_scenario_into_widgets(scenarios[_scenario_name], _eu)
+                        st.session_state["active_scenario"] = _scenario_name
+                        st.session_state["_prev_active_scenario"] = _scenario_name
+                except Exception:
+                    st.session_state["active_scenario"] = str(_scenario_name)
+                    st.session_state["_prev_active_scenario"] = str(_scenario_name)
+
+            # Manual scenario switch from the selectbox.
+            if active_selected != current_active:
+                _save_current_scenario_payload(current_active)
+                _activate_scenario(active_selected)
                 st.rerun()
 
             # Scenario actions (stacked vertically for clarity)
             if st.button("New", use_container_width=True, key="scenario_btn_new"):
-                # Save current first
-                scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
+                _save_current_scenario_payload(current_active)
                 base_name = "Scenario"
                 n = 1
                 new_name = f"{base_name} {n}"
@@ -2854,73 +2901,73 @@ with tab1:
                 scenarios[new_name] = default_scenario_payload(end_uses, preloaded)
                 # New scenarios intentionally start from the global Energy_Balance unless the user creates an override.
                 st.session_state["scenarios"] = scenarios
-                st.session_state["active_scenario"] = new_name
-                st.session_state["_prev_active_scenario"] = new_name
-                load_scenario_into_widgets(scenarios[new_name], end_uses)
+                _activate_scenario(new_name)
                 st.rerun()
 
             if st.button("Duplicate", use_container_width=True, key="scenario_btn_duplicate"):
-                scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
-                base_name = f"{active_selected} Copy"
+                _save_current_scenario_payload(current_active)
+                base_name = f"{current_active} Copy"
                 new_name = base_name
                 i = 2
                 while new_name in scenarios:
                     new_name = f"{base_name} {i}"
                     i += 1
-                scenarios[new_name] = deepcopy(scenarios[active_selected])
+                scenarios[new_name] = deepcopy(scenarios[current_active])
                 try:
                     overrides = _scenario_energy_overrides()
-                    if active_selected in overrides and isinstance(overrides.get(active_selected), pd.DataFrame):
-                        overrides[new_name] = overrides[active_selected].copy(deep=True)
+                    if current_active in overrides and isinstance(overrides.get(current_active), pd.DataFrame):
+                        overrides[new_name] = overrides[current_active].copy(deep=True)
                         st.session_state[_RAW_ENERGY_SCENARIO_OVERRIDES_KEY] = overrides
                 except Exception:
                     pass
                 st.session_state["scenarios"] = scenarios
-                st.session_state["active_scenario"] = new_name
-                st.session_state["_prev_active_scenario"] = new_name
-                load_scenario_into_widgets(scenarios[new_name], end_uses)
+                _activate_scenario(new_name)
                 st.rerun()
 
             rename_to = st.text_input("Rename to", value="", key="scenario_rename_to")
             if st.button("Rename", use_container_width=True, key="scenario_btn_rename"):
                 rename_to_clean = str(rename_to).strip()
-                if rename_to_clean and rename_to_clean not in scenarios:
-                    scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
-                    scenarios[rename_to_clean] = scenarios.pop(active_selected)
+                if rename_to_clean and rename_to_clean not in scenarios and current_active in scenarios:
+                    _save_current_scenario_payload(current_active)
+                    scenarios[rename_to_clean] = scenarios.pop(current_active)
                     try:
                         overrides = _scenario_energy_overrides()
                         drafts = _scenario_energy_drafts()
-                        if active_selected in overrides:
-                            overrides[rename_to_clean] = overrides.pop(active_selected)
-                        if active_selected in drafts:
-                            drafts[rename_to_clean] = drafts.pop(active_selected)
+                        if current_active in overrides:
+                            overrides[rename_to_clean] = overrides.pop(current_active)
+                        if current_active in drafts:
+                            drafts[rename_to_clean] = drafts.pop(current_active)
                         dirty = _scenario_energy_dirty_flags()
-                        if active_selected in dirty:
-                            dirty[rename_to_clean] = dirty.pop(active_selected)
+                        if current_active in dirty:
+                            dirty[rename_to_clean] = dirty.pop(current_active)
                         st.session_state[_RAW_ENERGY_SCENARIO_OVERRIDES_KEY] = overrides
                         st.session_state[_RAW_ENERGY_SCENARIO_DRAFTS_KEY] = drafts
                         st.session_state[_RAW_ENERGY_SCENARIO_DIRTY_KEY] = dirty
                     except Exception:
                         pass
                     st.session_state["scenarios"] = scenarios
-                    st.session_state["active_scenario"] = rename_to_clean
-                    st.session_state["_prev_active_scenario"] = rename_to_clean
-                    load_scenario_into_widgets(scenarios[rename_to_clean], end_uses)
+                    _activate_scenario(rename_to_clean)
                     st.rerun()
+                elif rename_to_clean in scenarios:
+                    st.warning("A scenario with this name already exists.")
 
             if st.button("Delete", use_container_width=True, key="scenario_btn_delete"):
-                if len(scenarios) > 1 and active_selected in scenarios:
-                    scenarios[active_selected] = capture_scenario_from_widgets(end_uses)
-                    scenarios.pop(active_selected, None)
+                if len(scenarios) > 1 and current_active in scenarios:
+                    # Choose the next available scenario in the current ordering.
+                    old_names = list(scenarios.keys())
+                    old_idx = old_names.index(current_active) if current_active in old_names else 0
+
                     try:
-                        delete_scenario_energy_balance_override(active_selected)
+                        delete_scenario_energy_balance_override(current_active)
                     except Exception:
                         pass
-                    new_active = list(scenarios.keys())[0]
+
+                    scenarios.pop(current_active, None)
+                    remaining_names = list(scenarios.keys())
+                    new_active = remaining_names[min(old_idx, len(remaining_names) - 1)]
+
                     st.session_state["scenarios"] = scenarios
-                    st.session_state["active_scenario"] = new_active
-                    st.session_state["_prev_active_scenario"] = new_active
-                    load_scenario_into_widgets(scenarios[new_active], end_uses)
+                    _activate_scenario(new_active)
                     st.rerun()
             st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors, On-site generation settings, CRREM measures and scenario-specific LCC investment measures. Optional scenario-specific Energy_Balance overrides are managed in Raw Data. Global LCC parameters are shared across scenarios.")
 
