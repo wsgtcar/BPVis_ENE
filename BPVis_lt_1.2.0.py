@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.0.0",
+    page_title="WSGT_BPVis_ENE 2.0.2",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.0.0")
+st.sidebar.write("Version 2.0.2")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2571,6 +2571,95 @@ def compute_decarb_multiplier(ef_grid: pd.Series, base_year: int, years: list, r
         out = out.interpolate(method="linear", limit_direction="both")
     return out / df_base
 
+
+
+def compute_crrem_like_scenario_emissions_series(
+        df_energy: pd.DataFrame,
+        payload: dict,
+        crrem: Optional[dict],
+        project_year: int,
+        years: list,
+) -> pd.Series:
+    """Return annual total emissions in tCO₂e/a using the same decarbonization logic as CRREM.
+
+    This mirrors the CRREM tab logic:
+    - apply scenario-specific efficiency factors;
+    - apply scenario-specific source mapping;
+    - apply scenario-specific on-site generation scale only when enabled;
+    - clamp net electricity to zero, so exported on-site generation is not credited;
+    - calculate base-year emissions from scenario emission factors;
+    - multiply the full annual emissions balance by the CRREM grid-electricity decarbonization multiplier.
+    """
+    years_i = [int(y) for y in (years or [])]
+    if not years_i:
+        return pd.Series(dtype=float)
+
+    payload = payload or {}
+    try:
+        df_base = sanitize_energy_balance_df(df_energy)
+    except Exception:
+        df_base = df_energy.copy() if isinstance(df_energy, pd.DataFrame) else pd.DataFrame()
+
+    if df_base is None or df_base.empty or "Month" not in df_base.columns:
+        return pd.Series({int(y): 0.0 for y in years_i}, dtype=float)
+
+    df_m = df_base.melt(id_vars="Month", var_name="End_Use", value_name="kWh").copy()
+    df_m["End_Use"] = df_m["End_Use"].apply(lambda x: _canon_enduse_name(str(x)))
+    df_m["kWh"] = pd.to_numeric(df_m["kWh"], errors="coerce").fillna(0.0)
+
+    eff = payload.get("efficiency", {}) or {}
+    mapping = payload.get("mapping", {}) or {}
+    factors = payload.get("factors", {}) or {}
+    pv_cfg = payload.get("pv", {}) or {}
+
+    df_m["Efficiency_Factor"] = df_m["End_Use"].map(lambda u: _to_float_lcc(eff.get(u, 1.0), 1.0)).fillna(1.0)
+    df_m["Efficiency_Factor"] = df_m["Efficiency_Factor"].replace(0.0, 1.0)
+    df_m["kWh_adj"] = df_m["kWh"] / df_m["Efficiency_Factor"]
+
+    onsite_enduses = set(get_onsite_generation_enduses(df_m["End_Use"].unique()))
+    pv_mask = df_m["End_Use"].isin(onsite_enduses)
+    if pv_mask.any():
+        pv_apply_scale = bool(pv_cfg.get("enabled", False))
+        pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
+        scale = pv_scale if pv_apply_scale else 1.0
+        df_m.loc[pv_mask, "kWh_adj"] = -df_m.loc[pv_mask, "kWh_adj"].abs() * float(scale)
+
+    df_m.loc[~pv_mask, "kWh_adj"] = df_m.loc[~pv_mask, "kWh_adj"].clip(lower=0.0)
+    df_m["Energy_Source"] = df_m["End_Use"].map(lambda u: str(mapping.get(u, "Electricity"))).fillna("Electricity")
+    df_m.loc[~df_m["Energy_Source"].isin(ENERGY_SOURCE_ORDER), "Energy_Source"] = "Electricity"
+    if pv_mask.any():
+        df_m.loc[pv_mask, "Energy_Source"] = "Electricity"
+
+    annual_kwh_by_source = df_m.groupby("Energy_Source", as_index=True)["kWh_adj"].sum()
+    if "Electricity" in annual_kwh_by_source.index:
+        annual_kwh_by_source.loc["Electricity"] = max(float(annual_kwh_by_source.loc["Electricity"]), 0.0)
+
+    base_factors = {
+        "Electricity": _to_float_lcc(factors.get("Electricity", 0.0), 0.0),
+        "Green Electricity": 0.0,
+        "Gas": _to_float_lcc(factors.get("Gas", 0.0), 0.0),
+        "District Heating": _to_float_lcc(factors.get("District Heating", 0.0), 0.0),
+        "District Cooling": _to_float_lcc(factors.get("District Cooling", 0.0), 0.0),
+        "Biomass": _to_float_lcc(factors.get("Biomass", 0.0), 0.0),
+    }
+
+    emissions_base_kg = 0.0
+    for src, kwh in annual_kwh_by_source.items():
+        if str(src) == "Green Electricity":
+            continue
+        emissions_base_kg += float(kwh) * float(base_factors.get(str(src), 0.0))
+
+    # Fallback: if CRREM data is unavailable, keep emissions flat instead of failing the chart.
+    try:
+        ef_grid = (crrem or {}).get("ef_grid")
+        if ef_grid is not None and isinstance(ef_grid, pd.Series) and not ef_grid.empty:
+            multipliers = compute_decarb_multiplier(ef_grid, int(project_year), years_i)
+        else:
+            multipliers = pd.Series({int(y): 1.0 for y in years_i}, dtype=float)
+    except Exception:
+        multipliers = pd.Series({int(y): 1.0 for y in years_i}, dtype=float)
+
+    return pd.Series({int(y): (float(emissions_base_kg) * float(multipliers.loc[int(y)])) / 1000.0 for y in years_i}, dtype=float)
 
 def find_stranding_year(asset: pd.Series, limit: pd.Series) -> Optional[int]:
     """First year where asset exceeds limit (strictly >)."""
@@ -5912,20 +6001,144 @@ with tab7:
                             f"Cumulative Discounted LCC ({_curr})": float(_cum_discounted_sc.iloc[-1]) if len(_cum_discounted_sc) else 0.0,
                         })
 
+                    # CRREM baseline/reference line for the annual and cumulative emissions comparison.
+                    # Scenario lines use the same decarbonization multiplier used in the CRREM tab.
+                    crrem_baseline_x_cmp = []
+                    crrem_baseline_annual_y_cmp = []
+                    crrem_baseline_cumulative_y_cmp = []
+                    _crrem_cmp = None
+                    try:
+                        _crrem_cmp = load_crrem_dataset(st.session_state.get("project_country", "Germany"))
+                        if _crrem_cmp is not None and _area and float(_area) > 0:
+                            _target_label_cmp = str(st.session_state.get("crrem_target_select", "1.5°C"))
+                            _target_id_cmp = "1.5C" if _target_label_cmp.startswith("1.5") else "2C"
+
+                            _pt_df_cmp = _crrem_cmp.get("property_types", pd.DataFrame()).copy()
+                            _use_options_cmp = _pt_df_cmp["app_use"].dropna().astype(str).tolist() if "app_use" in _pt_df_cmp.columns else []
+
+                            # Prefer the currently active CRREM use-type. Fallback to the active scenario payload, then Office.
+                            _crrem_use_cmp = str(st.session_state.get("crrem_use_type", "") or "")
+                            if _crrem_use_cmp not in _use_options_cmp:
+                                try:
+                                    _active_sc_cmp = str(st.session_state.get("active_scenario", ""))
+                                    _crrem_use_cmp = str((scenarios.get(_active_sc_cmp, {}) or {}).get("crrem_use_type", _crrem_use_cmp) or _crrem_use_cmp)
+                                except Exception:
+                                    pass
+                            if _crrem_use_cmp not in _use_options_cmp:
+                                _crrem_use_cmp = "Office" if "Office" in _use_options_cmp else (_use_options_cmp[0] if _use_options_cmp else "")
+
+                            _pc_cmp = _crrem_cmp.get("pathways_carbon", pd.DataFrame()).copy()
+                            if (not _pc_cmp.empty) and {"target", "year", "property_type_code", "kgco2e_per_m2_yr"}.issubset(_pc_cmp.columns):
+                                _pc_t_cmp = _pc_cmp.loc[_pc_cmp["target"].astype(str) == _target_id_cmp]
+                                _carbon_pivot_cmp = _pc_t_cmp.pivot_table(
+                                    index="year",
+                                    columns="property_type_code",
+                                    values="kgco2e_per_m2_yr",
+                                )
+                                _years_crrem_cmp = [int(y) for y in lcc_years_cmp if int(y) in _carbon_pivot_cmp.index]
+
+                                _carbon_limit_cmp = pd.Series(dtype=float)
+                                if _years_crrem_cmp and _crrem_use_cmp and _crrem_use_cmp != "Mixed Use":
+                                    _code_row_cmp = _pt_df_cmp.loc[_pt_df_cmp["app_use"].astype(str) == str(_crrem_use_cmp)]
+                                    if not _code_row_cmp.empty:
+                                        _p_code_cmp = str(_code_row_cmp.iloc[0]["crrem_code"])
+                                        if _p_code_cmp in _carbon_pivot_cmp.columns:
+                                            _carbon_limit_cmp = _carbon_pivot_cmp[_p_code_cmp].reindex(_years_crrem_cmp).astype(float)
+
+                                elif _years_crrem_cmp and _crrem_use_cmp == "Mixed Use":
+                                    # Reuse the current mixed-use definition where available.
+                                    _mixed_df_cmp = st.session_state.get("crrem_mixed_use_df")
+                                    if not isinstance(_mixed_df_cmp, pd.DataFrame) or _mixed_df_cmp.empty:
+                                        try:
+                                            _active_sc_cmp = str(st.session_state.get("active_scenario", ""))
+                                            _mixed_df_cmp = _mixed_use_records_to_df((scenarios.get(_active_sc_cmp, {}) or {}).get("crrem_mixed_use", []))
+                                        except Exception:
+                                            _mixed_df_cmp = pd.DataFrame()
+
+                                    _components_cmp = []
+                                    try:
+                                        for _, _r_cmp in _mixed_df_cmp.iterrows():
+                                            _u_cmp = str(_r_cmp.get("Use Type", "")).strip()
+                                            _share_cmp = float(_r_cmp.get("Area Share %", 0.0) or 0.0)
+                                            if _u_cmp and _share_cmp > 0:
+                                                _components_cmp.append((_u_cmp, _share_cmp))
+                                    except Exception:
+                                        _components_cmp = []
+
+                                    if _components_cmp:
+                                        _tot_share_cmp = sum(_w_cmp for _, _w_cmp in _components_cmp)
+                                        _use_to_code_cmp = dict(zip(_pt_df_cmp["app_use"].astype(str), _pt_df_cmp["crrem_code"].astype(str)))
+                                        _carbon_limit_cmp = pd.Series(0.0, index=_years_crrem_cmp, dtype=float)
+                                        for _u_cmp, _w_cmp in _components_cmp:
+                                            _code_cmp = _use_to_code_cmp.get(str(_u_cmp))
+                                            if _code_cmp and _code_cmp in _carbon_pivot_cmp.columns and _tot_share_cmp > 0:
+                                                _carbon_limit_cmp = _carbon_limit_cmp + (float(_w_cmp) / float(_tot_share_cmp)) * _carbon_pivot_cmp[_code_cmp].reindex(_years_crrem_cmp).astype(float)
+
+                                if _carbon_limit_cmp is not None and not _carbon_limit_cmp.empty:
+                                    _annual_crrem_limit_t_cmp = (_carbon_limit_cmp.astype(float) * float(_area)) / 1000.0
+                                    crrem_baseline_x_cmp = list(_annual_crrem_limit_t_cmp.index.astype(int))
+                                    crrem_baseline_annual_y_cmp = _annual_crrem_limit_t_cmp.values.tolist()
+                                    crrem_baseline_cumulative_y_cmp = _annual_crrem_limit_t_cmp.cumsum().values.tolist()
+                    except Exception:
+                        crrem_baseline_x_cmp = []
+                        crrem_baseline_annual_y_cmp = []
+                        crrem_baseline_cumulative_y_cmp = []
+
+                    fig_emis_annual_cmp = go.Figure()
                     fig_emis_cum_cmp = go.Figure()
+                    if crrem_baseline_x_cmp and crrem_baseline_annual_y_cmp:
+                        fig_emis_annual_cmp.add_trace(go.Scatter(
+                            x=crrem_baseline_x_cmp,
+                            y=crrem_baseline_annual_y_cmp,
+                            mode="lines+markers",
+                            name="CRREM-Baseline",
+                            line=dict(color=CRREM_COLOR_LIMIT, width=5, dash="dash"),
+                            marker=dict(color=CRREM_COLOR_LIMIT, size=9),
+                        ))
+                    if crrem_baseline_x_cmp and crrem_baseline_cumulative_y_cmp:
+                        fig_emis_cum_cmp.add_trace(go.Scatter(
+                            x=crrem_baseline_x_cmp,
+                            y=crrem_baseline_cumulative_y_cmp,
+                            mode="lines+markers",
+                            name="CRREM-Baseline",
+                            line=dict(color=CRREM_COLOR_LIMIT, width=5, dash="dash"),
+                            marker=dict(color=CRREM_COLOR_LIMIT, size=9),
+                        ))
+
                     emissions_summary_rows = []
+                    emissions_annual_rows = []
                     for _idx_sc, _sc_name in enumerate(scenario_order):
                         _color_sc = scenario_color_map.get(_sc_name, SCENARIO_COLOR_PALETTE[_idx_sc % len(SCENARIO_COLOR_PALETTE)])
+                        _payload_sc = scenarios.get(_sc_name, {}) or {}
                         try:
-                            _annual_emissions_t = float(
-                                df_cmp.loc[df_cmp["Scenario"].astype(str) == str(_sc_name), "Net CO2 (t/a)"].iloc[0]
+                            _df_energy_em_sc = get_energy_balance_df(
+                                uploaded_file.getvalue(),
+                                uploaded_file.name,
+                                scenario_name=str(_sc_name),
                             )
+                            _annual_emissions_series_t = compute_crrem_like_scenario_emissions_series(
+                                _df_energy_em_sc,
+                                _payload_sc,
+                                _crrem_cmp,
+                                project_year_lcc_cmp,
+                                lcc_years_cmp,
+                            ).reindex(lcc_years_cmp).fillna(0.0)
                         except Exception:
-                            _annual_emissions_t = 0.0
-                        _cum_emissions_t = np.cumsum([_annual_emissions_t for _ in lcc_years_cmp])
+                            _annual_emissions_series_t = pd.Series({int(y): 0.0 for y in lcc_years_cmp}, dtype=float)
+
+                        _cum_emissions_series_t = _annual_emissions_series_t.cumsum()
+
+                        fig_emis_annual_cmp.add_trace(go.Scatter(
+                            x=lcc_years_cmp,
+                            y=_annual_emissions_series_t.values,
+                            mode="lines+markers",
+                            name=str(_sc_name),
+                            line=dict(color=_color_sc, width=4),
+                            marker=dict(color=_color_sc, size=8),
+                        ))
                         fig_emis_cum_cmp.add_trace(go.Scatter(
                             x=lcc_years_cmp,
-                            y=_cum_emissions_t,
+                            y=_cum_emissions_series_t.values,
                             mode="lines+markers",
                             name=str(_sc_name),
                             line=dict(color=_color_sc, width=4),
@@ -5933,9 +6146,17 @@ with tab7:
                         ))
                         emissions_summary_rows.append({
                             "Scenario": _sc_name,
-                            "Annual Net CO₂ (t/a)": _annual_emissions_t,
-                            "Cumulative Net CO₂ (t)": float(_cum_emissions_t[-1]) if len(_cum_emissions_t) else 0.0,
+                            "Annual Net CO₂ first year (t/a)": float(_annual_emissions_series_t.iloc[0]) if len(_annual_emissions_series_t) else 0.0,
+                            "Annual Net CO₂ final year (t/a)": float(_annual_emissions_series_t.iloc[-1]) if len(_annual_emissions_series_t) else 0.0,
+                            "Cumulative Net CO₂ (t)": float(_cum_emissions_series_t.iloc[-1]) if len(_cum_emissions_series_t) else 0.0,
                         })
+                        for _y_cmp, _v_cmp in _annual_emissions_series_t.items():
+                            emissions_annual_rows.append({
+                                "Scenario": _sc_name,
+                                "Year": int(_y_cmp),
+                                "Annual Net CO₂ (t/a)": float(_v_cmp),
+                                "Cumulative Net CO₂ (t)": float(_cum_emissions_series_t.loc[_y_cmp]),
+                            })
 
                     lc1, lc2 = st.columns(2)
                     with lc1:
@@ -5970,6 +6191,21 @@ with tab7:
                         else:
                             st.info("No emissions data available for cumulative comparison.")
 
+                    st.subheader("Annual Emissions")
+                    if fig_emis_annual_cmp.data:
+                        fig_emis_annual_cmp.update_layout(
+                            height=560,
+                            xaxis_title="Year",
+                            yaxis_title="Annual net emissions (tCO₂e/a)",
+                            legend_title_text="Scenario",
+                            legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
+                            margin=dict(l=40, r=20, t=50, b=120),
+                        )
+                        fig_emis_annual_cmp.update_yaxes(rangemode="tozero")
+                        st_plotly_chart(fig_emis_annual_cmp, use_container_width=True, key="scenario_emissions_annual_all")
+                    else:
+                        st.info("No emissions data available for annual comparison.")
+
                     show_life_cycle_data = st.checkbox(
                         "Show Life Cycle comparison data tables",
                         value=False,
@@ -5982,6 +6218,9 @@ with tab7:
                         if emissions_summary_rows:
                             st.write("#### Cumulative emissions summary")
                             st.dataframe(pd.DataFrame(emissions_summary_rows), use_container_width=True)
+                        if emissions_annual_rows:
+                            st.write("#### Annual emissions by scenario and year")
+                            st.dataframe(pd.DataFrame(emissions_annual_rows), use_container_width=True)
 
 
     if not uploaded_file:
