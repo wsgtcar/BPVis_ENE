@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.2",
+    page_title="WSGT_BPVis_ENE 1.4.3",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.2")
+st.sidebar.write("Version 1.4.3")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -475,6 +475,8 @@ SHEET_MAPPING = "EndUse_to_Source"
 SHEET_EFFICIENCY = "Efficiency_Factors"
 SHEET_SCENARIOS = "Scenarios"
 SHEET_COLORS = "Color_Settings"
+SHEET_LCC_GLOBAL = "LCC_Global"
+SHEET_LCC_INVESTMENTS = "LCC_Investments"
 
 
 def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame]]:
@@ -489,6 +491,8 @@ def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame
         "efficiency": sheets.get(SHEET_EFFICIENCY),
         "scenarios": sheets.get(SHEET_SCENARIOS),
         "colors": sheets.get(SHEET_COLORS),
+        "lcc_global": sheets.get(SHEET_LCC_GLOBAL),
+        "lcc_investments": sheets.get(SHEET_LCC_INVESTMENTS),
         "all_sheets": sheets,  # keep to preserve everything when writing back
     }
 
@@ -1193,6 +1197,9 @@ def _get_lcc_global_state_payload(end_uses: list) -> dict:
     global payload or safe defaults.
     """
     if st.session_state.get("_lcc_global_initialized"):
+        if not isinstance(st.session_state.get(LCC_GLOBAL_STATE_KEY), dict):
+            st.session_state[LCC_GLOBAL_STATE_KEY] = _default_lcc_global_payload(end_uses)
+        _sync_lcc_global_widget_state(end_uses)
         payload = _capture_lcc_global_from_widgets(end_uses)
         st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(payload)
         return payload
@@ -1268,8 +1275,9 @@ def _load_lcc_global_into_widgets(lcc_global_payload: dict, end_uses: list) -> N
 
 
 def _ensure_lcc_global_state(end_uses: list, scenarios: Optional[dict] = None, active_payload: Optional[dict] = None) -> None:
-    """Initialize global LCC state once. Do not reload it when scenarios switch."""
+    """Initialize global LCC state once and keep widget keys alive across scenario switches."""
     if st.session_state.get("_lcc_global_initialized"):
+        _sync_lcc_global_widget_state(end_uses)
         return
 
     source = None
@@ -1318,6 +1326,177 @@ def _apply_lcc_global_to_all_scenarios(end_uses: list) -> None:
         st.session_state["scenarios"] = scenarios
     except Exception:
         pass
+
+
+def _sync_lcc_global_widget_state(end_uses: list) -> None:
+    """Keep global LCC widget keys populated from the persisted global payload.
+
+    This prevents Streamlit from recreating the Analysis Period widget at its minimum
+    value after a scenario switch, which would otherwise shrink the LCC charts to one year.
+    """
+    saved = st.session_state.get(LCC_GLOBAL_STATE_KEY)
+    if not isinstance(saved, dict):
+        saved = _get_lcc_global_state_payload(end_uses)
+    lcc_global = _normalize_lcc_global_payload(saved, end_uses)
+
+    if "lcc_analysis_period" not in st.session_state:
+        st.session_state["lcc_analysis_period"] = int(lcc_global.get("analysis_period", 30))
+    else:
+        st.session_state["lcc_analysis_period"] = max(1, _to_int_lcc(st.session_state.get("lcc_analysis_period"), int(lcc_global.get("analysis_period", 30))))
+
+    for key, payload_key, default_val in [
+        ("lcc_interest_rate_pct", "interest_rate_pct", 4.0),
+        ("lcc_capex_inflation_pct", "capex_inflation_pct", 2.0),
+    ]:
+        if key not in st.session_state:
+            val = float(lcc_global.get(payload_key, default_val))
+            st.session_state[key] = val
+            st.session_state[f"{key}_txt"] = f"{val:.4f}"
+        elif f"{key}_txt" not in st.session_state:
+            st.session_state[f"{key}_txt"] = f"{_to_float_lcc(st.session_state.get(key), default_val):.4f}"
+
+    energy_inf = lcc_global.get("energy_inflation_pct", {}) or {}
+    for src in ENERGY_SOURCE_ORDER:
+        key = f"lcc_energy_inflation_pct_{_safe_state_key(src)}"
+        if key not in st.session_state:
+            val = float(energy_inf.get(src, 2.0))
+            st.session_state[key] = val
+            st.session_state[f"{key}_txt"] = f"{val:.4f}"
+        elif f"{key}_txt" not in st.session_state:
+            st.session_state[f"{key}_txt"] = f"{_to_float_lcc(st.session_state.get(key), 2.0):.4f}"
+
+    valid = [str(u) for u in end_uses]
+    selected = st.session_state.get("lcc_selected_operational_end_uses", lcc_global.get("selected_operational_end_uses"))
+    if not isinstance(selected, list):
+        selected = lcc_global.get("selected_operational_end_uses", _lcc_default_selected_enduses(valid))
+    selected = [_canon_enduse_name(str(u)) for u in selected if _canon_enduse_name(str(u)) in set(valid)]
+    if not selected:
+        selected = _lcc_default_selected_enduses(valid)
+    st.session_state["lcc_selected_operational_end_uses"] = selected
+
+    if "lcc_payback_reference_scenario" not in st.session_state:
+        st.session_state["lcc_payback_reference_scenario"] = str(lcc_global.get("payback_reference_scenario", "") or "")
+
+    st.session_state[LCC_GLOBAL_STATE_KEY] = _capture_lcc_global_from_widgets(valid)
+
+
+def parse_lcc_global_df(df: Optional[pd.DataFrame], end_uses: list) -> Optional[dict]:
+    """Parse the human-readable LCC_Global sheet into the global LCC payload."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    if not {"Key", "Value"}.issubset(df.columns):
+        return None
+
+    kv = dict(zip(df["Key"].astype(str), df["Value"]))
+    energy_inf = {}
+    for src in ENERGY_SOURCE_ORDER:
+        for key in [f"Energy_Inflation_{src}", f"Energy Inflation {src}", f"{src} Inflation"]:
+            if key in kv:
+                energy_inf[src] = _to_float_lcc(kv.get(key), 2.0)
+                break
+
+    selected_raw = kv.get("Selected_Operational_End_Uses", kv.get("Selected Operational End Uses", ""))
+    if isinstance(selected_raw, str):
+        selected = _lcc_parse_assigned_enduses(selected_raw, end_uses=end_uses)
+    elif isinstance(selected_raw, list):
+        selected = _lcc_parse_assigned_enduses(selected_raw, end_uses=end_uses)
+    else:
+        selected = _lcc_default_selected_enduses(end_uses)
+
+    payload = {
+        "analysis_period": _to_int_lcc(kv.get("Analysis_Period", kv.get("Analysis Period")), 30),
+        "interest_rate_pct": _to_float_lcc(kv.get("Interest_Rate_Pct", kv.get("Interest Rate (%)")), 4.0),
+        "capex_inflation_pct": _to_float_lcc(kv.get("CAPEX_Inflation_Pct", kv.get("CAPEX Inflation (%)")), 2.0),
+        "energy_inflation_pct": energy_inf,
+        "selected_operational_end_uses": selected,
+        "payback_reference_scenario": str(kv.get("Payback_Reference_Scenario", kv.get("Payback Reference Scenario", "")) or ""),
+    }
+    return _normalize_lcc_global_payload(payload, end_uses)
+
+
+def build_lcc_global_df(lcc_global: dict, end_uses: list) -> pd.DataFrame:
+    """Build the human-readable LCC_Global sheet from the current global LCC payload."""
+    payload = _normalize_lcc_global_payload(lcc_global, end_uses)
+    rows = [
+        {"Key": "Analysis_Period", "Value": int(payload.get("analysis_period", 30))},
+        {"Key": "Interest_Rate_Pct", "Value": float(payload.get("interest_rate_pct", 4.0))},
+        {"Key": "CAPEX_Inflation_Pct", "Value": float(payload.get("capex_inflation_pct", 2.0))},
+        {"Key": "Selected_Operational_End_Uses", "Value": ", ".join(payload.get("selected_operational_end_uses", []))},
+        {"Key": "Payback_Reference_Scenario", "Value": str(payload.get("payback_reference_scenario", "") or "")},
+    ]
+    energy_inf = payload.get("energy_inflation_pct", {}) or {}
+    for src in ENERGY_SOURCE_ORDER:
+        rows.append({"Key": f"Energy_Inflation_{src}", "Value": float(energy_inf.get(src, 2.0))})
+    return pd.DataFrame(rows)
+
+
+def parse_lcc_investments_sheet(df: Optional[pd.DataFrame], end_uses: list) -> Dict[str, list]:
+    """Parse the human-readable LCC_Investments sheet into scenario -> records."""
+    out: Dict[str, list] = {}
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or "Scenario" not in df.columns:
+        return out
+    work = df.copy()
+    if "Assigned End Uses" not in work.columns and "Assigned End Use" in work.columns:
+        work["Assigned End Uses"] = work["Assigned End Use"]
+    for sc_name, group in work.groupby(work["Scenario"].astype(str)):
+        if not str(sc_name).strip():
+            continue
+        inv_df = _lcc_investments_records_to_df(group.drop(columns=["Scenario"], errors="ignore"), end_uses=end_uses)
+        out[str(sc_name)] = _lcc_investments_df_to_records(inv_df)
+    return out
+
+
+def build_lcc_investments_sheet(scenarios: Dict[str, dict], end_uses: list) -> pd.DataFrame:
+    """Build the human-readable LCC_Investments sheet from scenario payloads."""
+    rows = []
+    if not isinstance(scenarios, dict):
+        return pd.DataFrame(columns=["Scenario"] + LCC_INVESTMENT_COLUMNS)
+    for sc_name, payload in scenarios.items():
+        lcc = _normalize_lcc_payload((payload or {}).get("lcc", {}), end_uses)
+        inv_df = _lcc_investments_records_to_df(lcc.get("investments", []), end_uses=end_uses)
+        for _, r in inv_df.iterrows():
+            row = {"Scenario": str(sc_name)}
+            for col in LCC_INVESTMENT_COLUMNS:
+                row[col] = r.get(col, "")
+            rows.append(row)
+    return pd.DataFrame(rows, columns=["Scenario"] + LCC_INVESTMENT_COLUMNS)
+
+
+def merge_lcc_sheets_into_scenarios(
+        scenarios: Dict[str, dict],
+        lcc_global_df: Optional[pd.DataFrame],
+        lcc_investments_df: Optional[pd.DataFrame],
+        end_uses: list,
+) -> Dict[str, dict]:
+    """Merge dedicated LCC sheets into scenario payloads after loading a workbook.
+
+    Dedicated sheets override the JSON payload when present, while the JSON payload remains
+    supported for backwards compatibility.
+    """
+    if not isinstance(scenarios, dict):
+        scenarios = {}
+
+    global_payload = parse_lcc_global_df(lcc_global_df, end_uses)
+    investments_by_scenario = parse_lcc_investments_sheet(lcc_investments_df, end_uses)
+
+    if investments_by_scenario:
+        for sc_name in investments_by_scenario.keys():
+            if sc_name not in scenarios:
+                scenarios[sc_name] = default_scenario_payload(end_uses, None)
+
+    for sc_name, payload in list(scenarios.items()):
+        if not isinstance(payload, dict):
+            payload = default_scenario_payload(end_uses, None)
+        payload["lcc"] = _normalize_lcc_payload(payload.get("lcc", {}), end_uses)
+        if sc_name in investments_by_scenario:
+            payload["lcc"] = {"investments": investments_by_scenario.get(sc_name, [])}
+        if global_payload is not None:
+            payload["lcc_global"] = deepcopy(global_payload)
+        else:
+            payload["lcc_global"] = _normalize_lcc_global_payload(payload.get("lcc_global", payload.get("lcc", {})), end_uses)
+        scenarios[sc_name] = payload
+
+    return scenarios
 
 
 def _lcc_energy_rows_for_payload(df_energy: pd.DataFrame, payload: dict, selected_end_uses: list) -> pd.DataFrame:
@@ -1922,6 +2101,8 @@ def write_config_to_excel(original_bytes: bytes,
                           efficiency_df: pd.DataFrame,
                           scenarios_df: Optional[pd.DataFrame] = None,
                           colors_df: Optional[pd.DataFrame] = None,
+                          lcc_global_df: Optional[pd.DataFrame] = None,
+                          lcc_investments_df: Optional[pd.DataFrame] = None,
                           energy_balance_df: Optional[pd.DataFrame] = None,
                           loads_balance_df: Optional[pd.DataFrame] = None) -> bytes:
     """Return a new workbook (bytes) with all original sheets + updated config sheets."""
@@ -1938,6 +2119,10 @@ def write_config_to_excel(original_bytes: bytes,
         sheets[SHEET_SCENARIOS] = scenarios_df
     if colors_df is not None:
         sheets[SHEET_COLORS] = colors_df
+    if lcc_global_df is not None:
+        sheets[SHEET_LCC_GLOBAL] = lcc_global_df
+    if lcc_investments_df is not None:
+        sheets[SHEET_LCC_INVESTMENTS] = lcc_investments_df
 
 
     # overwrite raw data sheets if provided
@@ -2201,6 +2386,8 @@ if uploaded_file:
         "colors_sources": saved_colors_sources,
         "colors_loads": saved_colors_loads,
         "scenarios_df": cfg_saved.get("scenarios"),
+        "lcc_global_df": cfg_saved.get("lcc_global"),
+        "lcc_investments_df": cfg_saved.get("lcc_investments"),
         "file_bytes": file_bytes,
     }
 
@@ -2338,11 +2525,24 @@ with tab1:
                 preloaded.get("scenarios_df") if preloaded else None
             )
             if scenarios_from_file:
+                scenarios_from_file = merge_lcc_sheets_into_scenarios(
+                    scenarios_from_file,
+                    preloaded.get("lcc_global_df") if preloaded else None,
+                    preloaded.get("lcc_investments_df") if preloaded else None,
+                    end_uses,
+                )
                 st.session_state["scenarios"] = scenarios_from_file
                 st.session_state["active_scenario"] = active_from_file or list(scenarios_from_file.keys())[0]
             else:
-                st.session_state["scenarios"] = {"Base": default_scenario_payload(end_uses, preloaded)}
-                st.session_state["active_scenario"] = "Base"
+                base_payload = default_scenario_payload(end_uses, preloaded)
+                scenarios_from_file = merge_lcc_sheets_into_scenarios(
+                    {"Base": base_payload},
+                    preloaded.get("lcc_global_df") if preloaded else None,
+                    preloaded.get("lcc_investments_df") if preloaded else None,
+                    end_uses,
+                )
+                st.session_state["scenarios"] = scenarios_from_file
+                st.session_state["active_scenario"] = "Base" if "Base" in scenarios_from_file else list(scenarios_from_file.keys())[0]
             st.session_state["_prev_active_scenario"] = st.session_state["active_scenario"]
             load_scenario_into_widgets(st.session_state["scenarios"][st.session_state["active_scenario"]], end_uses)
 
@@ -2770,11 +2970,27 @@ with tab1:
 
                 # Scenarios sheet (stores all scenarios; active scenario marked)
                 scenarios_df = None
+                lcc_global_df = None
+                lcc_investments_df = None
                 if "scenarios" in st.session_state:
+                    # Keep global LCC parameters and scenario-specific LCC investments synchronized before export.
+                    try:
+                        if st.session_state.get("_lcc_global_initialized"):
+                            _sync_lcc_global_widget_state(end_uses)
+                        _apply_lcc_global_to_all_scenarios(end_uses)
+                    except Exception:
+                        pass
+
                     scenarios_df = build_scenarios_sheet(
                         st.session_state.get("scenarios", {}),
                         st.session_state.get("active_scenario")
                     )
+                    try:
+                        lcc_global_df = build_lcc_global_df(_get_lcc_global_state_payload(end_uses), end_uses)
+                        lcc_investments_df = build_lcc_investments_sheet(st.session_state.get("scenarios", {}), end_uses)
+                    except Exception:
+                        lcc_global_df = None
+                        lcc_investments_df = None
 
                 colors_df = build_color_settings_df(
                     st.session_state.get("color_map_enduse", DEFAULT_COLOR_MAP),
@@ -2791,6 +3007,8 @@ with tab1:
                     efficiency_df,
                     scenarios_df=scenarios_df,
                     colors_df=colors_df,
+                    lcc_global_df=lcc_global_df,
+                    lcc_investments_df=lcc_investments_df,
                     energy_balance_df=st.session_state.get(_RAW_ENERGY_KEY),
                     loads_balance_df=st.session_state.get(_RAW_LOADS_KEY),
                 )
