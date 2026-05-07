@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.5",
+    page_title="WSGT_BPVis_ENE 1.4.6",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.5")
+st.sidebar.write("Version 1.4.6")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -940,6 +940,8 @@ LCC_COST_TYPE_COLORS = {
 # Global LCC assumptions are stored once in session state and then duplicated into
 # each scenario payload only for workbook persistence/backwards compatibility.
 LCC_GLOBAL_STATE_KEY = "lcc_global_payload"
+LCC_GLOBAL_DRAFT_PREFIX = "lcc_draft_"
+
 
 
 def _safe_state_key(text: str) -> str:
@@ -1166,48 +1168,108 @@ def _lcc_investments_df_to_records(df) -> list:
     return records
 
 
-def _capture_lcc_global_from_widgets(end_uses: list) -> dict:
-    """Capture LCC assumptions that apply equally to all scenarios."""
+def _lcc_global_draft_key(name: str) -> str:
+    """Return the session-state key used for uncommitted/global LCC form values."""
+    return f"{LCC_GLOBAL_DRAFT_PREFIX}{name}"
+
+
+def _lcc_energy_inflation_draft_key(src: str) -> str:
+    return _lcc_global_draft_key(f"energy_inflation_pct_{_safe_state_key(src)}")
+
+
+def _seed_lcc_global_draft_from_payload(lcc_global_payload: dict, end_uses: list, force: bool = False) -> None:
+    """Seed the global LCC form draft keys from a committed payload.
+
+    The draft keys are widget-bound inside the LCC form. This function is called before
+    those widgets are rendered. When force=False, existing draft values are preserved so
+    scenario switching cannot reset unsubmitted LCC edits.
+    """
+    valid = [str(u) for u in end_uses]
+    lcc_global = _normalize_lcc_global_payload(lcc_global_payload, valid)
+
+    key = _lcc_global_draft_key("analysis_period")
+    if force or key not in st.session_state:
+        st.session_state[key] = int(lcc_global.get("analysis_period", 30))
+
+    for short_key, payload_key, default_val in [
+        ("interest_rate_pct", "interest_rate_pct", 4.0),
+        ("capex_inflation_pct", "capex_inflation_pct", 2.0),
+    ]:
+        key = _lcc_global_draft_key(short_key)
+        if force or key not in st.session_state:
+            val = float(lcc_global.get(payload_key, default_val))
+            st.session_state[key] = val
+            st.session_state[f"{key}_txt"] = f"{val:.4f}"
+        elif f"{key}_txt" not in st.session_state:
+            st.session_state[f"{key}_txt"] = f"{_to_float_lcc(st.session_state.get(key), default_val):.4f}"
+
+    energy_inf = lcc_global.get("energy_inflation_pct", {}) or {}
+    for src in ENERGY_SOURCE_ORDER:
+        key = _lcc_energy_inflation_draft_key(src)
+        if force or key not in st.session_state:
+            val = float(energy_inf.get(src, 2.0))
+            st.session_state[key] = val
+            st.session_state[f"{key}_txt"] = f"{val:.4f}"
+        elif f"{key}_txt" not in st.session_state:
+            st.session_state[f"{key}_txt"] = f"{_to_float_lcc(st.session_state.get(key), 2.0):.4f}"
+
+    selected_key = _lcc_global_draft_key("selected_operational_end_uses")
+    if force or selected_key not in st.session_state:
+        selected = lcc_global.get("selected_operational_end_uses", _lcc_default_selected_enduses(valid))
+        selected = [_canon_enduse_name(str(u)) for u in selected if _canon_enduse_name(str(u)) in set(valid)]
+        st.session_state[selected_key] = selected or _lcc_default_selected_enduses(valid)
+    else:
+        # Keep existing draft filter, but remove end uses that no longer exist in the uploaded data.
+        selected = st.session_state.get(selected_key, [])
+        if not isinstance(selected, list):
+            selected = []
+        selected = [_canon_enduse_name(str(u)) for u in selected if _canon_enduse_name(str(u)) in set(valid)]
+        if not selected:
+            selected = _lcc_default_selected_enduses(valid)
+        st.session_state[selected_key] = selected
+
+    ref_key = _lcc_global_draft_key("payback_reference_scenario")
+    if force or ref_key not in st.session_state:
+        st.session_state[ref_key] = str(lcc_global.get("payback_reference_scenario", "") or "")
+
+
+def _capture_lcc_global_from_draft_widgets(end_uses: list) -> dict:
+    """Capture the LCC global form draft values. Used only when the user submits the LCC form."""
     defaults = _default_lcc_global_payload(end_uses)
-    selected = st.session_state.get("lcc_selected_operational_end_uses", defaults["selected_operational_end_uses"])
+    selected = st.session_state.get(_lcc_global_draft_key("selected_operational_end_uses"), defaults["selected_operational_end_uses"])
     if not isinstance(selected, list):
         selected = defaults["selected_operational_end_uses"]
 
-    return {
-        "analysis_period": max(1, _to_int_lcc(st.session_state.get("lcc_analysis_period", defaults["analysis_period"]), defaults["analysis_period"])),
-        "interest_rate_pct": _to_float_lcc(st.session_state.get("lcc_interest_rate_pct", defaults["interest_rate_pct"]), defaults["interest_rate_pct"]),
-        "capex_inflation_pct": _to_float_lcc(st.session_state.get("lcc_capex_inflation_pct", defaults["capex_inflation_pct"]), defaults["capex_inflation_pct"]),
+    payload = {
+        "analysis_period": max(1, _to_int_lcc(st.session_state.get(_lcc_global_draft_key("analysis_period"), defaults["analysis_period"]), defaults["analysis_period"])),
+        "interest_rate_pct": _to_float_lcc(st.session_state.get(_lcc_global_draft_key("interest_rate_pct"), defaults["interest_rate_pct"]), defaults["interest_rate_pct"]),
+        "capex_inflation_pct": _to_float_lcc(st.session_state.get(_lcc_global_draft_key("capex_inflation_pct"), defaults["capex_inflation_pct"]), defaults["capex_inflation_pct"]),
         "energy_inflation_pct": {
             src: _to_float_lcc(
-                st.session_state.get(f"lcc_energy_inflation_pct_{_safe_state_key(src)}", defaults["energy_inflation_pct"].get(src, 2.0)),
+                st.session_state.get(_lcc_energy_inflation_draft_key(src), defaults["energy_inflation_pct"].get(src, 2.0)),
                 defaults["energy_inflation_pct"].get(src, 2.0),
             )
             for src in ENERGY_SOURCE_ORDER
         },
         "selected_operational_end_uses": [_canon_enduse_name(str(u)) for u in selected if str(u).strip()],
-        "payback_reference_scenario": str(st.session_state.get("lcc_payback_reference_scenario", "") or ""),
+        "payback_reference_scenario": str(st.session_state.get(_lcc_global_draft_key("payback_reference_scenario"), "") or ""),
     }
+    return _normalize_lcc_global_payload(payload, end_uses)
+
+
+def _capture_lcc_global_from_widgets(end_uses: list) -> dict:
+    """Backward-compatible alias for older internal calls. Captures the LCC form draft."""
+    return _capture_lcc_global_from_draft_widgets(end_uses)
 
 
 def _get_lcc_global_state_payload(end_uses: list) -> dict:
-    """Return the single global LCC payload used for every scenario calculation.
+    """Return the committed global LCC payload used for every scenario calculation.
 
-    Important Streamlit rule:
-    Once a widget with a given key has been instantiated in the current run, the app
-    must not assign to that same key in ``st.session_state`` later in the run. This
-    getter therefore only reads widget keys and writes the consolidated payload to the
-    non-widget global payload key.
+    This function deliberately does not read the live/draft form widget keys. Draft values
+    become active only when the user clicks the LCC update button.
     """
-    if st.session_state.get("_lcc_global_initialized"):
-        payload = _normalize_lcc_global_payload(_capture_lcc_global_from_widgets(end_uses), end_uses)
-        st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(payload)
-        return payload
-
     saved = st.session_state.get(LCC_GLOBAL_STATE_KEY)
 
-    # Before the LCC tab initializes its widgets, prefer a saved global payload from the
-    # workbook/scenario store instead of falling back to defaults. This avoids overwriting
-    # global assumptions during ordinary scenario captures in other tabs.
     if not isinstance(saved, dict):
         scenarios = st.session_state.get("scenarios", {})
         active_name = st.session_state.get("active_scenario")
@@ -1221,7 +1283,6 @@ def _get_lcc_global_state_payload(end_uses: list) -> dict:
                         saved = payload_i.get("lcc_global")
                         break
             if not isinstance(saved, dict):
-                # Backwards compatibility with v1.4.0 where global fields could be inside `lcc`.
                 for payload_i in scenarios.values():
                     if isinstance(payload_i, dict) and isinstance(payload_i.get("lcc"), dict):
                         lcc_i = payload_i.get("lcc")
@@ -1229,12 +1290,7 @@ def _get_lcc_global_state_payload(end_uses: list) -> dict:
                             saved = lcc_i
                             break
 
-    if isinstance(saved, dict):
-        payload = _normalize_lcc_global_payload(saved, end_uses)
-        st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(payload)
-        return payload
-
-    payload = _default_lcc_global_payload(end_uses)
+    payload = _normalize_lcc_global_payload(saved, end_uses) if isinstance(saved, dict) else _default_lcc_global_payload(end_uses)
     st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(payload)
     return payload
 
@@ -1249,44 +1305,26 @@ def _capture_lcc_from_widgets(end_uses: list) -> dict:
 
 
 def _load_lcc_global_into_widgets(lcc_global_payload: dict, end_uses: list) -> None:
-    """Seed global LCC assumption widgets from a global/backwards-compatible payload."""
+    """Initialize committed global LCC state and seed the draft form keys."""
     lcc_global = _normalize_lcc_global_payload(lcc_global_payload, end_uses)
-
-    st.session_state["lcc_analysis_period"] = int(lcc_global.get("analysis_period", 30))
-    st.session_state["lcc_interest_rate_pct"] = float(lcc_global.get("interest_rate_pct", 4.0))
-    st.session_state["lcc_interest_rate_pct_txt"] = f"{float(lcc_global.get('interest_rate_pct', 4.0)):.4f}"
-    st.session_state["lcc_capex_inflation_pct"] = float(lcc_global.get("capex_inflation_pct", 2.0))
-    st.session_state["lcc_capex_inflation_pct_txt"] = f"{float(lcc_global.get('capex_inflation_pct', 2.0)):.4f}"
-
-    energy_inf = lcc_global.get("energy_inflation_pct", {}) or {}
-    for src in ENERGY_SOURCE_ORDER:
-        key = f"lcc_energy_inflation_pct_{_safe_state_key(src)}"
-        val = float(energy_inf.get(src, 2.0))
-        st.session_state[key] = val
-        st.session_state[f"{key}_txt"] = f"{val:.4f}"
-
-    st.session_state["lcc_selected_operational_end_uses"] = list(
-        lcc_global.get("selected_operational_end_uses", _lcc_default_selected_enduses(end_uses))
-    )
-    st.session_state["lcc_payback_reference_scenario"] = str(lcc_global.get("payback_reference_scenario", "") or "")
     st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(lcc_global)
     st.session_state["_lcc_global_initialized"] = True
+    _seed_lcc_global_draft_from_payload(lcc_global, end_uses, force=True)
 
 
 def _ensure_lcc_global_state(end_uses: list, scenarios: Optional[dict] = None, active_payload: Optional[dict] = None) -> None:
-    """Initialize global LCC state once and keep widget keys alive across scenario switches."""
-    if st.session_state.get("_lcc_global_initialized"):
-        _sync_lcc_global_widget_state(end_uses)
+    """Initialize committed global LCC state once and preserve draft keys across scenario switches."""
+    if st.session_state.get("_lcc_global_initialized") and isinstance(st.session_state.get(LCC_GLOBAL_STATE_KEY), dict):
+        committed = _get_lcc_global_state_payload(end_uses)
+        _seed_lcc_global_draft_from_payload(committed, end_uses, force=False)
         return
 
     source = None
-    # Preferred new location.
     if isinstance(active_payload, dict) and isinstance(active_payload.get("lcc_global"), dict):
         source = active_payload.get("lcc_global")
-    # Backwards compatibility: old LCC global fields lived inside the active scenario's lcc payload.
     elif isinstance(active_payload, dict) and isinstance(active_payload.get("lcc"), dict):
         source = active_payload.get("lcc")
-    # Fallback: first scenario that contains a saved global payload.
+
     if source is None and isinstance(scenarios, dict):
         for payload in scenarios.values():
             if isinstance(payload, dict) and isinstance(payload.get("lcc_global"), dict):
@@ -1310,7 +1348,7 @@ def _load_lcc_into_widgets(payload: dict, end_uses: list) -> None:
 
 
 def _apply_lcc_global_to_all_scenarios(end_uses: list) -> None:
-    """Persist the current global LCC assumptions into every scenario payload for workbook save/load."""
+    """Persist the committed global LCC assumptions into every scenario payload for workbook save/load."""
     try:
         scenarios = st.session_state.get("scenarios", {})
         if not isinstance(scenarios, dict):
@@ -1328,52 +1366,13 @@ def _apply_lcc_global_to_all_scenarios(end_uses: list) -> None:
 
 
 def _sync_lcc_global_widget_state(end_uses: list) -> None:
-    """Seed missing global LCC widget keys without mutating existing widget keys.
+    """Keep global LCC draft keys valid without committing them.
 
-    Streamlit forbids assigning to a widget-bound key after that widget has been
-    instantiated in the current run. For that reason this function only creates keys
-    that are still missing. Existing widget values are treated as the source of truth
-    and are consolidated into ``LCC_GLOBAL_STATE_KEY``.
+    This is used before export and scenario captures. The committed global payload remains
+    the single source of truth until the user submits the LCC form.
     """
-    valid = [str(u) for u in end_uses]
-    saved = st.session_state.get(LCC_GLOBAL_STATE_KEY)
-    if not isinstance(saved, dict):
-        saved = _default_lcc_global_payload(valid)
-    lcc_global = _normalize_lcc_global_payload(saved, valid)
-
-    if "lcc_analysis_period" not in st.session_state:
-        st.session_state["lcc_analysis_period"] = int(lcc_global.get("analysis_period", 30))
-
-    for key, payload_key, default_val in [
-        ("lcc_interest_rate_pct", "interest_rate_pct", 4.0),
-        ("lcc_capex_inflation_pct", "capex_inflation_pct", 2.0),
-    ]:
-        if key not in st.session_state:
-            val = float(lcc_global.get(payload_key, default_val))
-            st.session_state[key] = val
-            st.session_state[f"{key}_txt"] = f"{val:.4f}"
-        elif f"{key}_txt" not in st.session_state:
-            st.session_state[f"{key}_txt"] = f"{_to_float_lcc(st.session_state.get(key), default_val):.4f}"
-
-    energy_inf = lcc_global.get("energy_inflation_pct", {}) or {}
-    for src in ENERGY_SOURCE_ORDER:
-        key = f"lcc_energy_inflation_pct_{_safe_state_key(src)}"
-        if key not in st.session_state:
-            val = float(energy_inf.get(src, 2.0))
-            st.session_state[key] = val
-            st.session_state[f"{key}_txt"] = f"{val:.4f}"
-        elif f"{key}_txt" not in st.session_state:
-            st.session_state[f"{key}_txt"] = f"{_to_float_lcc(st.session_state.get(key), 2.0):.4f}"
-
-    if "lcc_selected_operational_end_uses" not in st.session_state:
-        selected = lcc_global.get("selected_operational_end_uses", _lcc_default_selected_enduses(valid))
-        selected = [_canon_enduse_name(str(u)) for u in selected if _canon_enduse_name(str(u)) in set(valid)]
-        st.session_state["lcc_selected_operational_end_uses"] = selected or _lcc_default_selected_enduses(valid)
-
-    if "lcc_payback_reference_scenario" not in st.session_state:
-        st.session_state["lcc_payback_reference_scenario"] = str(lcc_global.get("payback_reference_scenario", "") or "")
-
-    st.session_state[LCC_GLOBAL_STATE_KEY] = _normalize_lcc_global_payload(_capture_lcc_global_from_widgets(valid), valid)
+    committed = _get_lcc_global_state_payload(end_uses)
+    _seed_lcc_global_draft_from_payload(committed, end_uses, force=False)
 
 
 def parse_lcc_global_df(df: Optional[pd.DataFrame], end_uses: list) -> Optional[dict]:
@@ -4444,17 +4443,10 @@ with tab_lcc:
         if "lcc_investments_df" not in st.session_state or not isinstance(st.session_state.get("lcc_investments_df"), pd.DataFrame):
             _load_lcc_into_widgets(active_payload_lcc, end_uses_lcc)
 
-        # Keep selected operational end uses valid after raw data changes.
-        selected_lcc = st.session_state.get("lcc_selected_operational_end_uses", _lcc_default_selected_enduses(valid_enduses_lcc))
-        if not isinstance(selected_lcc, list):
-            selected_lcc = _lcc_default_selected_enduses(valid_enduses_lcc)
-        selected_lcc = [_canon_enduse_name(str(u)) for u in selected_lcc if _canon_enduse_name(str(u)) in valid_enduses_lcc]
-        if not selected_lcc:
-            selected_lcc = _lcc_default_selected_enduses(valid_enduses_lcc)
-        st.session_state["lcc_selected_operational_end_uses"] = selected_lcc
-        # Keep the global LCC payload synchronized before any scenario/reference calculation.
-        st.session_state[LCC_GLOBAL_STATE_KEY] = _capture_lcc_global_from_widgets(valid_enduses_lcc)
-        _apply_lcc_global_to_all_scenarios(valid_enduses_lcc)
+        # Global LCC parameters use a draft/commit pattern. They are not pushed into calculations
+        # or scenarios until the user clicks the LCC update button.
+        lcc_global_committed = _get_lcc_global_state_payload(valid_enduses_lcc)
+        _seed_lcc_global_draft_from_payload(lcc_global_committed, valid_enduses_lcc, force=False)
         scenarios_lcc = st.session_state.get("scenarios", {}) or {}
         active_payload_lcc = scenarios_lcc.get(active_selected, active_payload_lcc)
 
@@ -4468,7 +4460,8 @@ with tab_lcc:
             # Scenario reference options for discounted payback.
             scenario_names_lcc = list(scenarios_lcc.keys()) if scenarios_lcc else [active_selected]
             ref_options_lcc = [""] + [s for s in scenario_names_lcc if s != active_selected]
-            ref_default_lcc = st.session_state.get("lcc_payback_reference_scenario", "")
+            ref_key_lcc = _lcc_global_draft_key("payback_reference_scenario")
+            ref_default_lcc = st.session_state.get(ref_key_lcc, lcc_global_committed.get("payback_reference_scenario", ""))
             if ref_default_lcc not in ref_options_lcc:
                 if "Base" in ref_options_lcc and "Base" != active_selected:
                     ref_default_lcc = "Base"
@@ -4476,7 +4469,8 @@ with tab_lcc:
                     ref_default_lcc = ref_options_lcc[1]
                 else:
                     ref_default_lcc = ""
-                st.session_state["lcc_payback_reference_scenario"] = ref_default_lcc
+                # Safe here: this happens before the selectbox is instantiated in this run.
+                st.session_state[ref_key_lcc] = ref_default_lcc
 
             # Draft editor state mirrors the committed scenario-specific LCC investment table.
             if "lcc_investments_draft_df" not in st.session_state or not isinstance(st.session_state.get("lcc_investments_draft_df"), pd.DataFrame):
@@ -4489,91 +4483,91 @@ with tab_lcc:
                 st.success("LCC inputs updated. Global LCC parameters were applied to all scenarios; investment measures were applied to the active scenario.")
                 del st.session_state["_lcc_flash"]
 
-            # Global LCC parameters are intentionally outside the form so they behave as true
-            # global app state. This is important for the Operational End Uses filter: it must
-            # update immediately and must not be re-seeded from the active scenario when scenarios switch.
-            st.write("### Global LCC parameters")
-            p1, p2, p3 = st.columns(3)
-            with p1:
-                st.number_input(
-                    "Analysis Period (years)",
-                    min_value=1,
-                    max_value=100,
-                    step=1,
-                    format="%d",
-                    key="lcc_analysis_period",
-                )
-            with p2:
-                numeric_input(
-                    "Interest Rate / Discount Rate (%)",
-                    float(st.session_state.get("lcc_interest_rate_pct", 4.0)),
-                    key="lcc_interest_rate_pct",
-                    min_value=-100.0,
-                    max_value=100.0,
-                    fmt="{:.4f}",
-                )
-            with p3:
-                numeric_input(
-                    "CAPEX / O&M Inflation Rate (%)",
-                    float(st.session_state.get("lcc_capex_inflation_pct", 2.0)),
-                    key="lcc_capex_inflation_pct",
-                    min_value=-100.0,
-                    max_value=100.0,
-                    fmt="{:.4f}",
-                )
+            st.write("### LCC inputs")
+            st.caption(
+                "Global parameters are shared by all scenarios. Investment measures remain scenario-specific. "
+                "Values in this expander are drafts until `Update LCC Inputs` is clicked, so charts do not recalculate on every edit."
+            )
 
-            st.write("### Energy inflation rate by source")
-            inf_cols = st.columns(3)
-            for i, src in enumerate(ENERGY_SOURCE_ORDER):
-                with inf_cols[i % 3]:
-                    src_key = f"lcc_energy_inflation_pct_{_safe_state_key(src)}"
+            with st.form("lcc_analysis_form", clear_on_submit=False):
+                st.write("### Global LCC parameters")
+                p1, p2, p3 = st.columns(3)
+                with p1:
+                    st.number_input(
+                        "Analysis Period (years)",
+                        min_value=1,
+                        max_value=100,
+                        step=1,
+                        format="%d",
+                        key=_lcc_global_draft_key("analysis_period"),
+                    )
+                with p2:
                     numeric_input(
-                        f"{src} Inflation (%)",
-                        float(st.session_state.get(src_key, 2.0)),
-                        key=src_key,
+                        "Interest Rate / Discount Rate (%)",
+                        float(st.session_state.get(_lcc_global_draft_key("interest_rate_pct"), 4.0)),
+                        key=_lcc_global_draft_key("interest_rate_pct"),
+                        min_value=-100.0,
+                        max_value=100.0,
+                        fmt="{:.4f}",
+                    )
+                with p3:
+                    numeric_input(
+                        "CAPEX / O&M Inflation Rate (%)",
+                        float(st.session_state.get(_lcc_global_draft_key("capex_inflation_pct"), 2.0)),
+                        key=_lcc_global_draft_key("capex_inflation_pct"),
                         min_value=-100.0,
                         max_value=100.0,
                         fmt="{:.4f}",
                     )
 
-            st.write("### Operational cost filter")
-            st.multiselect(
-                "Operational End Uses included in LCC energy cost",
-                options=valid_enduses_lcc,
-                default=st.session_state.get("lcc_selected_operational_end_uses", _lcc_default_selected_enduses(valid_enduses_lcc)),
-                format_func=ui_name,
-                key="lcc_selected_operational_end_uses",
-                help="Only the selected End Uses are included in the operational energy-cost part of the LCC analysis.",
-            )
+                st.write("### Energy inflation rate by source")
+                inf_cols = st.columns(3)
+                for i, src in enumerate(ENERGY_SOURCE_ORDER):
+                    with inf_cols[i % 3]:
+                        src_key = _lcc_energy_inflation_draft_key(src)
+                        numeric_input(
+                            f"{src} Inflation (%)",
+                            float(st.session_state.get(src_key, 2.0)),
+                            key=src_key,
+                            min_value=-100.0,
+                            max_value=100.0,
+                            fmt="{:.4f}",
+                        )
 
-            ref_display_options = ref_options_lcc
-            st.selectbox(
-                "Discounted Payback Reference Scenario",
-                options=ref_display_options,
-                index=ref_display_options.index(st.session_state.get("lcc_payback_reference_scenario", "")) if st.session_state.get("lcc_payback_reference_scenario", "") in ref_display_options else 0,
-                format_func=lambda x: "None" if str(x) == "" else str(x),
-                key="lcc_payback_reference_scenario",
-                help="Discounted payback is calculated against this reference scenario using discounted incremental cash flows.",
-            )
+                st.write("### Operational cost filter")
+                st.multiselect(
+                    "Operational End Uses included in LCC energy cost",
+                    options=valid_enduses_lcc,
+                    default=st.session_state.get(_lcc_global_draft_key("selected_operational_end_uses"), _lcc_default_selected_enduses(valid_enduses_lcc)),
+                    format_func=ui_name,
+                    key=_lcc_global_draft_key("selected_operational_end_uses"),
+                    help="Only the selected End Uses are included in the operational energy-cost part of the LCC analysis.",
+                )
 
-            # Persist global LCC assumptions immediately after the global widgets are rendered.
-            # Do not wait for the investment-table form submit; otherwise the filter can appear
-            # to reset after scenario switching because forms only commit on submit.
-            try:
-                st.session_state[LCC_GLOBAL_STATE_KEY] = _capture_lcc_global_from_widgets(valid_enduses_lcc)
-                _apply_lcc_global_to_all_scenarios(valid_enduses_lcc)
-            except Exception:
-                pass
+                st.selectbox(
+                    "Discounted Payback Reference Scenario",
+                    options=ref_options_lcc,
+                    index=ref_options_lcc.index(st.session_state.get(ref_key_lcc, "")) if st.session_state.get(ref_key_lcc, "") in ref_options_lcc else 0,
+                    format_func=lambda x: "None" if str(x) == "" else str(x),
+                    key=ref_key_lcc,
+                    help="Discounted payback is calculated against this reference scenario using discounted incremental cash flows.",
+                )
 
-            st.write("### Investment, maintenance and replacement assumptions")
-            st.caption(
-                "Replacement cost is not entered separately. It is calculated as the initial investment cost escalated by the CAPEX/O&M inflation rate up to each replacement year. "
-                "For measures that affect several uses, enter multiple Assigned End Uses separated by commas (example: Heating, Cooling). "
-                "The measure cost is allocated equally across the assigned End Uses. "
-                "Submit the form only when the investment table is changed."
-            )
+                st.write("### Investment, maintenance and replacement assumptions")
+                st.caption(
+                    "Replacement cost is not entered separately. It is calculated as the initial investment cost escalated by the CAPEX/O&M inflation rate up to each replacement year. "
+                    "For measures that affect several uses, enter multiple Assigned End Uses separated by commas (example: Heating, Cooling). "
+                    "The measure cost is allocated equally across the assigned End Uses."
+                )
 
-            with st.form("lcc_analysis_form", clear_on_submit=False):
+                draft_analysis_period_for_editor = max(
+                    1,
+                    _to_int_lcc(
+                        st.session_state.get(_lcc_global_draft_key("analysis_period"), lcc_global_committed.get("analysis_period", 30)),
+                        int(lcc_global_committed.get("analysis_period", 30)),
+                    ),
+                )
+
                 editor_kwargs_lcc = {
                     "num_rows": "dynamic",
                     "use_container_width": True,
@@ -4590,7 +4584,7 @@ with tab_lcc:
                         "Investment Year": st.column_config.NumberColumn(
                             "Investment Year",
                             min_value=int(project_year_lcc),
-                            max_value=int(project_year_lcc + max(1, int(st.session_state.get("lcc_analysis_period", 30))) - 1),
+                            max_value=int(project_year_lcc + draft_analysis_period_for_editor - 1),
                             step=1,
                             format="%d",
                             required=True,
@@ -4625,18 +4619,24 @@ with tab_lcc:
                     **editor_kwargs_lcc,
                 )
 
-                apply_lcc_inputs = st.form_submit_button("Update LCC Investment Measures", use_container_width=False)
+                apply_lcc_inputs = st.form_submit_button("Update LCC Inputs", use_container_width=False)
 
             if apply_lcc_inputs:
                 committed_lcc_df = _lcc_investments_records_to_df(edited_lcc_investments, end_uses=valid_enduses_lcc)
                 st.session_state["lcc_investments_df"] = committed_lcc_df
                 st.session_state["lcc_investments_draft_df"] = committed_lcc_df.copy(deep=True)
 
+                # Commit global LCC draft values only on submit. Until this point, charts and
+                # scenario payloads continue using the previous committed global assumptions.
+                committed_lcc_global = _capture_lcc_global_from_draft_widgets(valid_enduses_lcc)
+                st.session_state[LCC_GLOBAL_STATE_KEY] = deepcopy(committed_lcc_global)
+                st.session_state["_lcc_global_initialized"] = True
+
                 try:
                     if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
                         _act_lcc = st.session_state.get("active_scenario")
                         st.session_state["scenarios"][_act_lcc]["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
-                        st.session_state[LCC_GLOBAL_STATE_KEY] = _capture_lcc_global_from_widgets(valid_enduses_lcc)
+                        st.session_state["scenarios"][_act_lcc]["lcc_global"] = deepcopy(committed_lcc_global)
                         _apply_lcc_global_to_all_scenarios(valid_enduses_lcc)
                 except Exception:
                     pass
