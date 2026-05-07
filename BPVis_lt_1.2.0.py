@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.0",
+    page_title="WSGT_BPVis_ENE 1.4.1",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.0")
+st.sidebar.write("Version 1.4.1")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -719,9 +719,21 @@ def _canon_scenario_payload(payload: dict) -> dict:
         investments = lcc.get("investments")
         if isinstance(investments, list):
             for rec in investments:
-                if isinstance(rec, dict) and "Assigned End Use" in rec:
-                    rec["Assigned End Use"] = _canon_enduse_name(str(rec.get("Assigned End Use", "")))
+                if isinstance(rec, dict):
+                    if "Assigned End Uses" in rec:
+                        vals = re.split(r"[,;|/\n]+", str(rec.get("Assigned End Uses", "")))
+                        rec["Assigned End Uses"] = ", ".join([_canon_enduse_name(str(x).strip()) for x in vals if str(x).strip()])
+                    elif "Assigned End Use" in rec:
+                        rec["Assigned End Uses"] = _canon_enduse_name(str(rec.get("Assigned End Use", "")))
+                        rec.pop("Assigned End Use", None)
         payload["lcc"] = lcc
+
+    lcc_global = payload.get("lcc_global")
+    if isinstance(lcc_global, dict):
+        selected = lcc_global.get("selected_operational_end_uses")
+        if isinstance(selected, list):
+            lcc_global["selected_operational_end_uses"] = [_canon_enduse_name(str(x)) for x in selected if str(x).strip()]
+        payload["lcc_global"] = lcc_global
 
     return payload
 
@@ -907,7 +919,7 @@ def _mixed_use_records_to_df(records) -> pd.DataFrame:
 # =========================
 LCC_INVESTMENT_COLUMNS = [
     "Measure Name",
-    "Assigned End Use",
+    "Assigned End Uses",
     "Investment Year",
     "Investment Cost",
     "Annual Maintenance Cost (%)",
@@ -963,8 +975,8 @@ def _lcc_default_selected_enduses(end_uses: list) -> list:
         return [str(u) for u in end_uses]
 
 
-def _default_lcc_payload(end_uses: list) -> dict:
-    """Default scenario-specific LCC configuration."""
+def _default_lcc_global_payload(end_uses: list) -> dict:
+    """Default LCC assumptions that apply equally to all scenarios."""
     return {
         "analysis_period": 30,
         "interest_rate_pct": 4.0,
@@ -972,22 +984,32 @@ def _default_lcc_payload(end_uses: list) -> dict:
         "energy_inflation_pct": {src: 2.0 for src in ENERGY_SOURCE_ORDER},
         "selected_operational_end_uses": _lcc_default_selected_enduses(end_uses),
         "payback_reference_scenario": "",
+    }
+
+
+def _default_lcc_payload(end_uses: list) -> dict:
+    """Default scenario-specific LCC configuration. Only investment measures are scenario-specific."""
+    return {
         "investments": [],
     }
 
 
-def _normalize_lcc_payload(lcc_payload, end_uses: list) -> dict:
-    """Merge saved LCC payload with defaults and sanitize references to current end uses."""
-    defaults = _default_lcc_payload(end_uses)
-    if not isinstance(lcc_payload, dict):
+def _normalize_lcc_global_payload(lcc_global_payload, end_uses: list) -> dict:
+    """Merge saved global LCC assumptions with defaults and sanitize references to current end uses.
+
+    Backwards compatible: this also accepts the old scenario-specific `lcc` payload shape and extracts
+    the global settings from it.
+    """
+    defaults = _default_lcc_global_payload(end_uses)
+    if not isinstance(lcc_global_payload, dict):
         return defaults
 
     out = deepcopy(defaults)
-    out["analysis_period"] = max(1, _to_int_lcc(lcc_payload.get("analysis_period"), defaults["analysis_period"]))
-    out["interest_rate_pct"] = _to_float_lcc(lcc_payload.get("interest_rate_pct"), defaults["interest_rate_pct"])
-    out["capex_inflation_pct"] = _to_float_lcc(lcc_payload.get("capex_inflation_pct"), defaults["capex_inflation_pct"])
+    out["analysis_period"] = max(1, _to_int_lcc(lcc_global_payload.get("analysis_period"), defaults["analysis_period"]))
+    out["interest_rate_pct"] = _to_float_lcc(lcc_global_payload.get("interest_rate_pct"), defaults["interest_rate_pct"])
+    out["capex_inflation_pct"] = _to_float_lcc(lcc_global_payload.get("capex_inflation_pct"), defaults["capex_inflation_pct"])
 
-    energy_inf = lcc_payload.get("energy_inflation_pct", {})
+    energy_inf = lcc_global_payload.get("energy_inflation_pct", {})
     if not isinstance(energy_inf, dict):
         energy_inf = {}
     out["energy_inflation_pct"] = {
@@ -995,17 +1017,78 @@ def _normalize_lcc_payload(lcc_payload, end_uses: list) -> dict:
         for src in ENERGY_SOURCE_ORDER
     }
 
-    selected = lcc_payload.get("selected_operational_end_uses", defaults["selected_operational_end_uses"])
+    selected = lcc_global_payload.get("selected_operational_end_uses", defaults["selected_operational_end_uses"])
     if not isinstance(selected, list):
         selected = defaults["selected_operational_end_uses"]
     enduse_set = {str(u) for u in end_uses}
-    selected = [_canon_enduse_name(str(u)) for u in selected]
+    selected = [_canon_enduse_name(str(u)) for u in selected if str(u).strip()]
     selected = [u for u in selected if u in enduse_set]
     out["selected_operational_end_uses"] = selected if selected else defaults["selected_operational_end_uses"]
 
-    out["payback_reference_scenario"] = str(lcc_payload.get("payback_reference_scenario", "") or "")
-    out["investments"] = _lcc_investments_df_to_records(_lcc_investments_records_to_df(lcc_payload.get("investments", []), end_uses))
+    out["payback_reference_scenario"] = str(lcc_global_payload.get("payback_reference_scenario", "") or "")
     return out
+
+
+def _normalize_lcc_payload(lcc_payload, end_uses: list) -> dict:
+    """Merge saved scenario-specific LCC payload with defaults.
+
+    Global assumptions are intentionally ignored here and handled by `_normalize_lcc_global_payload`,
+    so switching scenarios cannot overwrite global LCC parameters.
+    """
+    defaults = _default_lcc_payload(end_uses)
+    if not isinstance(lcc_payload, dict):
+        return defaults
+
+    out = deepcopy(defaults)
+    out["investments"] = _lcc_investments_df_to_records(
+        _lcc_investments_records_to_df(lcc_payload.get("investments", []), end_uses=end_uses)
+    )
+    return out
+
+
+def _lcc_parse_assigned_enduses(value, end_uses: Optional[list] = None) -> list:
+    """Parse one or multiple assigned end uses from a text/list cell.
+
+    The data editor uses a text field because Streamlit does not reliably provide a per-cell multiselect
+    column across versions. Accepted separators: comma, semicolon, pipe, slash, or newline.
+    """
+    valid = [str(u) for u in (end_uses or [])]
+    valid_set = set(valid)
+
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw = "" if value is None else str(value)
+        # Support legacy single end-use strings and user-entered multi-use strings.
+        raw_items = re.split(r"[,;|/\n]+", raw)
+
+    out = []
+    for item in raw_items:
+        item_s = _canon_enduse_name(str(item).strip())
+        if not item_s:
+            continue
+        # Exact match first, then case-insensitive match to make manual typing more forgiving.
+        if valid_set and item_s not in valid_set:
+            match = next((v for v in valid if v.lower() == item_s.lower()), None)
+            if not match:
+                match = next((v for v in valid if ui_name(v).lower() == item_s.replace("_", " ").lower()), None)
+            if match:
+                item_s = match
+            else:
+                continue
+        if item_s not in out:
+            out.append(item_s)
+
+    if not out and valid:
+        defaults = _lcc_default_selected_enduses(valid)
+        out = [defaults[0]] if defaults else [valid[0]]
+    return out
+
+
+def _lcc_format_assigned_enduses(value, end_uses: Optional[list] = None) -> str:
+    """Return assigned end uses as a stable comma-separated string for the data editor."""
+    parsed = _lcc_parse_assigned_enduses(value, end_uses=end_uses)
+    return ", ".join(parsed)
 
 
 def _lcc_investments_records_to_df(records, end_uses: Optional[list] = None) -> pd.DataFrame:
@@ -1020,19 +1103,22 @@ def _lcc_investments_records_to_df(records, end_uses: Optional[list] = None) -> 
     except Exception:
         df = pd.DataFrame(columns=LCC_INVESTMENT_COLUMNS)
 
+    # Backwards compatibility for v1.4.0 payloads with singular Assigned End Use.
+    if "Assigned End Uses" not in df.columns and "Assigned End Use" in df.columns:
+        df["Assigned End Uses"] = df["Assigned End Use"]
+
     for c in LCC_INVESTMENT_COLUMNS:
         if c not in df.columns:
             df[c] = None
     df = df[LCC_INVESTMENT_COLUMNS].copy()
 
-    # Canonicalize assigned end-use names and fill blanks with a sensible default.
-    default_enduse = None
-    if end_uses:
-        default_candidates = _lcc_default_selected_enduses(end_uses)
-        default_enduse = default_candidates[0] if default_candidates else str(end_uses[0])
+    default_enduses = _lcc_default_selected_enduses(end_uses or []) if end_uses else []
+    default_assigned = default_enduses[0] if default_enduses else ((end_uses or [""])[0] if end_uses else "")
 
     df["Measure Name"] = df["Measure Name"].fillna("").astype(str)
-    df["Assigned End Use"] = df["Assigned End Use"].apply(lambda x: _canon_enduse_name(str(x).strip()) if x is not None and str(x).strip() else default_enduse)
+    df["Assigned End Uses"] = df["Assigned End Uses"].apply(
+        lambda x: _lcc_format_assigned_enduses(x if x is not None and str(x).strip() else default_assigned, end_uses=end_uses)
+    )
     df["Investment Year"] = df["Investment Year"].apply(lambda x: _to_int_lcc(x, 0))
     df["Investment Cost"] = df["Investment Cost"].apply(lambda x: _to_float_lcc(x, 0.0))
     df["Annual Maintenance Cost (%)"] = df["Annual Maintenance Cost (%)"].apply(lambda x: _to_float_lcc(x, 0.0))
@@ -1054,14 +1140,14 @@ def _lcc_investments_df_to_records(df) -> list:
     try:
         for _, r in df.iterrows():
             name = str(r.get("Measure Name", "")).strip()
-            assigned = _canon_enduse_name(str(r.get("Assigned End Use", "")).strip())
+            assigned = _lcc_format_assigned_enduses(r.get("Assigned End Uses", ""))
             inv_cost = _to_float_lcc(r.get("Investment Cost"), 0.0)
             maint_pct = _to_float_lcc(r.get("Annual Maintenance Cost (%)"), 0.0)
             if not name and inv_cost == 0.0 and maint_pct == 0.0:
                 continue
             records.append({
                 "Measure Name": name,
-                "Assigned End Use": assigned,
+                "Assigned End Uses": assigned,
                 "Investment Year": _to_int_lcc(r.get("Investment Year"), 0),
                 "Investment Cost": inv_cost,
                 "Annual Maintenance Cost (%)": maint_pct,
@@ -1072,9 +1158,9 @@ def _lcc_investments_df_to_records(df) -> list:
     return records
 
 
-def _capture_lcc_from_widgets(end_uses: list) -> dict:
-    """Capture current LCC widget state into the active scenario payload."""
-    defaults = _default_lcc_payload(end_uses)
+def _capture_lcc_global_from_widgets(end_uses: list) -> dict:
+    """Capture LCC assumptions that apply equally to all scenarios."""
+    defaults = _default_lcc_global_payload(end_uses)
     selected = st.session_state.get("lcc_selected_operational_end_uses", defaults["selected_operational_end_uses"])
     if not isinstance(selected, list):
         selected = defaults["selected_operational_end_uses"]
@@ -1092,33 +1178,93 @@ def _capture_lcc_from_widgets(end_uses: list) -> dict:
         },
         "selected_operational_end_uses": [_canon_enduse_name(str(u)) for u in selected if str(u).strip()],
         "payback_reference_scenario": str(st.session_state.get("lcc_payback_reference_scenario", "") or ""),
-        "investments": _lcc_investments_df_to_records(st.session_state.get("lcc_investments_df", pd.DataFrame(columns=LCC_INVESTMENT_COLUMNS))),
     }
 
 
-def _load_lcc_into_widgets(payload: dict, end_uses: list) -> None:
-    """Seed LCC Streamlit state from a scenario payload."""
-    lcc = _normalize_lcc_payload((payload or {}).get("lcc", {}), end_uses)
+def _capture_lcc_from_widgets(end_uses: list) -> dict:
+    """Capture current scenario-specific LCC investment assumptions."""
+    return {
+        "investments": _lcc_investments_df_to_records(
+            st.session_state.get("lcc_investments_df", pd.DataFrame(columns=LCC_INVESTMENT_COLUMNS))
+        ),
+    }
 
-    st.session_state["lcc_analysis_period"] = int(lcc.get("analysis_period", 30))
-    st.session_state["lcc_interest_rate_pct"] = float(lcc.get("interest_rate_pct", 4.0))
-    st.session_state["lcc_interest_rate_pct_txt"] = f"{float(lcc.get('interest_rate_pct', 4.0)):.4f}"
-    st.session_state["lcc_capex_inflation_pct"] = float(lcc.get("capex_inflation_pct", 2.0))
-    st.session_state["lcc_capex_inflation_pct_txt"] = f"{float(lcc.get('capex_inflation_pct', 2.0)):.4f}"
 
-    energy_inf = lcc.get("energy_inflation_pct", {}) or {}
+def _load_lcc_global_into_widgets(lcc_global_payload: dict, end_uses: list) -> None:
+    """Seed global LCC assumption widgets from a global/backwards-compatible payload."""
+    lcc_global = _normalize_lcc_global_payload(lcc_global_payload, end_uses)
+
+    st.session_state["lcc_analysis_period"] = int(lcc_global.get("analysis_period", 30))
+    st.session_state["lcc_interest_rate_pct"] = float(lcc_global.get("interest_rate_pct", 4.0))
+    st.session_state["lcc_interest_rate_pct_txt"] = f"{float(lcc_global.get('interest_rate_pct', 4.0)):.4f}"
+    st.session_state["lcc_capex_inflation_pct"] = float(lcc_global.get("capex_inflation_pct", 2.0))
+    st.session_state["lcc_capex_inflation_pct_txt"] = f"{float(lcc_global.get('capex_inflation_pct', 2.0)):.4f}"
+
+    energy_inf = lcc_global.get("energy_inflation_pct", {}) or {}
     for src in ENERGY_SOURCE_ORDER:
         key = f"lcc_energy_inflation_pct_{_safe_state_key(src)}"
         val = float(energy_inf.get(src, 2.0))
         st.session_state[key] = val
         st.session_state[f"{key}_txt"] = f"{val:.4f}"
 
-    st.session_state["lcc_selected_operational_end_uses"] = list(lcc.get("selected_operational_end_uses", _lcc_default_selected_enduses(end_uses)))
-    st.session_state["lcc_payback_reference_scenario"] = str(lcc.get("payback_reference_scenario", "") or "")
+    st.session_state["lcc_selected_operational_end_uses"] = list(
+        lcc_global.get("selected_operational_end_uses", _lcc_default_selected_enduses(end_uses))
+    )
+    st.session_state["lcc_payback_reference_scenario"] = str(lcc_global.get("payback_reference_scenario", "") or "")
+    st.session_state["_lcc_global_initialized"] = True
 
+
+def _ensure_lcc_global_state(end_uses: list, scenarios: Optional[dict] = None, active_payload: Optional[dict] = None) -> None:
+    """Initialize global LCC state once. Do not reload it when scenarios switch."""
+    if st.session_state.get("_lcc_global_initialized"):
+        return
+
+    source = None
+    # Preferred new location.
+    if isinstance(active_payload, dict) and isinstance(active_payload.get("lcc_global"), dict):
+        source = active_payload.get("lcc_global")
+    # Backwards compatibility: old LCC global fields lived inside the active scenario's lcc payload.
+    elif isinstance(active_payload, dict) and isinstance(active_payload.get("lcc"), dict):
+        source = active_payload.get("lcc")
+    # Fallback: first scenario that contains a saved global payload.
+    if source is None and isinstance(scenarios, dict):
+        for payload in scenarios.values():
+            if isinstance(payload, dict) and isinstance(payload.get("lcc_global"), dict):
+                source = payload.get("lcc_global")
+                break
+        if source is None:
+            for payload in scenarios.values():
+                if isinstance(payload, dict) and isinstance(payload.get("lcc"), dict):
+                    source = payload.get("lcc")
+                    break
+
+    _load_lcc_global_into_widgets(source or _default_lcc_global_payload(end_uses), end_uses)
+
+
+def _load_lcc_into_widgets(payload: dict, end_uses: list) -> None:
+    """Seed scenario-specific LCC investment state from a scenario payload."""
+    lcc = _normalize_lcc_payload((payload or {}).get("lcc", {}), end_uses)
     inv_df = _lcc_investments_records_to_df(lcc.get("investments", []), end_uses=end_uses)
     st.session_state["lcc_investments_df"] = inv_df
     st.session_state["lcc_investments_draft_df"] = inv_df.copy(deep=True)
+
+
+def _apply_lcc_global_to_all_scenarios(end_uses: list) -> None:
+    """Persist the current global LCC assumptions into every scenario payload for workbook save/load."""
+    try:
+        scenarios = st.session_state.get("scenarios", {})
+        if not isinstance(scenarios, dict):
+            return
+        lcc_global = _capture_lcc_global_from_widgets(end_uses)
+        for name, payload in list(scenarios.items()):
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["lcc_global"] = deepcopy(lcc_global)
+            payload["lcc"] = _normalize_lcc_payload(payload.get("lcc", {}), end_uses)
+            scenarios[name] = payload
+        st.session_state["scenarios"] = scenarios
+    except Exception:
+        pass
 
 
 def _lcc_energy_rows_for_payload(df_energy: pd.DataFrame, payload: dict, selected_end_uses: list) -> pd.DataFrame:
@@ -1165,17 +1311,25 @@ def compute_lcc_cashflow_table(
         payload: dict,
         end_uses: list,
         project_year: int,
+        lcc_global: Optional[dict] = None,
 ) -> pd.DataFrame:
-    """Compute annual nominal and discounted LCC cash-flow rows for one scenario."""
+    """Compute annual nominal and discounted LCC cash-flow rows for one scenario.
+
+    Scenario payload controls scenario-specific energy assumptions and investment measures.
+    lcc_global controls analysis period, discount rate, inflation and operational filter and is shared by all scenarios.
+    """
     payload = payload or {}
     lcc = _normalize_lcc_payload(payload.get("lcc", {}), end_uses)
-    analysis_period = max(1, _to_int_lcc(lcc.get("analysis_period", 30), 30))
+    global_payload = lcc_global if isinstance(lcc_global, dict) else payload.get("lcc_global", payload.get("lcc", {}))
+    lcc_assumptions = _normalize_lcc_global_payload(global_payload, end_uses)
+
+    analysis_period = max(1, _to_int_lcc(lcc_assumptions.get("analysis_period", 30), 30))
     start_year = int(project_year)
     years = list(range(start_year, start_year + analysis_period))
-    discount_rate = _to_float_lcc(lcc.get("interest_rate_pct", 0.0), 0.0) / 100.0
-    capex_inflation = _to_float_lcc(lcc.get("capex_inflation_pct", 0.0), 0.0) / 100.0
-    energy_inf = lcc.get("energy_inflation_pct", {}) or {}
-    selected_end_uses = lcc.get("selected_operational_end_uses", _lcc_default_selected_enduses(end_uses))
+    discount_rate = _to_float_lcc(lcc_assumptions.get("interest_rate_pct", 0.0), 0.0) / 100.0
+    capex_inflation = _to_float_lcc(lcc_assumptions.get("capex_inflation_pct", 0.0), 0.0) / 100.0
+    energy_inf = lcc_assumptions.get("energy_inflation_pct", {}) or {}
+    selected_end_uses = lcc_assumptions.get("selected_operational_end_uses", _lcc_default_selected_enduses(end_uses))
 
     rows = []
 
@@ -1205,30 +1359,40 @@ def compute_lcc_cashflow_table(
                 })
 
     # Investments, annual maintenance and replacement.
+    # Measures can be assigned to several end uses; CAPEX/O&M/replacement costs are allocated equally.
     inv_df = _lcc_investments_records_to_df(lcc.get("investments", []), end_uses=end_uses)
     for _, r in inv_df.iterrows():
         measure = str(r.get("Measure Name", "")).strip() or "Unnamed measure"
-        assigned = _canon_enduse_name(str(r.get("Assigned End Use", "")).strip())
+        assigned_list = _lcc_parse_assigned_enduses(r.get("Assigned End Uses", ""), end_uses=end_uses)
+        if not assigned_list:
+            assigned_list = _lcc_default_selected_enduses(end_uses)[:1]
+        allocation = 1.0 / max(1, len(assigned_list))
+
         inv_year = _to_int_lcc(r.get("Investment Year"), start_year)
         inv_cost = max(0.0, _to_float_lcc(r.get("Investment Cost"), 0.0))
         maint_pct = max(0.0, _to_float_lcc(r.get("Annual Maintenance Cost (%)"), 0.0)) / 100.0
         life = max(0, _to_int_lcc(r.get("Life Length (years)"), 0))
 
+        def _append_allocated_cost(year: int, cost_type: str, nominal_total: float) -> None:
+            offset_local = int(year - start_year)
+            discounted_total = nominal_total / ((1.0 + discount_rate) ** offset_local) if (1.0 + discount_rate) != 0 else nominal_total
+            for assigned in assigned_list:
+                rows.append({
+                    "Year": int(year),
+                    "Year Offset": offset_local,
+                    "Cost Type": cost_type,
+                    "End_Use": assigned,
+                    "Energy_Source": "",
+                    "Measure Name": measure,
+                    "Nominal Cost": float(nominal_total) * allocation,
+                    "Discounted Cost": float(discounted_total) * allocation,
+                })
+
         # Initial investment in selected investment year, escalated by CAPEX inflation from project start.
         if start_year <= inv_year <= years[-1] and inv_cost > 0.0:
             offset = int(inv_year - start_year)
             nominal = inv_cost * ((1.0 + capex_inflation) ** offset)
-            discounted = nominal / ((1.0 + discount_rate) ** offset) if (1.0 + discount_rate) != 0 else nominal
-            rows.append({
-                "Year": int(inv_year),
-                "Year Offset": offset,
-                "Cost Type": "Investment",
-                "End_Use": assigned,
-                "Energy_Source": "",
-                "Measure Name": measure,
-                "Nominal Cost": nominal,
-                "Discounted Cost": discounted,
-            })
+            _append_allocated_cost(inv_year, "Investment", nominal)
 
         # Annual maintenance as percentage of investment cost, escalated with CAPEX/O&M inflation.
         if inv_cost > 0.0 and maint_pct > 0.0:
@@ -1237,17 +1401,7 @@ def compute_lcc_cashflow_table(
                     continue
                 offset = int(y - start_year)
                 nominal = inv_cost * maint_pct * ((1.0 + capex_inflation) ** offset)
-                discounted = nominal / ((1.0 + discount_rate) ** offset) if (1.0 + discount_rate) != 0 else nominal
-                rows.append({
-                    "Year": int(y),
-                    "Year Offset": offset,
-                    "Cost Type": "Maintenance",
-                    "End_Use": assigned,
-                    "Energy_Source": "",
-                    "Measure Name": measure,
-                    "Nominal Cost": nominal,
-                    "Discounted Cost": discounted,
-                })
+                _append_allocated_cost(y, "Maintenance", nominal)
 
         # Replacement cost equals initial investment cost corrected by CAPEX inflation until replacement year.
         if inv_cost > 0.0 and life > 0:
@@ -1256,17 +1410,7 @@ def compute_lcc_cashflow_table(
                 if repl_year >= start_year:
                     offset = int(repl_year - start_year)
                     nominal = inv_cost * ((1.0 + capex_inflation) ** offset)
-                    discounted = nominal / ((1.0 + discount_rate) ** offset) if (1.0 + discount_rate) != 0 else nominal
-                    rows.append({
-                        "Year": int(repl_year),
-                        "Year Offset": offset,
-                        "Cost Type": "Replacement",
-                        "End_Use": assigned,
-                        "Energy_Source": "",
-                        "Measure Name": measure,
-                        "Nominal Cost": nominal,
-                        "Discounted Cost": discounted,
-                    })
+                    _append_allocated_cost(repl_year, "Replacement", nominal)
                 repl_year += life
 
     if not rows:
@@ -1352,6 +1496,7 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
             {"Use Type": "Retail, High Street", "Area Share %": 50.0},
         ],
         "lcc": _default_lcc_payload(end_uses),
+        "lcc_global": _default_lcc_global_payload(end_uses),
     }
 
 
@@ -1384,6 +1529,7 @@ def capture_scenario_from_widgets(end_uses: list) -> dict:
         "crrem_use_type": str(st.session_state.get("crrem_use_type", "Office")),
         "crrem_mixed_use": _mixed_use_df_to_records(st.session_state.get("crrem_mixed_use_df")),
         "lcc": _capture_lcc_from_widgets(end_uses),
+        "lcc_global": _capture_lcc_global_from_widgets(end_uses),
     }
     return payload
 
@@ -1445,7 +1591,7 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
         })
     st.session_state["crrem_mixed_use_df"] = mixed_df
 
-    # LCC inputs (scenario-specific)
+    # LCC investments are scenario-specific. Global LCC assumptions are initialized once in the LCC tab.
     _load_lcc_into_widgets(payload, end_uses)
 
 
@@ -2228,7 +2374,7 @@ with tab1:
                     st.session_state["_prev_active_scenario"] = new_active
                     load_scenario_into_widgets(scenarios[new_active], end_uses)
                     st.rerun()
-            st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors, On-site generation settings, CRREM measures and LCC inputs.")
+            st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors, On-site generation settings, CRREM measures and scenario-specific LCC investment measures. Global LCC parameters are shared across scenarios.")
 
         # ---- Sidebar: project info (prefill from saved if available)
         with st.sidebar.expander("Project Data"):
@@ -2521,6 +2667,7 @@ with tab1:
                         "scenarios"]:
                         st.session_state["scenarios"][
                             st.session_state["active_scenario"]] = capture_scenario_from_widgets(end_uses)
+                        _apply_lcc_global_to_all_scenarios(end_uses)
                 except Exception:
                     pass
 
@@ -4022,11 +4169,13 @@ with tab_lcc:
         active_payload_lcc = scenarios_lcc.get(active_selected, capture_scenario_from_widgets(end_uses_lcc))
         active_payload_lcc["lcc"] = _normalize_lcc_payload(active_payload_lcc.get("lcc", {}), end_uses_lcc)
 
+        valid_enduses_lcc = [str(u) for u in end_uses_lcc]
+        _ensure_lcc_global_state(valid_enduses_lcc, scenarios=scenarios_lcc, active_payload=active_payload_lcc)
+
         if "lcc_investments_df" not in st.session_state or not isinstance(st.session_state.get("lcc_investments_df"), pd.DataFrame):
             _load_lcc_into_widgets(active_payload_lcc, end_uses_lcc)
 
         # Keep selected operational end uses valid after raw data changes.
-        valid_enduses_lcc = [str(u) for u in end_uses_lcc]
         selected_lcc = st.session_state.get("lcc_selected_operational_end_uses", _lcc_default_selected_enduses(valid_enduses_lcc))
         if not isinstance(selected_lcc, list):
             selected_lcc = _lcc_default_selected_enduses(valid_enduses_lcc)
@@ -4037,8 +4186,9 @@ with tab_lcc:
 
         with st.expander("LCC-Analysis", expanded=True):
             st.caption(
-                "All LCC inputs are scenario-specific. Energy costs use the active scenario tariffs, efficiency factors, "
-                "energy-source assignment and selected operational end uses. Submit once to avoid recalculation on every cell edit."
+                "Global LCC parameters apply to all scenarios. Investment measures remain scenario-specific. "
+                "Energy costs use the active scenario tariffs, efficiency factors, energy-source assignment and selected operational end uses. "
+                "Submit once to avoid recalculation on every cell edit."
             )
 
             # Scenario reference options for discounted payback.
@@ -4062,7 +4212,7 @@ with tab_lcc:
                 )
 
             if st.session_state.get("_lcc_flash") == "updated":
-                st.success("LCC inputs updated and applied to the active scenario.")
+                st.success("LCC inputs updated. Global LCC parameters were applied to all scenarios; investment measures were applied to the active scenario.")
                 del st.session_state["_lcc_flash"]
 
             with st.form("lcc_analysis_form", clear_on_submit=False):
@@ -4132,7 +4282,9 @@ with tab_lcc:
 
                 st.write("### Investment, maintenance and replacement assumptions")
                 st.caption(
-                    "Replacement cost is not entered separately. It is calculated as the initial investment cost escalated by the CAPEX/O&M inflation rate up to each replacement year."
+                    "Replacement cost is not entered separately. It is calculated as the initial investment cost escalated by the CAPEX/O&M inflation rate up to each replacement year. "
+                    "For measures that affect several uses, enter multiple Assigned End Uses separated by commas (example: Heating, Cooling). "
+                    "The measure cost is allocated equally across the assigned End Uses."
                 )
 
                 editor_kwargs_lcc = {
@@ -4143,9 +4295,9 @@ with tab_lcc:
                 if hasattr(st, "column_config"):
                     editor_kwargs_lcc["column_config"] = {
                         "Measure Name": st.column_config.TextColumn("Measure Name", required=False),
-                        "Assigned End Use": st.column_config.SelectboxColumn(
-                            "Assigned End Use",
-                            options=valid_enduses_lcc,
+                        "Assigned End Uses": st.column_config.TextColumn(
+                            "Assigned End Uses",
+                            help="Enter one or more End Uses separated by commas, e.g. Heating, Cooling.",
                             required=True,
                         ),
                         "Investment Year": st.column_config.NumberColumn(
@@ -4197,24 +4349,29 @@ with tab_lcc:
                     if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
                         _act_lcc = st.session_state.get("active_scenario")
                         st.session_state["scenarios"][_act_lcc]["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
+                        _apply_lcc_global_to_all_scenarios(valid_enduses_lcc)
                 except Exception:
                     pass
 
                 st.session_state["_lcc_flash"] = "updated"
                 st.rerun()
 
-        # Use the latest committed values for calculations.
+        # Use the latest committed values for calculations. Global LCC assumptions are shared by all scenarios.
+        lcc_global_active = _capture_lcc_global_from_widgets(valid_enduses_lcc)
         if "scenarios" in st.session_state and active_selected in st.session_state["scenarios"]:
             st.session_state["scenarios"][active_selected]["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
+            st.session_state["scenarios"][active_selected]["lcc_global"] = deepcopy(lcc_global_active)
             active_payload_lcc = st.session_state["scenarios"][active_selected]
         else:
             active_payload_lcc["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
+            active_payload_lcc["lcc_global"] = deepcopy(lcc_global_active)
 
         active_lcc_cashflow = compute_lcc_cashflow_table(
             df_lcc_energy,
             active_payload_lcc,
             valid_enduses_lcc,
             project_year_lcc,
+            lcc_global=lcc_global_active,
         )
 
         if active_lcc_cashflow.empty:
@@ -4232,20 +4389,19 @@ with tab_lcc:
             type_totals = dict(zip(by_type_lcc["Cost Type"], by_type_lcc["Nominal_Cost"]))
 
             # Discounted payback vs reference scenario.
-            ref_scenario_lcc = str(active_payload_lcc.get("lcc", {}).get("payback_reference_scenario", "") or "")
+            ref_scenario_lcc = str(lcc_global_active.get("payback_reference_scenario", "") or "")
+            ref_lcc_cashflow = pd.DataFrame()
             payback_value = None
             if ref_scenario_lcc and ref_scenario_lcc in scenarios_lcc and ref_scenario_lcc != active_selected:
                 ref_payload_lcc = deepcopy(scenarios_lcc.get(ref_scenario_lcc, {}))
                 ref_payload_lcc["lcc"] = _normalize_lcc_payload(ref_payload_lcc.get("lcc", {}), valid_enduses_lcc)
-                # Use the active LCC global settings and operational filter for a like-for-like payback horizon if the reference has no LCC settings.
-                if not scenarios_lcc.get(ref_scenario_lcc, {}).get("lcc"):
-                    ref_payload_lcc["lcc"] = deepcopy(active_payload_lcc.get("lcc", {}))
-                    ref_payload_lcc["lcc"]["investments"] = []
+                ref_payload_lcc["lcc_global"] = deepcopy(lcc_global_active)
                 ref_lcc_cashflow = compute_lcc_cashflow_table(
                     df_lcc_energy,
                     ref_payload_lcc,
                     valid_enduses_lcc,
                     project_year_lcc,
+                    lcc_global=lcc_global_active,
                 )
                 payback_value = discounted_payback_period(active_lcc_cashflow, ref_lcc_cashflow, project_year_lcc)
 
@@ -4261,6 +4417,15 @@ with tab_lcc:
             )
             annual_totals["Cumulative Nominal Cost"] = annual_totals["Nominal_Cost"].cumsum()
             annual_totals["Cumulative Discounted Cost"] = annual_totals["Discounted_Cost"].cumsum()
+
+            ref_annual_totals = pd.DataFrame()
+            if ref_lcc_cashflow is not None and not ref_lcc_cashflow.empty:
+                ref_annual_totals = ref_lcc_cashflow.groupby("Year", as_index=False).agg(
+                    Nominal_Cost=("Nominal Cost", "sum"),
+                    Discounted_Cost=("Discounted Cost", "sum"),
+                )
+                ref_annual_totals["Cumulative Nominal Cost"] = ref_annual_totals["Nominal_Cost"].cumsum()
+                ref_annual_totals["Cumulative Discounted Cost"] = ref_annual_totals["Discounted_Cost"].cumsum()
 
             c1, c2 = st.columns([3, 1])
             with c1:
@@ -4336,6 +4501,23 @@ with tab_lcc:
                     line=dict(color=CRREM_COLOR_MEASURES),
                     marker=dict(color=CRREM_COLOR_MEASURES),
                 ))
+                if not ref_annual_totals.empty:
+                    fig_lcc_cum.add_trace(go.Scatter(
+                        x=ref_annual_totals["Year"],
+                        y=ref_annual_totals["Cumulative Nominal Cost"],
+                        mode="lines+markers",
+                        name=f"{ref_scenario_lcc} cumulative nominal",
+                        line=dict(color="#9ca3af", dash="dash"),
+                        marker=dict(color="#9ca3af"),
+                    ))
+                    fig_lcc_cum.add_trace(go.Scatter(
+                        x=ref_annual_totals["Year"],
+                        y=ref_annual_totals["Cumulative Discounted Cost"],
+                        mode="lines+markers",
+                        name=f"{ref_scenario_lcc} cumulative discounted",
+                        line=dict(color="#6b7280", dash="dot"),
+                        marker=dict(color="#6b7280"),
+                    ))
                 fig_lcc_cum.update_layout(
                     height=620,
                     yaxis_title=f"Cost ({currency_lcc})",
