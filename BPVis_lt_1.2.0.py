@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.3.1",
+    page_title="WSGT_BPVis_ENE 1.4.0",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.3.1")
+st.sidebar.write("Version 1.4.0")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -710,6 +710,19 @@ def _canon_scenario_payload(payload: dict) -> dict:
                     if "PV Annual Production" in p_s:
                         p_s = p_s.replace("PV Annual Production", "On-site Generation Annual Production")
                     rec["Parameter"] = p_s
+    # Canonicalize LCC records and selected operational end uses.
+    lcc = payload.get("lcc")
+    if isinstance(lcc, dict):
+        selected = lcc.get("selected_operational_end_uses")
+        if isinstance(selected, list):
+            lcc["selected_operational_end_uses"] = [_canon_enduse_name(str(x)) for x in selected if str(x).strip()]
+        investments = lcc.get("investments")
+        if isinstance(investments, list):
+            for rec in investments:
+                if isinstance(rec, dict) and "Assigned End Use" in rec:
+                    rec["Assigned End Use"] = _canon_enduse_name(str(rec.get("Assigned End Use", "")))
+        payload["lcc"] = lcc
+
     return payload
 
 
@@ -888,6 +901,422 @@ def _mixed_use_records_to_df(records) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
 
 
+
+# =========================
+# LCC — scenario-specific helpers
+# =========================
+LCC_INVESTMENT_COLUMNS = [
+    "Measure Name",
+    "Assigned End Use",
+    "Investment Year",
+    "Investment Cost",
+    "Annual Maintenance Cost (%)",
+    "Life Length (years)",
+]
+
+LCC_COST_TYPE_COLORS = {
+    "Energy": CRREM_COLOR_BASELINE,
+    "Investment": CRREM_COLOR_LIMIT,
+    "Maintenance": "#d3b402",
+    "Replacement": "#833fd1",
+}
+
+
+def _safe_state_key(text: str) -> str:
+    """Return a stable Streamlit-safe key fragment."""
+    try:
+        return re.sub(r"[^0-9A-Za-z_]+", "_", str(text)).strip("_")[:80]
+    except Exception:
+        return "key"
+
+
+def _to_float_lcc(x, default: float = 0.0) -> float:
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return float(default)
+        s = str(x).strip().replace("%", "").replace(" ", "").replace(",", ".")
+        if s == "":
+            return float(default)
+        return float(s)
+    except Exception:
+        return float(default)
+
+
+def _to_int_lcc(x, default: int = 0) -> int:
+    try:
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return int(default)
+        s = str(x).strip().replace(",", ".")
+        if s == "":
+            return int(default)
+        return int(float(s))
+    except Exception:
+        return int(default)
+
+
+def _lcc_default_selected_enduses(end_uses: list) -> list:
+    try:
+        onsite = set(get_onsite_generation_enduses(end_uses)) | {ONSITE_GENERATION_ENDUSE, LEGACY_PV_ENDUSE}
+        out = [str(u) for u in end_uses if str(u) not in onsite]
+        return out if out else [str(u) for u in end_uses]
+    except Exception:
+        return [str(u) for u in end_uses]
+
+
+def _default_lcc_payload(end_uses: list) -> dict:
+    """Default scenario-specific LCC configuration."""
+    return {
+        "analysis_period": 30,
+        "interest_rate_pct": 4.0,
+        "capex_inflation_pct": 2.0,
+        "energy_inflation_pct": {src: 2.0 for src in ENERGY_SOURCE_ORDER},
+        "selected_operational_end_uses": _lcc_default_selected_enduses(end_uses),
+        "payback_reference_scenario": "",
+        "investments": [],
+    }
+
+
+def _normalize_lcc_payload(lcc_payload, end_uses: list) -> dict:
+    """Merge saved LCC payload with defaults and sanitize references to current end uses."""
+    defaults = _default_lcc_payload(end_uses)
+    if not isinstance(lcc_payload, dict):
+        return defaults
+
+    out = deepcopy(defaults)
+    out["analysis_period"] = max(1, _to_int_lcc(lcc_payload.get("analysis_period"), defaults["analysis_period"]))
+    out["interest_rate_pct"] = _to_float_lcc(lcc_payload.get("interest_rate_pct"), defaults["interest_rate_pct"])
+    out["capex_inflation_pct"] = _to_float_lcc(lcc_payload.get("capex_inflation_pct"), defaults["capex_inflation_pct"])
+
+    energy_inf = lcc_payload.get("energy_inflation_pct", {})
+    if not isinstance(energy_inf, dict):
+        energy_inf = {}
+    out["energy_inflation_pct"] = {
+        src: _to_float_lcc(energy_inf.get(src), defaults["energy_inflation_pct"].get(src, 2.0))
+        for src in ENERGY_SOURCE_ORDER
+    }
+
+    selected = lcc_payload.get("selected_operational_end_uses", defaults["selected_operational_end_uses"])
+    if not isinstance(selected, list):
+        selected = defaults["selected_operational_end_uses"]
+    enduse_set = {str(u) for u in end_uses}
+    selected = [_canon_enduse_name(str(u)) for u in selected]
+    selected = [u for u in selected if u in enduse_set]
+    out["selected_operational_end_uses"] = selected if selected else defaults["selected_operational_end_uses"]
+
+    out["payback_reference_scenario"] = str(lcc_payload.get("payback_reference_scenario", "") or "")
+    out["investments"] = _lcc_investments_df_to_records(_lcc_investments_records_to_df(lcc_payload.get("investments", []), end_uses))
+    return out
+
+
+def _lcc_investments_records_to_df(records, end_uses: Optional[list] = None) -> pd.DataFrame:
+    """Convert saved LCC investment records to a stable dataframe."""
+    try:
+        if records is None:
+            df = pd.DataFrame(columns=LCC_INVESTMENT_COLUMNS)
+        elif isinstance(records, pd.DataFrame):
+            df = records.copy()
+        else:
+            df = pd.DataFrame(list(records))
+    except Exception:
+        df = pd.DataFrame(columns=LCC_INVESTMENT_COLUMNS)
+
+    for c in LCC_INVESTMENT_COLUMNS:
+        if c not in df.columns:
+            df[c] = None
+    df = df[LCC_INVESTMENT_COLUMNS].copy()
+
+    # Canonicalize assigned end-use names and fill blanks with a sensible default.
+    default_enduse = None
+    if end_uses:
+        default_candidates = _lcc_default_selected_enduses(end_uses)
+        default_enduse = default_candidates[0] if default_candidates else str(end_uses[0])
+
+    df["Measure Name"] = df["Measure Name"].fillna("").astype(str)
+    df["Assigned End Use"] = df["Assigned End Use"].apply(lambda x: _canon_enduse_name(str(x).strip()) if x is not None and str(x).strip() else default_enduse)
+    df["Investment Year"] = df["Investment Year"].apply(lambda x: _to_int_lcc(x, 0))
+    df["Investment Cost"] = df["Investment Cost"].apply(lambda x: _to_float_lcc(x, 0.0))
+    df["Annual Maintenance Cost (%)"] = df["Annual Maintenance Cost (%)"].apply(lambda x: _to_float_lcc(x, 0.0))
+    df["Life Length (years)"] = df["Life Length (years)"].apply(lambda x: _to_int_lcc(x, 0))
+
+    # Drop fully empty rows, but keep rows with a name even if costs are temporarily zero while editing.
+    keep = (
+        df["Measure Name"].astype(str).str.strip().ne("") |
+        df["Investment Cost"].astype(float).ne(0.0) |
+        df["Annual Maintenance Cost (%)"].astype(float).ne(0.0)
+    )
+    return df.loc[keep].reset_index(drop=True)
+
+
+def _lcc_investments_df_to_records(df) -> list:
+    """Convert the LCC investments dataframe to JSON-serializable records."""
+    df = _lcc_investments_records_to_df(df)
+    records = []
+    try:
+        for _, r in df.iterrows():
+            name = str(r.get("Measure Name", "")).strip()
+            assigned = _canon_enduse_name(str(r.get("Assigned End Use", "")).strip())
+            inv_cost = _to_float_lcc(r.get("Investment Cost"), 0.0)
+            maint_pct = _to_float_lcc(r.get("Annual Maintenance Cost (%)"), 0.0)
+            if not name and inv_cost == 0.0 and maint_pct == 0.0:
+                continue
+            records.append({
+                "Measure Name": name,
+                "Assigned End Use": assigned,
+                "Investment Year": _to_int_lcc(r.get("Investment Year"), 0),
+                "Investment Cost": inv_cost,
+                "Annual Maintenance Cost (%)": maint_pct,
+                "Life Length (years)": max(0, _to_int_lcc(r.get("Life Length (years)"), 0)),
+            })
+    except Exception:
+        return []
+    return records
+
+
+def _capture_lcc_from_widgets(end_uses: list) -> dict:
+    """Capture current LCC widget state into the active scenario payload."""
+    defaults = _default_lcc_payload(end_uses)
+    selected = st.session_state.get("lcc_selected_operational_end_uses", defaults["selected_operational_end_uses"])
+    if not isinstance(selected, list):
+        selected = defaults["selected_operational_end_uses"]
+
+    return {
+        "analysis_period": max(1, _to_int_lcc(st.session_state.get("lcc_analysis_period", defaults["analysis_period"]), defaults["analysis_period"])),
+        "interest_rate_pct": _to_float_lcc(st.session_state.get("lcc_interest_rate_pct", defaults["interest_rate_pct"]), defaults["interest_rate_pct"]),
+        "capex_inflation_pct": _to_float_lcc(st.session_state.get("lcc_capex_inflation_pct", defaults["capex_inflation_pct"]), defaults["capex_inflation_pct"]),
+        "energy_inflation_pct": {
+            src: _to_float_lcc(
+                st.session_state.get(f"lcc_energy_inflation_pct_{_safe_state_key(src)}", defaults["energy_inflation_pct"].get(src, 2.0)),
+                defaults["energy_inflation_pct"].get(src, 2.0),
+            )
+            for src in ENERGY_SOURCE_ORDER
+        },
+        "selected_operational_end_uses": [_canon_enduse_name(str(u)) for u in selected if str(u).strip()],
+        "payback_reference_scenario": str(st.session_state.get("lcc_payback_reference_scenario", "") or ""),
+        "investments": _lcc_investments_df_to_records(st.session_state.get("lcc_investments_df", pd.DataFrame(columns=LCC_INVESTMENT_COLUMNS))),
+    }
+
+
+def _load_lcc_into_widgets(payload: dict, end_uses: list) -> None:
+    """Seed LCC Streamlit state from a scenario payload."""
+    lcc = _normalize_lcc_payload((payload or {}).get("lcc", {}), end_uses)
+
+    st.session_state["lcc_analysis_period"] = int(lcc.get("analysis_period", 30))
+    st.session_state["lcc_interest_rate_pct"] = float(lcc.get("interest_rate_pct", 4.0))
+    st.session_state["lcc_interest_rate_pct_txt"] = f"{float(lcc.get('interest_rate_pct', 4.0)):.4f}"
+    st.session_state["lcc_capex_inflation_pct"] = float(lcc.get("capex_inflation_pct", 2.0))
+    st.session_state["lcc_capex_inflation_pct_txt"] = f"{float(lcc.get('capex_inflation_pct', 2.0)):.4f}"
+
+    energy_inf = lcc.get("energy_inflation_pct", {}) or {}
+    for src in ENERGY_SOURCE_ORDER:
+        key = f"lcc_energy_inflation_pct_{_safe_state_key(src)}"
+        val = float(energy_inf.get(src, 2.0))
+        st.session_state[key] = val
+        st.session_state[f"{key}_txt"] = f"{val:.4f}"
+
+    st.session_state["lcc_selected_operational_end_uses"] = list(lcc.get("selected_operational_end_uses", _lcc_default_selected_enduses(end_uses)))
+    st.session_state["lcc_payback_reference_scenario"] = str(lcc.get("payback_reference_scenario", "") or "")
+
+    inv_df = _lcc_investments_records_to_df(lcc.get("investments", []), end_uses=end_uses)
+    st.session_state["lcc_investments_df"] = inv_df
+    st.session_state["lcc_investments_draft_df"] = inv_df.copy(deep=True)
+
+
+def _lcc_energy_rows_for_payload(df_energy: pd.DataFrame, payload: dict, selected_end_uses: list) -> pd.DataFrame:
+    """Return row-level annual energy cost basis for a scenario payload before escalation."""
+    if df_energy is None or df_energy.empty or "Month" not in df_energy.columns:
+        return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
+
+    df = df_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh").copy()
+    df["End_Use"] = df["End_Use"].apply(lambda x: _canon_enduse_name(str(x)))
+    selected = [_canon_enduse_name(str(u)) for u in (selected_end_uses or []) if str(u).strip()]
+    if selected:
+        df = df[df["End_Use"].isin(set(selected))].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
+
+    payload = payload or {}
+    eff = payload.get("efficiency", {}) or {}
+    mapping = payload.get("mapping", {}) or {}
+    tariffs = payload.get("tariffs", {}) or {}
+    pv_cfg = payload.get("pv", {}) or {}
+    pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
+
+    df["Efficiency_Factor"] = df["End_Use"].map(lambda u: _to_float_lcc(eff.get(u, 1.0), 1.0)).replace(0.0, 1.0)
+    df["kWh"] = pd.to_numeric(df["kWh"], errors="coerce").fillna(0.0) / df["Efficiency_Factor"]
+
+    onsite_enduses = set(get_onsite_generation_enduses(df["End_Use"].unique()))
+    pv_mask = df["End_Use"].isin(onsite_enduses)
+    if pv_mask.any():
+        df.loc[pv_mask, "kWh"] = -df.loc[pv_mask, "kWh"].abs() * pv_scale
+    df.loc[~pv_mask, "kWh"] = df.loc[~pv_mask, "kWh"].clip(lower=0.0)
+
+    df["Energy_Source"] = df["End_Use"].map(lambda u: str(mapping.get(u, "Electricity")))
+    df.loc[~df["Energy_Source"].isin(ENERGY_SOURCE_ORDER), "Energy_Source"] = "Electricity"
+    if pv_mask.any():
+        df.loc[pv_mask, "Energy_Source"] = "Electricity"
+
+    df["Tariff"] = df["Energy_Source"].map(lambda s: _to_float_lcc(tariffs.get(s, 0.0), 0.0)).fillna(0.0)
+    df["Annual Cost"] = df["kWh"] * df["Tariff"]
+    return df[["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"]]
+
+
+def compute_lcc_cashflow_table(
+        df_energy: pd.DataFrame,
+        payload: dict,
+        end_uses: list,
+        project_year: int,
+) -> pd.DataFrame:
+    """Compute annual nominal and discounted LCC cash-flow rows for one scenario."""
+    payload = payload or {}
+    lcc = _normalize_lcc_payload(payload.get("lcc", {}), end_uses)
+    analysis_period = max(1, _to_int_lcc(lcc.get("analysis_period", 30), 30))
+    start_year = int(project_year)
+    years = list(range(start_year, start_year + analysis_period))
+    discount_rate = _to_float_lcc(lcc.get("interest_rate_pct", 0.0), 0.0) / 100.0
+    capex_inflation = _to_float_lcc(lcc.get("capex_inflation_pct", 0.0), 0.0) / 100.0
+    energy_inf = lcc.get("energy_inflation_pct", {}) or {}
+    selected_end_uses = lcc.get("selected_operational_end_uses", _lcc_default_selected_enduses(end_uses))
+
+    rows = []
+
+    # Operational energy cost, escalated independently per energy source.
+    energy_rows = _lcc_energy_rows_for_payload(df_energy, payload, selected_end_uses)
+    if not energy_rows.empty:
+        grouped_energy = energy_rows.groupby(["End_Use", "Energy_Source"], as_index=False).agg(
+            kWh=("kWh", "sum"),
+            Annual_Base_Cost=("Annual Cost", "sum"),
+        )
+        for y in years:
+            offset = int(y - start_year)
+            for _, r in grouped_energy.iterrows():
+                src = str(r["Energy_Source"])
+                rate = _to_float_lcc(energy_inf.get(src, 0.0), 0.0) / 100.0
+                nominal = float(r["Annual_Base_Cost"]) * ((1.0 + rate) ** offset)
+                discounted = nominal / ((1.0 + discount_rate) ** offset) if (1.0 + discount_rate) != 0 else nominal
+                rows.append({
+                    "Year": int(y),
+                    "Year Offset": offset,
+                    "Cost Type": "Energy",
+                    "End_Use": str(r["End_Use"]),
+                    "Energy_Source": src,
+                    "Measure Name": "Operational energy",
+                    "Nominal Cost": nominal,
+                    "Discounted Cost": discounted,
+                })
+
+    # Investments, annual maintenance and replacement.
+    inv_df = _lcc_investments_records_to_df(lcc.get("investments", []), end_uses=end_uses)
+    for _, r in inv_df.iterrows():
+        measure = str(r.get("Measure Name", "")).strip() or "Unnamed measure"
+        assigned = _canon_enduse_name(str(r.get("Assigned End Use", "")).strip())
+        inv_year = _to_int_lcc(r.get("Investment Year"), start_year)
+        inv_cost = max(0.0, _to_float_lcc(r.get("Investment Cost"), 0.0))
+        maint_pct = max(0.0, _to_float_lcc(r.get("Annual Maintenance Cost (%)"), 0.0)) / 100.0
+        life = max(0, _to_int_lcc(r.get("Life Length (years)"), 0))
+
+        # Initial investment in selected investment year, escalated by CAPEX inflation from project start.
+        if start_year <= inv_year <= years[-1] and inv_cost > 0.0:
+            offset = int(inv_year - start_year)
+            nominal = inv_cost * ((1.0 + capex_inflation) ** offset)
+            discounted = nominal / ((1.0 + discount_rate) ** offset) if (1.0 + discount_rate) != 0 else nominal
+            rows.append({
+                "Year": int(inv_year),
+                "Year Offset": offset,
+                "Cost Type": "Investment",
+                "End_Use": assigned,
+                "Energy_Source": "",
+                "Measure Name": measure,
+                "Nominal Cost": nominal,
+                "Discounted Cost": discounted,
+            })
+
+        # Annual maintenance as percentage of investment cost, escalated with CAPEX/O&M inflation.
+        if inv_cost > 0.0 and maint_pct > 0.0:
+            for y in years:
+                if y < inv_year:
+                    continue
+                offset = int(y - start_year)
+                nominal = inv_cost * maint_pct * ((1.0 + capex_inflation) ** offset)
+                discounted = nominal / ((1.0 + discount_rate) ** offset) if (1.0 + discount_rate) != 0 else nominal
+                rows.append({
+                    "Year": int(y),
+                    "Year Offset": offset,
+                    "Cost Type": "Maintenance",
+                    "End_Use": assigned,
+                    "Energy_Source": "",
+                    "Measure Name": measure,
+                    "Nominal Cost": nominal,
+                    "Discounted Cost": discounted,
+                })
+
+        # Replacement cost equals initial investment cost corrected by CAPEX inflation until replacement year.
+        if inv_cost > 0.0 and life > 0:
+            repl_year = inv_year + life
+            while repl_year <= years[-1]:
+                if repl_year >= start_year:
+                    offset = int(repl_year - start_year)
+                    nominal = inv_cost * ((1.0 + capex_inflation) ** offset)
+                    discounted = nominal / ((1.0 + discount_rate) ** offset) if (1.0 + discount_rate) != 0 else nominal
+                    rows.append({
+                        "Year": int(repl_year),
+                        "Year Offset": offset,
+                        "Cost Type": "Replacement",
+                        "End_Use": assigned,
+                        "Energy_Source": "",
+                        "Measure Name": measure,
+                        "Nominal Cost": nominal,
+                        "Discounted Cost": discounted,
+                    })
+                repl_year += life
+
+    if not rows:
+        return pd.DataFrame(columns=[
+            "Year", "Year Offset", "Cost Type", "End_Use", "Energy_Source", "Measure Name",
+            "Nominal Cost", "Discounted Cost",
+        ])
+
+    out = pd.DataFrame(rows)
+    out["Nominal Cost"] = pd.to_numeric(out["Nominal Cost"], errors="coerce").fillna(0.0)
+    out["Discounted Cost"] = pd.to_numeric(out["Discounted Cost"], errors="coerce").fillna(0.0)
+    return out
+
+
+def discounted_payback_period(active_cf: pd.DataFrame, reference_cf: pd.DataFrame, project_year: int) -> Optional[float]:
+    """Return discounted payback period in years for active scenario vs reference scenario."""
+    if active_cf is None or active_cf.empty or reference_cf is None or reference_cf.empty:
+        return None
+    years = sorted(set(active_cf["Year"].astype(int).tolist()) | set(reference_cf["Year"].astype(int).tolist()))
+    if not years:
+        return None
+    active = active_cf.groupby("Year")["Discounted Cost"].sum().reindex(years).fillna(0.0)
+    ref = reference_cf.groupby("Year")["Discounted Cost"].sum().reindex(years).fillna(0.0)
+    incremental = ref - active  # positive means active scenario saves money against reference
+    cumulative = incremental.cumsum()
+
+    if cumulative.iloc[0] >= 0:
+        return 0.0
+    prev_cum = float(cumulative.iloc[0])
+    prev_offset = int(years[0] - int(project_year))
+    for idx in range(1, len(years)):
+        curr_cum = float(cumulative.iloc[idx])
+        curr_offset = int(years[idx] - int(project_year))
+        if curr_cum >= 0:
+            annual_gain = curr_cum - prev_cum
+            if annual_gain <= 0:
+                return float(curr_offset)
+            frac = abs(prev_cum) / annual_gain
+            return float(prev_offset + frac * (curr_offset - prev_offset))
+        prev_cum = curr_cum
+        prev_offset = curr_offset
+    return None
+
+
+def _format_payback(pb: Optional[float]) -> str:
+    if pb is None or (isinstance(pb, float) and np.isnan(pb)):
+        return "Not reached"
+    return f"{float(pb):,.1f} years"
+
+
 def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> dict:
     """Backwards compatible defaults (single-config sheets -> Base scenario)."""
     def_f = (preloaded_cfg.get("factors") if preloaded_cfg else {}) or {}
@@ -922,6 +1351,7 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
             {"Use Type": "Office", "Area Share %": 50.0},
             {"Use Type": "Retail, High Street", "Area Share %": 50.0},
         ],
+        "lcc": _default_lcc_payload(end_uses),
     }
 
 
@@ -953,6 +1383,7 @@ def capture_scenario_from_widgets(end_uses: list) -> dict:
         "crrem_measures": _measures_df_to_records(st.session_state.get("crrem_measures_df")),
         "crrem_use_type": str(st.session_state.get("crrem_use_type", "Office")),
         "crrem_mixed_use": _mixed_use_df_to_records(st.session_state.get("crrem_mixed_use_df")),
+        "lcc": _capture_lcc_from_widgets(end_uses),
     }
     return payload
 
@@ -1013,6 +1444,9 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
             "Area Share %": [50.0, 50.0],
         })
     st.session_state["crrem_mixed_use_df"] = mixed_df
+
+    # LCC inputs (scenario-specific)
+    _load_lcc_into_widgets(payload, end_uses)
 
 
 def build_efficiency_df(end_uses) -> pd.DataFrame:
@@ -1682,9 +2116,9 @@ st.title(st.session_state["project_name"])
 # =========================
 # Tabs
 # =========================
-tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab_lcc, tab7, tab8 = st.tabs(
     ["Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)", "Energy Cost (with Factors)", "Loads Analysis", "Benchmark",
-     "CRREM-Analysis", "Scenarios", "Raw Data"])
+     "CRREM-Analysis", "LCC-Analysis", "Scenarios", "Raw Data"])
 
 # =========================
 # Tab 1 — Energy Balance (Energy Balance Tab)
@@ -1794,7 +2228,7 @@ with tab1:
                     st.session_state["_prev_active_scenario"] = new_active
                     load_scenario_into_widgets(scenarios[new_active], end_uses)
                     st.rerun()
-            st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors and On-site generation settings.")
+            st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors, On-site generation settings, CRREM measures and LCC inputs.")
 
         # ---- Sidebar: project info (prefill from saved if available)
         with st.sidebar.expander("Project Data"):
@@ -3564,6 +3998,455 @@ with tab6:
 
                     st.caption(
                         "Notes: Green Electricity and On-site Generation offset are treated with EF=0. On-site Generation offsets Electricity consumption (no export credit).")
+
+    if not uploaded_file:
+        st.write("### ← Please upload data on sidebar")
+
+
+# =========================
+# Tab 6b — LCC-Analysis
+# =========================
+with tab_lcc:
+    if uploaded_file:
+        st.write("## LCC-Analysis")
+        st.metric("Active Scenario", active_selected)
+
+        # Current project/scenario context
+        df_lcc_energy = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name).copy()
+        end_uses_lcc = [str(c) for c in df_lcc_energy.columns if str(c) != "Month"]
+        project_year_lcc = int(st.session_state.get("project_year", 2025))
+        project_area_lcc = float(st.session_state.get("project_area", 0.0) or 0.0)
+        currency_lcc = st.session_state.get("currency_symbol", "€")
+
+        scenarios_lcc = st.session_state.get("scenarios", {}) or {}
+        active_payload_lcc = scenarios_lcc.get(active_selected, capture_scenario_from_widgets(end_uses_lcc))
+        active_payload_lcc["lcc"] = _normalize_lcc_payload(active_payload_lcc.get("lcc", {}), end_uses_lcc)
+
+        if "lcc_investments_df" not in st.session_state or not isinstance(st.session_state.get("lcc_investments_df"), pd.DataFrame):
+            _load_lcc_into_widgets(active_payload_lcc, end_uses_lcc)
+
+        # Keep selected operational end uses valid after raw data changes.
+        valid_enduses_lcc = [str(u) for u in end_uses_lcc]
+        selected_lcc = st.session_state.get("lcc_selected_operational_end_uses", _lcc_default_selected_enduses(valid_enduses_lcc))
+        if not isinstance(selected_lcc, list):
+            selected_lcc = _lcc_default_selected_enduses(valid_enduses_lcc)
+        selected_lcc = [_canon_enduse_name(str(u)) for u in selected_lcc if _canon_enduse_name(str(u)) in valid_enduses_lcc]
+        if not selected_lcc:
+            selected_lcc = _lcc_default_selected_enduses(valid_enduses_lcc)
+        st.session_state["lcc_selected_operational_end_uses"] = selected_lcc
+
+        with st.expander("LCC-Analysis", expanded=True):
+            st.caption(
+                "All LCC inputs are scenario-specific. Energy costs use the active scenario tariffs, efficiency factors, "
+                "energy-source assignment and selected operational end uses. Submit once to avoid recalculation on every cell edit."
+            )
+
+            # Scenario reference options for discounted payback.
+            scenario_names_lcc = list(scenarios_lcc.keys()) if scenarios_lcc else [active_selected]
+            ref_options_lcc = [""] + [s for s in scenario_names_lcc if s != active_selected]
+            ref_default_lcc = st.session_state.get("lcc_payback_reference_scenario", "")
+            if ref_default_lcc not in ref_options_lcc:
+                if "Base" in ref_options_lcc and "Base" != active_selected:
+                    ref_default_lcc = "Base"
+                elif len(ref_options_lcc) > 1:
+                    ref_default_lcc = ref_options_lcc[1]
+                else:
+                    ref_default_lcc = ""
+                st.session_state["lcc_payback_reference_scenario"] = ref_default_lcc
+
+            # Draft editor state mirrors the committed scenario-specific LCC investment table.
+            if "lcc_investments_draft_df" not in st.session_state or not isinstance(st.session_state.get("lcc_investments_draft_df"), pd.DataFrame):
+                st.session_state["lcc_investments_draft_df"] = _lcc_investments_records_to_df(
+                    active_payload_lcc.get("lcc", {}).get("investments", []),
+                    end_uses=valid_enduses_lcc,
+                )
+
+            if st.session_state.get("_lcc_flash") == "updated":
+                st.success("LCC inputs updated and applied to the active scenario.")
+                del st.session_state["_lcc_flash"]
+
+            with st.form("lcc_analysis_form", clear_on_submit=False):
+                st.write("### Global LCC parameters")
+                p1, p2, p3 = st.columns(3)
+                with p1:
+                    st.number_input(
+                        "Analysis Period (years)",
+                        min_value=1,
+                        max_value=100,
+                        step=1,
+                        format="%d",
+                        key="lcc_analysis_period",
+                    )
+                with p2:
+                    numeric_input(
+                        "Interest Rate / Discount Rate (%)",
+                        float(st.session_state.get("lcc_interest_rate_pct", 4.0)),
+                        key="lcc_interest_rate_pct",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        fmt="{:.4f}",
+                    )
+                with p3:
+                    numeric_input(
+                        "CAPEX / O&M Inflation Rate (%)",
+                        float(st.session_state.get("lcc_capex_inflation_pct", 2.0)),
+                        key="lcc_capex_inflation_pct",
+                        min_value=-100.0,
+                        max_value=100.0,
+                        fmt="{:.4f}",
+                    )
+
+                st.write("### Energy inflation rate by source")
+                inf_cols = st.columns(3)
+                for i, src in enumerate(ENERGY_SOURCE_ORDER):
+                    with inf_cols[i % 3]:
+                        src_key = f"lcc_energy_inflation_pct_{_safe_state_key(src)}"
+                        numeric_input(
+                            f"{src} Inflation (%)",
+                            float(st.session_state.get(src_key, 2.0)),
+                            key=src_key,
+                            min_value=-100.0,
+                            max_value=100.0,
+                            fmt="{:.4f}",
+                        )
+
+                st.write("### Operational cost filter")
+                st.multiselect(
+                    "Operational End Uses included in LCC energy cost",
+                    options=valid_enduses_lcc,
+                    default=st.session_state.get("lcc_selected_operational_end_uses", _lcc_default_selected_enduses(valid_enduses_lcc)),
+                    format_func=ui_name,
+                    key="lcc_selected_operational_end_uses",
+                    help="Only the selected End Uses are included in the operational energy-cost part of the LCC analysis.",
+                )
+
+                ref_display_options = ref_options_lcc
+                st.selectbox(
+                    "Discounted Payback Reference Scenario",
+                    options=ref_display_options,
+                    index=ref_display_options.index(st.session_state.get("lcc_payback_reference_scenario", "")) if st.session_state.get("lcc_payback_reference_scenario", "") in ref_display_options else 0,
+                    format_func=lambda x: "None" if str(x) == "" else str(x),
+                    key="lcc_payback_reference_scenario",
+                    help="Discounted payback is calculated against this reference scenario using discounted incremental cash flows.",
+                )
+
+                st.write("### Investment, maintenance and replacement assumptions")
+                st.caption(
+                    "Replacement cost is not entered separately. It is calculated as the initial investment cost escalated by the CAPEX/O&M inflation rate up to each replacement year."
+                )
+
+                editor_kwargs_lcc = {
+                    "num_rows": "dynamic",
+                    "use_container_width": True,
+                    "key": "lcc_investments_editor",
+                }
+                if hasattr(st, "column_config"):
+                    editor_kwargs_lcc["column_config"] = {
+                        "Measure Name": st.column_config.TextColumn("Measure Name", required=False),
+                        "Assigned End Use": st.column_config.SelectboxColumn(
+                            "Assigned End Use",
+                            options=valid_enduses_lcc,
+                            required=True,
+                        ),
+                        "Investment Year": st.column_config.NumberColumn(
+                            "Investment Year",
+                            min_value=int(project_year_lcc),
+                            max_value=int(project_year_lcc + max(1, int(st.session_state.get("lcc_analysis_period", 30))) - 1),
+                            step=1,
+                            format="%d",
+                            required=True,
+                        ),
+                        "Investment Cost": st.column_config.NumberColumn(
+                            f"Investment Cost ({currency_lcc})",
+                            min_value=0.0,
+                            step=1000.0,
+                            format="%.2f",
+                        ),
+                        "Annual Maintenance Cost (%)": st.column_config.NumberColumn(
+                            "Annual Maintenance Cost (% of investment)",
+                            min_value=0.0,
+                            max_value=100.0,
+                            step=0.1,
+                            format="%.2f",
+                        ),
+                        "Life Length (years)": st.column_config.NumberColumn(
+                            "Life Length (years)",
+                            min_value=0,
+                            max_value=200,
+                            step=1,
+                            format="%d",
+                        ),
+                    }
+
+                edited_lcc_investments = st.data_editor(
+                    _lcc_investments_records_to_df(
+                        st.session_state.get("lcc_investments_draft_df", pd.DataFrame(columns=LCC_INVESTMENT_COLUMNS)),
+                        end_uses=valid_enduses_lcc,
+                    ),
+                    **editor_kwargs_lcc,
+                )
+
+                apply_lcc_inputs = st.form_submit_button("Update LCC Analysis", use_container_width=False)
+
+            if apply_lcc_inputs:
+                committed_lcc_df = _lcc_investments_records_to_df(edited_lcc_investments, end_uses=valid_enduses_lcc)
+                st.session_state["lcc_investments_df"] = committed_lcc_df
+                st.session_state["lcc_investments_draft_df"] = committed_lcc_df.copy(deep=True)
+
+                try:
+                    if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
+                        _act_lcc = st.session_state.get("active_scenario")
+                        st.session_state["scenarios"][_act_lcc]["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
+                except Exception:
+                    pass
+
+                st.session_state["_lcc_flash"] = "updated"
+                st.rerun()
+
+        # Use the latest committed values for calculations.
+        if "scenarios" in st.session_state and active_selected in st.session_state["scenarios"]:
+            st.session_state["scenarios"][active_selected]["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
+            active_payload_lcc = st.session_state["scenarios"][active_selected]
+        else:
+            active_payload_lcc["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
+
+        active_lcc_cashflow = compute_lcc_cashflow_table(
+            df_lcc_energy,
+            active_payload_lcc,
+            valid_enduses_lcc,
+            project_year_lcc,
+        )
+
+        if active_lcc_cashflow.empty:
+            st.info("No LCC cash flows available. Add investment data and/or select operational End Uses in the LCC input expander.")
+        else:
+            total_nominal_lcc = float(active_lcc_cashflow["Nominal Cost"].sum())
+            total_discounted_lcc = float(active_lcc_cashflow["Discounted Cost"].sum())
+            cost_per_m2_nominal = total_nominal_lcc / project_area_lcc if project_area_lcc > 0 else np.nan
+            cost_per_m2_discounted = total_discounted_lcc / project_area_lcc if project_area_lcc > 0 else np.nan
+
+            by_type_lcc = active_lcc_cashflow.groupby("Cost Type", as_index=False).agg(
+                Nominal_Cost=("Nominal Cost", "sum"),
+                Discounted_Cost=("Discounted Cost", "sum"),
+            )
+            type_totals = dict(zip(by_type_lcc["Cost Type"], by_type_lcc["Nominal_Cost"]))
+
+            # Discounted payback vs reference scenario.
+            ref_scenario_lcc = str(active_payload_lcc.get("lcc", {}).get("payback_reference_scenario", "") or "")
+            payback_value = None
+            if ref_scenario_lcc and ref_scenario_lcc in scenarios_lcc and ref_scenario_lcc != active_selected:
+                ref_payload_lcc = deepcopy(scenarios_lcc.get(ref_scenario_lcc, {}))
+                ref_payload_lcc["lcc"] = _normalize_lcc_payload(ref_payload_lcc.get("lcc", {}), valid_enduses_lcc)
+                # Use the active LCC global settings and operational filter for a like-for-like payback horizon if the reference has no LCC settings.
+                if not scenarios_lcc.get(ref_scenario_lcc, {}).get("lcc"):
+                    ref_payload_lcc["lcc"] = deepcopy(active_payload_lcc.get("lcc", {}))
+                    ref_payload_lcc["lcc"]["investments"] = []
+                ref_lcc_cashflow = compute_lcc_cashflow_table(
+                    df_lcc_energy,
+                    ref_payload_lcc,
+                    valid_enduses_lcc,
+                    project_year_lcc,
+                )
+                payback_value = discounted_payback_period(active_lcc_cashflow, ref_lcc_cashflow, project_year_lcc)
+
+            st.write("## LCC Balance")
+
+            annual_by_type = active_lcc_cashflow.groupby(["Year", "Cost Type"], as_index=False).agg(
+                Nominal_Cost=("Nominal Cost", "sum"),
+                Discounted_Cost=("Discounted Cost", "sum"),
+            )
+            annual_totals = active_lcc_cashflow.groupby("Year", as_index=False).agg(
+                Nominal_Cost=("Nominal Cost", "sum"),
+                Discounted_Cost=("Discounted Cost", "sum"),
+            )
+            annual_totals["Cumulative Nominal Cost"] = annual_totals["Nominal_Cost"].cumsum()
+            annual_totals["Cumulative Discounted Cost"] = annual_totals["Discounted_Cost"].cumsum()
+
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.subheader("Annual LCC Balance")
+                fig_lcc_annual = px.bar(
+                    annual_by_type,
+                    x="Year",
+                    y="Nominal_Cost",
+                    color="Cost Type",
+                    barmode="relative",
+                    color_discrete_map=LCC_COST_TYPE_COLORS,
+                    height=620,
+                    text_auto=".0f",
+                    labels={"Nominal_Cost": f"Nominal Cost ({currency_lcc})"},
+                )
+                line_lcc_total = px.line(
+                    annual_totals,
+                    x="Year",
+                    y="Nominal_Cost",
+                    markers=True,
+                    labels={"Nominal_Cost": "Total annual cost"},
+                )
+                for tr in line_lcc_total.data:
+                    tr.name = "Total annual cost"
+                    tr.line.width = 5
+                    tr.line.color = "black"
+                    tr.line.dash = "dash"
+                    tr.marker.size = 10
+                    fig_lcc_annual.add_trace(tr)
+                fig_lcc_annual.update_traces(textfont_size=12, textfont_color="white")
+                fig_lcc_annual.update_layout(
+                    yaxis_title=f"Nominal Cost ({currency_lcc}/a)",
+                    xaxis_title="Year",
+                    legend_title_text="Cost Type",
+                    margin=dict(l=40, r=20, t=50, b=80),
+                    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+                )
+                st_plotly_chart(fig_lcc_annual, use_container_width=True, key="lcc_annual_balance")
+
+            with c2:
+                st.subheader("LCC KPI's")
+                st.metric("Total Nominal Cost", f"{currency_lcc} {total_nominal_lcc:,.0f}")
+                st.metric("Total Discounted Cost", f"{currency_lcc} {total_discounted_lcc:,.0f}")
+                if project_area_lcc > 0:
+                    st.metric("Nominal Cost per m²", f"{currency_lcc} {cost_per_m2_nominal:,.2f}/m²")
+                    st.metric("Discounted Cost per m²", f"{currency_lcc} {cost_per_m2_discounted:,.2f}/m²")
+                else:
+                    st.metric("Nominal Cost per m²", "n/a")
+                    st.metric("Discounted Cost per m²", "n/a")
+                st.metric("Discounted Payback Period", _format_payback(payback_value))
+                st.metric("Energy Cost", f"{currency_lcc} {type_totals.get('Energy', 0.0):,.0f}")
+                st.metric("Investment Cost", f"{currency_lcc} {type_totals.get('Investment', 0.0):,.0f}")
+                st.metric("Maintenance Cost", f"{currency_lcc} {type_totals.get('Maintenance', 0.0):,.0f}")
+                st.metric("Replacement Cost", f"{currency_lcc} {type_totals.get('Replacement', 0.0):,.0f}")
+
+            c3, c4 = st.columns([3, 1])
+            with c3:
+                st.subheader("Cumulative LCC")
+                fig_lcc_cum = go.Figure()
+                fig_lcc_cum.add_trace(go.Scatter(
+                    x=annual_totals["Year"],
+                    y=annual_totals["Cumulative Nominal Cost"],
+                    mode="lines+markers",
+                    name="Cumulative nominal cost",
+                    line=dict(color=CRREM_COLOR_BASELINE),
+                    marker=dict(color=CRREM_COLOR_BASELINE),
+                ))
+                fig_lcc_cum.add_trace(go.Scatter(
+                    x=annual_totals["Year"],
+                    y=annual_totals["Cumulative Discounted Cost"],
+                    mode="lines+markers",
+                    name="Cumulative discounted cost",
+                    line=dict(color=CRREM_COLOR_MEASURES),
+                    marker=dict(color=CRREM_COLOR_MEASURES),
+                ))
+                fig_lcc_cum.update_layout(
+                    height=620,
+                    yaxis_title=f"Cost ({currency_lcc})",
+                    xaxis_title="Year",
+                    legend_title="",
+                    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+                    margin=dict(l=40, r=20, t=50, b=80),
+                )
+                fig_lcc_cum.update_yaxes(rangemode="tozero")
+                st_plotly_chart(fig_lcc_cum, use_container_width=True, key="lcc_cumulative")
+
+            with c4:
+                st.subheader("LCC Cost Type Share")
+                pie_type = by_type_lcc.copy()
+                pie_type = pie_type[pie_type["Nominal_Cost"] > 0]
+                if not pie_type.empty:
+                    fig_type_pie = px.pie(
+                        pie_type,
+                        names="Cost Type",
+                        values="Nominal_Cost",
+                        color="Cost Type",
+                        color_discrete_map=LCC_COST_TYPE_COLORS,
+                        hole=0.5,
+                        height=620,
+                    )
+                    fig_type_pie.update_traces(textinfo="value+percent", textfont_size=16, textfont_color="white")
+                    fig_type_pie.update_layout(
+                        annotations=[dict(
+                            text=f"{currency_lcc} {total_nominal_lcc / project_area_lcc:,.2f}<br>per m²" if project_area_lcc > 0 else f"{currency_lcc} {total_nominal_lcc:,.0f}",
+                            x=0.5,
+                            y=0.5,
+                            xref="paper",
+                            yref="paper",
+                            showarrow=False,
+                            font=dict(size=32, color="black"),
+                        )],
+                        showlegend=True,
+                    )
+                    st_plotly_chart(fig_type_pie, use_container_width=True, key="lcc_cost_type_pie")
+                else:
+                    st.info("No positive LCC costs available for the cost-type pie chart.")
+
+            st.markdown("---")
+            st.write("## LCC Breakdown")
+
+            b1, b2 = st.columns(2)
+            with b1:
+                st.subheader("Total Cost per m² by End Use")
+                enduse_breakdown = active_lcc_cashflow.groupby("End_Use", as_index=False).agg(
+                    Nominal_Cost=("Nominal Cost", "sum"),
+                    Discounted_Cost=("Discounted Cost", "sum"),
+                )
+                if project_area_lcc > 0:
+                    enduse_breakdown["Nominal Cost per m²"] = enduse_breakdown["Nominal_Cost"] / project_area_lcc
+                else:
+                    enduse_breakdown["Nominal Cost per m²"] = np.nan
+                pie_enduse = enduse_breakdown[enduse_breakdown["Nominal Cost per m²"] > 0].copy()
+                if not pie_enduse.empty:
+                    fig_enduse_pie = px.pie(
+                        pie_enduse,
+                        names="End_Use",
+                        values="Nominal Cost per m²",
+                        color="End_Use",
+                        color_discrete_map=color_map,
+                        hole=0.5,
+                        height=800,
+                        category_orders={"End_Use": END_USE_ORDER},
+                    )
+                    fig_enduse_pie.update_traces(textinfo="value+percent", textfont_size=18, textfont_color="white")
+                    fig_enduse_pie.update_layout(showlegend=True)
+                    st_plotly_chart(fig_enduse_pie, use_container_width=True, key="lcc_enduse_pie")
+                else:
+                    st.info("No positive End Use costs available for the pie chart.")
+
+            with b2:
+                st.subheader("Operational Energy Cost per m² by Energy Source")
+                source_breakdown = active_lcc_cashflow.loc[active_lcc_cashflow["Cost Type"] == "Energy"].groupby("Energy_Source", as_index=False).agg(
+                    Nominal_Cost=("Nominal Cost", "sum"),
+                    Discounted_Cost=("Discounted Cost", "sum"),
+                )
+                if project_area_lcc > 0 and not source_breakdown.empty:
+                    source_breakdown["Nominal Cost per m²"] = source_breakdown["Nominal_Cost"] / project_area_lcc
+                else:
+                    source_breakdown["Nominal Cost per m²"] = np.nan
+                pie_source = source_breakdown[source_breakdown["Nominal Cost per m²"] > 0].copy()
+                if not pie_source.empty:
+                    fig_source_pie = px.pie(
+                        pie_source,
+                        names="Energy_Source",
+                        values="Nominal Cost per m²",
+                        color="Energy_Source",
+                        color_discrete_map=color_map_sources,
+                        hole=0.5,
+                        height=800,
+                        category_orders={"Energy_Source": ENERGY_SOURCE_ORDER},
+                    )
+                    fig_source_pie.update_traces(textinfo="value+percent", textfont_size=18, textfont_color="white")
+                    fig_source_pie.update_layout(showlegend=True)
+                    st_plotly_chart(fig_source_pie, use_container_width=True, key="lcc_source_pie")
+                else:
+                    st.info("No positive operational energy costs available for the energy-source pie chart.")
+
+            with st.expander("LCC cash-flow table", expanded=False):
+                cashflow_display = active_lcc_cashflow.copy()
+                cashflow_display["End_Use"] = cashflow_display["End_Use"].apply(ui_name)
+                st.dataframe(cashflow_display, use_container_width=True)
+
+            st.caption(
+                "Discounted Payback Period is calculated against the selected reference scenario from discounted incremental cash flows: "
+                "reference scenario cost minus active scenario cost. If no reference scenario is selected, payback is shown as not reached."
+            )
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
