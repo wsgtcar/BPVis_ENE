@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.11",
+    page_title="WSGT_BPVis_ENE 2.0.0",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.11")
+st.sidebar.write("Version 2.0.0")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -5490,334 +5490,498 @@ with tab7:
                 "Net EUI (kWh/m²·a)",
                 "Gross EUI (kWh/m²·a)",
             ]].copy()
-            with st.expander("Raw Data", expanded=False):
-                st.dataframe(df_cmp_display, use_container_width=True)
+            scenario_color_map = {
+                s: SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)]
+                for i, s in enumerate(scenario_order)
+            }
 
-            # Net KPI charts (incl. On-site_Generation) — values printed on bars
-            if _area and _area > 0:
-                df_kpi = df_cmp.copy()
-                df_kpi["Scenario"] = df_kpi["Scenario"].astype(str)
-                df_kpi["Net Emissions (kgCO₂e/m²·a)"] = (df_kpi["Net CO2 (t/a)"] * 1000.0) / _area
+            with st.expander("Static Comparission", expanded=True):
+                show_static_raw_data = st.checkbox(
+                    "Show static comparison raw data table",
+                    value=False,
+                    key="scenario_static_raw_data_show",
+                )
+                if show_static_raw_data:
+                    st.dataframe(df_cmp_display, use_container_width=True)
 
-                net_cost_col_a = f"Net Cost ({_curr}/a)"
-                net_cost_col_m2 = f"Net Cost ({_curr}/m²·a)"
-                if net_cost_col_a in df_kpi.columns:
-                    df_kpi[net_cost_col_m2] = df_kpi[net_cost_col_a] / _area
+                # Net KPI charts (incl. On-site_Generation) — values printed on bars
+                if _area and _area > 0:
+                    df_kpi = df_cmp.copy()
+                    df_kpi["Scenario"] = df_kpi["Scenario"].astype(str)
+                    df_kpi["Net Emissions (kgCO₂e/m²·a)"] = (df_kpi["Net CO2 (t/a)"] * 1000.0) / _area
 
-                st.markdown("### Net KPI comparison (incl. On-site Generation)")
+                    net_cost_col_a = f"Net Cost ({_curr}/a)"
+                    net_cost_col_m2 = f"Net Cost ({_curr}/m²·a)"
+                    if net_cost_col_a in df_kpi.columns:
+                        df_kpi[net_cost_col_m2] = df_kpi[net_cost_col_a] / _area
 
-                scenario_color_map = {s: SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)] for i, s in
-                                      enumerate(scenario_order)}
-                k1, k2, k3 = st.columns(3)
+                    st.markdown("### Net KPI comparison (incl. On-site Generation)")
 
-                with k1:
-                    fig_net_eui = px.bar(
-                        df_kpi,
-                        x="Scenario",
-                        y="Net EUI (kWh/m²·a)",
-                        color="Scenario",
-                        color_discrete_map=scenario_color_map,
-                        category_orders={"Scenario": scenario_order},
-                        text_auto=".1f",
-                        title="Net EUI (kWh/m²·a)",
-                    )
-                    fig_net_eui.update_xaxes(type="category")
-                    fig_net_eui.update_yaxes(rangemode="tozero")
-                    fig_net_eui.update_layout(
-                        xaxis_title="",
-                        yaxis_title="kWh/m²·a",
-                        legend_title_text="Scenario",
-                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                        margin=dict(b=90),
-                    )
-                    st_plotly_chart(fig_net_eui, use_container_width=True, key="scenario_net_eui")
+                    k1, k2, k3 = st.columns(3)
 
-                with k2:
-                    fig_net_emis = px.bar(
-                        df_kpi,
-                        x="Scenario",
-                        y="Net Emissions (kgCO₂e/m²·a)",
-                        color="Scenario",
-                        color_discrete_map=scenario_color_map,
-                        category_orders={"Scenario": scenario_order},
-                        text_auto=".1f",
-                        title="Net Emissions (kgCO₂e/m²·a)",
-                    )
-                    fig_net_emis.update_xaxes(type="category")
-                    fig_net_emis.update_yaxes(rangemode="tozero")
-                    fig_net_emis.update_layout(
-                        xaxis_title="",
-                        yaxis_title="kgCO₂e/m²·a",
-                        legend_title_text="Scenario",
-                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                        margin=dict(b=90),
-                    )
-                    st_plotly_chart(fig_net_emis, use_container_width=True, key="scenario_net_emissions")
-
-                with k3:
-                    if net_cost_col_m2 in df_kpi.columns:
-                        fig_net_cost = px.bar(
+                    with k1:
+                        fig_net_eui = px.bar(
                             df_kpi,
                             x="Scenario",
-                            y=net_cost_col_m2,
+                            y="Net EUI (kWh/m²·a)",
                             color="Scenario",
                             color_discrete_map=scenario_color_map,
                             category_orders={"Scenario": scenario_order},
-                            text_auto=".2f",
-                            title=f"Net Cost ({_curr}/m²·a)",
+                            text_auto=".1f",
+                            title="Net EUI (kWh/m²·a)",
                         )
-                        fig_net_cost.update_xaxes(type="category")
-                        fig_net_cost.update_yaxes(rangemode="tozero")
-                        fig_net_cost.update_layout(
+                        fig_net_eui.update_xaxes(type="category")
+                        fig_net_eui.update_yaxes(rangemode="tozero")
+                        fig_net_eui.update_layout(
                             xaxis_title="",
-                            yaxis_title=f"{_curr}/m²·a",
+                            yaxis_title="kWh/m²·a",
                             legend_title_text="Scenario",
                             legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                             margin=dict(b=90),
                         )
-                        st_plotly_chart(fig_net_cost, use_container_width=True, key="scenario_net_cost")
+                        st_plotly_chart(fig_net_eui, use_container_width=True, key="scenario_net_eui")
 
-                # Gross KPI charts (excl. On-site_Generation)
-                df_kpi["Gross Emissions (kgCO₂e/m²·a)"] = (df_kpi["Gross CO2 (t/a)"] * 1000.0) / _area
-
-                gross_cost_col_a = f"Gross Cost ({_curr}/a)"
-                gross_cost_col_m2 = f"Gross Cost ({_curr}/m²·a)"
-                if gross_cost_col_a in df_kpi.columns:
-                    df_kpi[gross_cost_col_m2] = df_kpi[gross_cost_col_a] / _area
-
-                st.markdown("### Gross KPI comparison (excl. On-site Generation)")
-
-                g1, g2, g3 = st.columns(3)
-
-                with g1:
-                    fig_gross_eui = px.bar(
-                        df_kpi,
-                        x="Scenario",
-                        y="Gross EUI (kWh/m²·a)",
-                        color="Scenario",
-                        color_discrete_map=scenario_color_map,
-                        category_orders={"Scenario": scenario_order},
-                        text_auto=".1f",
-                        title="Gross EUI (kWh/m²·a)",
-                    )
-                    fig_gross_eui.update_xaxes(type="category")
-                    fig_gross_eui.update_yaxes(rangemode="tozero")
-                    fig_gross_eui.update_layout(
-                        xaxis_title="",
-                        yaxis_title="kWh/m²·a",
-                        legend_title_text="Scenario",
-                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                        margin=dict(b=90),
-                    )
-                    st_plotly_chart(fig_gross_eui, use_container_width=True, key="scenario_gross_eui")
-
-                with g2:
-                    fig_gross_emis = px.bar(
-                        df_kpi,
-                        x="Scenario",
-                        y="Gross Emissions (kgCO₂e/m²·a)",
-                        color="Scenario",
-                        color_discrete_map=scenario_color_map,
-                        category_orders={"Scenario": scenario_order},
-                        text_auto=".1f",
-                        title="Gross Emissions (kgCO₂e/m²·a)",
-                    )
-                    fig_gross_emis.update_xaxes(type="category")
-                    fig_gross_emis.update_yaxes(rangemode="tozero")
-                    fig_gross_emis.update_layout(
-                        xaxis_title="",
-                        yaxis_title="kgCO₂e/m²·a",
-                        legend_title_text="Scenario",
-                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                        margin=dict(b=90),
-                    )
-                    st_plotly_chart(fig_gross_emis, use_container_width=True, key="scenario_gross_emissions")
-
-                with g3:
-                    if gross_cost_col_m2 in df_kpi.columns:
-                        fig_gross_cost = px.bar(
+                    with k2:
+                        fig_net_emis = px.bar(
                             df_kpi,
                             x="Scenario",
-                            y=gross_cost_col_m2,
+                            y="Net Emissions (kgCO₂e/m²·a)",
                             color="Scenario",
                             color_discrete_map=scenario_color_map,
                             category_orders={"Scenario": scenario_order},
-                            text_auto=".2f",
-                            title=f"Gross Cost ({_curr}/m²·a)",
+                            text_auto=".1f",
+                            title="Net Emissions (kgCO₂e/m²·a)",
                         )
-                        fig_gross_cost.update_xaxes(type="category")
-                        fig_gross_cost.update_yaxes(rangemode="tozero")
-                        fig_gross_cost.update_layout(
+                        fig_net_emis.update_xaxes(type="category")
+                        fig_net_emis.update_yaxes(rangemode="tozero")
+                        fig_net_emis.update_layout(
                             xaxis_title="",
-                            yaxis_title=f"{_curr}/m²·a",
+                            yaxis_title="kgCO₂e/m²·a",
                             legend_title_text="Scenario",
                             legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
                             margin=dict(b=90),
                         )
-                        st_plotly_chart(fig_gross_cost, use_container_width=True, key="scenario_gross_cost")
-                    else:
-                        st.info("Gross cost not available for this project.")
+                        st_plotly_chart(fig_net_emis, use_container_width=True, key="scenario_net_emissions")
 
-            else:
-                st.info("Project Area must be greater than 0 to show per m² net KPI charts.")
+                    with k3:
+                        if net_cost_col_m2 in df_kpi.columns:
+                            fig_net_cost = px.bar(
+                                df_kpi,
+                                x="Scenario",
+                                y=net_cost_col_m2,
+                                color="Scenario",
+                                color_discrete_map=scenario_color_map,
+                                category_orders={"Scenario": scenario_order},
+                                text_auto=".2f",
+                                title=f"Net Cost ({_curr}/m²·a)",
+                            )
+                            fig_net_cost.update_xaxes(type="category")
+                            fig_net_cost.update_yaxes(rangemode="tozero")
+                            fig_net_cost.update_layout(
+                                xaxis_title="",
+                                yaxis_title=f"{_curr}/m²·a",
+                                legend_title_text="Scenario",
+                                legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                margin=dict(b=90),
+                            )
+                            st_plotly_chart(fig_net_cost, use_container_width=True, key="scenario_net_cost")
 
-            # Scenario comparison charts (factored values, stacked by Energy Source)
-            if not _area or _area <= 0:
-                st.warning("Project Area must be greater than 0 to show per m² scenario charts.")
-            else:
-                # scenario_order is defined above from scenarios (categorical x-axis)
+                    # Gross KPI charts (excl. On-site_Generation)
+                    df_kpi["Gross Emissions (kgCO₂e/m²·a)"] = (df_kpi["Gross CO2 (t/a)"] * 1000.0) / _area
 
-                # 1) End Energy /m² (factored) by energy source
-                df_energy_src = pd.DataFrame(energy_rows)
-                if not df_energy_src.empty:
-                    df_energy_src["Scenario"] = df_energy_src["Scenario"].astype(str)
-                    fig_end_energy = px.bar(
-                        df_energy_src,
-                        x="Scenario",
-                        y="End Energy (kWh/m²·a)",
-                        color="Energy_Source",
-                        barmode="relative",
-                        title="End Energy /m² by Energy Source and Scenario (Net)",
-                        category_orders={"Scenario": scenario_order},
-                        color_discrete_map=color_map_sources,
-                        text_auto=".1f",
-                        height=600,
-                    )
-                    fig_end_energy.update_layout(
-                        xaxis_title="Scenario",
-                        yaxis_title="kWh/m²·a",
-                        legend_title_text="Energy Source",
-                    )
-                    fig_end_energy.update_traces(textfont_size=14, textfont_color="white")
-                    fig_end_energy.update_xaxes(type="category")
-                    st_plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
+                    gross_cost_col_a = f"Gross Cost ({_curr}/a)"
+                    gross_cost_col_m2 = f"Gross Cost ({_curr}/m²·a)"
+                    if gross_cost_col_a in df_kpi.columns:
+                        df_kpi[gross_cost_col_m2] = df_kpi[gross_cost_col_a] / _area
 
-                # 2) Energy Emissions /m² (factored) by energy source
-                df_emis_src = pd.DataFrame(emissions_rows)
-                if not df_emis_src.empty:
-                    df_emis_src["Scenario"] = df_emis_src["Scenario"].astype(str)
-                    fig_emis = px.bar(
-                        df_emis_src,
-                        x="Scenario",
-                        y="Emissions (kgCO₂e/m²·a)",
-                        color="Energy_Source",
-                        barmode="relative",
-                        title="Energy Emissions /m² by Energy Source and Scenario (Net)",
-                        category_orders={"Scenario": scenario_order},
-                        color_discrete_map=color_map_sources,
-                        text_auto=".1f",
-                        height=600,
-                    )
-                    fig_emis.update_layout(
-                        xaxis_title="Scenario",
-                        yaxis_title="kgCO₂e/m²·a",
-                        legend_title_text="Energy Source",
-                    )
-                    fig_emis.update_traces(textfont_size=14, textfont_color="white")
-                    fig_emis.update_xaxes(type="category")
-                    st_plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
+                    st.markdown("### Gross KPI comparison (excl. On-site Generation)")
 
-                # 3) Energy Cost /m² (factored) by energy source
-                cost_col = f"Cost ({_curr}/m²·a)"
-                df_cost_src = pd.DataFrame(cost_rows)
-                if not df_cost_src.empty and cost_col in df_cost_src.columns:
-                    df_cost_src["Scenario"] = df_cost_src["Scenario"].astype(str)
-                    fig_cost = px.bar(
-                        df_cost_src,
-                        x="Scenario",
-                        y=cost_col,
-                        color="Energy_Source",
-                        barmode="relative",
-                        title=f"Energy Cost /m² by Energy Source and Scenario [{_curr}] (Net)",
-                        category_orders={"Scenario": scenario_order},
-                        color_discrete_map=color_map_sources,
-                        text_auto=".1f",
-                        height=600,
-                    )
-                    fig_cost.update_layout(
-                        xaxis_title="Scenario",
-                        yaxis_title=f"{_curr}/m²·a",
-                        legend_title_text="Energy Source",
-                    )
-                    fig_cost.update_traces(textfont_size=14, textfont_color="white")
-                    fig_cost.update_xaxes(type="category")
-                    st_plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
+                    g1, g2, g3 = st.columns(3)
+
+                    with g1:
+                        fig_gross_eui = px.bar(
+                            df_kpi,
+                            x="Scenario",
+                            y="Gross EUI (kWh/m²·a)",
+                            color="Scenario",
+                            color_discrete_map=scenario_color_map,
+                            category_orders={"Scenario": scenario_order},
+                            text_auto=".1f",
+                            title="Gross EUI (kWh/m²·a)",
+                        )
+                        fig_gross_eui.update_xaxes(type="category")
+                        fig_gross_eui.update_yaxes(rangemode="tozero")
+                        fig_gross_eui.update_layout(
+                            xaxis_title="",
+                            yaxis_title="kWh/m²·a",
+                            legend_title_text="Scenario",
+                            legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                            margin=dict(b=90),
+                        )
+                        st_plotly_chart(fig_gross_eui, use_container_width=True, key="scenario_gross_eui")
+
+                    with g2:
+                        fig_gross_emis = px.bar(
+                            df_kpi,
+                            x="Scenario",
+                            y="Gross Emissions (kgCO₂e/m²·a)",
+                            color="Scenario",
+                            color_discrete_map=scenario_color_map,
+                            category_orders={"Scenario": scenario_order},
+                            text_auto=".1f",
+                            title="Gross Emissions (kgCO₂e/m²·a)",
+                        )
+                        fig_gross_emis.update_xaxes(type="category")
+                        fig_gross_emis.update_yaxes(rangemode="tozero")
+                        fig_gross_emis.update_layout(
+                            xaxis_title="",
+                            yaxis_title="kgCO₂e/m²·a",
+                            legend_title_text="Scenario",
+                            legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                            margin=dict(b=90),
+                        )
+                        st_plotly_chart(fig_gross_emis, use_container_width=True, key="scenario_gross_emissions")
+
+                    with g3:
+                        if gross_cost_col_m2 in df_kpi.columns:
+                            fig_gross_cost = px.bar(
+                                df_kpi,
+                                x="Scenario",
+                                y=gross_cost_col_m2,
+                                color="Scenario",
+                                color_discrete_map=scenario_color_map,
+                                category_orders={"Scenario": scenario_order},
+                                text_auto=".2f",
+                                title=f"Gross Cost ({_curr}/m²·a)",
+                            )
+                            fig_gross_cost.update_xaxes(type="category")
+                            fig_gross_cost.update_yaxes(rangemode="tozero")
+                            fig_gross_cost.update_layout(
+                                xaxis_title="",
+                                yaxis_title=f"{_curr}/m²·a",
+                                legend_title_text="Scenario",
+                                legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                margin=dict(b=90),
+                            )
+                            st_plotly_chart(fig_gross_cost, use_container_width=True, key="scenario_gross_cost")
+                        else:
+                            st.info("Gross cost not available for this project.")
+
+                else:
+                    st.info("Project Area must be greater than 0 to show per m² net KPI charts.")
+
+                # Scenario comparison charts (factored values, stacked by Energy Source)
+                if not _area or _area <= 0:
+                    st.warning("Project Area must be greater than 0 to show per m² scenario charts.")
+                else:
+                    # scenario_order is defined above from scenarios (categorical x-axis)
+
+                    # 1) End Energy /m² (factored) by energy source
+                    df_energy_src = pd.DataFrame(energy_rows)
+                    if not df_energy_src.empty:
+                        df_energy_src["Scenario"] = df_energy_src["Scenario"].astype(str)
+                        fig_end_energy = px.bar(
+                            df_energy_src,
+                            x="Scenario",
+                            y="End Energy (kWh/m²·a)",
+                            color="Energy_Source",
+                            barmode="relative",
+                            title="End Energy /m² by Energy Source and Scenario (Net)",
+                            category_orders={"Scenario": scenario_order},
+                            color_discrete_map=color_map_sources,
+                            text_auto=".1f",
+                            height=600,
+                        )
+                        fig_end_energy.update_layout(
+                            xaxis_title="Scenario",
+                            yaxis_title="kWh/m²·a",
+                            legend_title_text="Energy Source",
+                        )
+                        fig_end_energy.update_traces(textfont_size=14, textfont_color="white")
+                        fig_end_energy.update_xaxes(type="category")
+                        st_plotly_chart(fig_end_energy, use_container_width=True, key="scenario_end_energy_m2_by_source")
+
+                    # 2) Energy Emissions /m² (factored) by energy source
+                    df_emis_src = pd.DataFrame(emissions_rows)
+                    if not df_emis_src.empty:
+                        df_emis_src["Scenario"] = df_emis_src["Scenario"].astype(str)
+                        fig_emis = px.bar(
+                            df_emis_src,
+                            x="Scenario",
+                            y="Emissions (kgCO₂e/m²·a)",
+                            color="Energy_Source",
+                            barmode="relative",
+                            title="Energy Emissions /m² by Energy Source and Scenario (Net)",
+                            category_orders={"Scenario": scenario_order},
+                            color_discrete_map=color_map_sources,
+                            text_auto=".1f",
+                            height=600,
+                        )
+                        fig_emis.update_layout(
+                            xaxis_title="Scenario",
+                            yaxis_title="kgCO₂e/m²·a",
+                            legend_title_text="Energy Source",
+                        )
+                        fig_emis.update_traces(textfont_size=14, textfont_color="white")
+                        fig_emis.update_xaxes(type="category")
+                        st_plotly_chart(fig_emis, use_container_width=True, key="scenario_emissions_m2_by_source")
+
+                    # 3) Energy Cost /m² (factored) by energy source
+                    cost_col = f"Cost ({_curr}/m²·a)"
+                    df_cost_src = pd.DataFrame(cost_rows)
+                    if not df_cost_src.empty and cost_col in df_cost_src.columns:
+                        df_cost_src["Scenario"] = df_cost_src["Scenario"].astype(str)
+                        fig_cost = px.bar(
+                            df_cost_src,
+                            x="Scenario",
+                            y=cost_col,
+                            color="Energy_Source",
+                            barmode="relative",
+                            title=f"Energy Cost /m² by Energy Source and Scenario [{_curr}] (Net)",
+                            category_orders={"Scenario": scenario_order},
+                            color_discrete_map=color_map_sources,
+                            text_auto=".1f",
+                            height=600,
+                        )
+                        fig_cost.update_layout(
+                            xaxis_title="Scenario",
+                            yaxis_title=f"{_curr}/m²·a",
+                            legend_title_text="Energy Source",
+                        )
+                        fig_cost.update_traces(textfont_size=14, textfont_color="white")
+                        fig_cost.update_xaxes(type="category")
+                        st_plotly_chart(fig_cost, use_container_width=True, key="scenario_cost_m2_by_source")
 
 
-                # Scenario comparison charts (factored values, stacked by End Use)
-                df_energy_eu = pd.DataFrame(energy_use_rows)
-                if not df_energy_eu.empty:
-                    df_energy_eu["Scenario"] = df_energy_eu["Scenario"].astype(str)
-                    fig_end_energy_eu = px.bar(
-                        df_energy_eu,
-                        x="Scenario",
-                        y="End Energy (kWh/m²·a)",
-                        color="End_Use",
-                        barmode="relative",
-                        title="End Energy /m² by End Use and Scenario (Gross)",
-                        category_orders={"Scenario": scenario_order, "End_Use": END_USE_ORDER},
-                        color_discrete_map=color_map,
-                        text_auto=".1f",
-                        height=600,
-                    )
-                    fig_end_energy_eu.update_layout(
-                        xaxis_title="Scenario",
-                        yaxis_title="kWh/m²·a",
-                        legend_title_text="End Use",
-                    )
-                    fig_end_energy_eu.update_traces(textfont_size=14, textfont_color="white")
-                    fig_end_energy_eu.update_xaxes(type="category")
-                    st_plotly_chart(fig_end_energy_eu, use_container_width=True, key="scenario_end_energy_m2_by_enduse")
+                    # Scenario comparison charts (factored values, stacked by End Use)
+                    df_energy_eu = pd.DataFrame(energy_use_rows)
+                    if not df_energy_eu.empty:
+                        df_energy_eu["Scenario"] = df_energy_eu["Scenario"].astype(str)
+                        fig_end_energy_eu = px.bar(
+                            df_energy_eu,
+                            x="Scenario",
+                            y="End Energy (kWh/m²·a)",
+                            color="End_Use",
+                            barmode="relative",
+                            title="End Energy /m² by End Use and Scenario (Gross)",
+                            category_orders={"Scenario": scenario_order, "End_Use": END_USE_ORDER},
+                            color_discrete_map=color_map,
+                            text_auto=".1f",
+                            height=600,
+                        )
+                        fig_end_energy_eu.update_layout(
+                            xaxis_title="Scenario",
+                            yaxis_title="kWh/m²·a",
+                            legend_title_text="End Use",
+                        )
+                        fig_end_energy_eu.update_traces(textfont_size=14, textfont_color="white")
+                        fig_end_energy_eu.update_xaxes(type="category")
+                        st_plotly_chart(fig_end_energy_eu, use_container_width=True, key="scenario_end_energy_m2_by_enduse")
 
 
 
-                df_emis_eu = pd.DataFrame(emissions_use_rows)
-                if not df_emis_eu.empty:
-                    df_emis_eu["Scenario"] = df_emis_eu["Scenario"].astype(str)
-                    fig_emis_eu = px.bar(
-                        df_emis_eu,
-                        x="Scenario",
-                        y="Emissions (kgCO₂e/m²·a)",
-                        color="End_Use",
-                        barmode="relative",
-                        title="Energy Emissions /m² by End Use and Scenario (Gross)",
-                        category_orders={"Scenario": scenario_order, "End_Use": END_USE_ORDER},
-                        color_discrete_map=color_map,
-                        text_auto=".1f",
-                        height=600,
-                    )
-                    fig_emis_eu.update_layout(
-                        xaxis_title="Scenario",
-                        yaxis_title="kgCO₂e/m²·a",
-                        legend_title_text="End Use",
-                    )
-                    fig_emis_eu.update_traces(textfont_size=14, textfont_color="white")
-                    fig_emis_eu.update_xaxes(type="category")
-                    st_plotly_chart(fig_emis_eu, use_container_width=True, key="scenario_emissions_m2_by_enduse")
+                    df_emis_eu = pd.DataFrame(emissions_use_rows)
+                    if not df_emis_eu.empty:
+                        df_emis_eu["Scenario"] = df_emis_eu["Scenario"].astype(str)
+                        fig_emis_eu = px.bar(
+                            df_emis_eu,
+                            x="Scenario",
+                            y="Emissions (kgCO₂e/m²·a)",
+                            color="End_Use",
+                            barmode="relative",
+                            title="Energy Emissions /m² by End Use and Scenario (Gross)",
+                            category_orders={"Scenario": scenario_order, "End_Use": END_USE_ORDER},
+                            color_discrete_map=color_map,
+                            text_auto=".1f",
+                            height=600,
+                        )
+                        fig_emis_eu.update_layout(
+                            xaxis_title="Scenario",
+                            yaxis_title="kgCO₂e/m²·a",
+                            legend_title_text="End Use",
+                        )
+                        fig_emis_eu.update_traces(textfont_size=14, textfont_color="white")
+                        fig_emis_eu.update_xaxes(type="category")
+                        st_plotly_chart(fig_emis_eu, use_container_width=True, key="scenario_emissions_m2_by_enduse")
 
-                df_cost_eu = pd.DataFrame(cost_use_rows)
-                if not df_cost_eu.empty and cost_col in df_cost_eu.columns:
-                    df_cost_eu["Scenario"] = df_cost_eu["Scenario"].astype(str)
-                    fig_cost_eu = px.bar(
-                        df_cost_eu,
-                        x="Scenario",
-                        y=cost_col,
-                        color="End_Use",
-                        barmode="relative",
-                        title=f"Energy Cost /m² by End Use and Scenario [{_curr}] (Gross)",
-                        category_orders={"Scenario": scenario_order, "End_Use": END_USE_ORDER},
-                        color_discrete_map=color_map,
-                        text_auto=".1f",
-                        height=600,
+                    df_cost_eu = pd.DataFrame(cost_use_rows)
+                    if not df_cost_eu.empty and cost_col in df_cost_eu.columns:
+                        df_cost_eu["Scenario"] = df_cost_eu["Scenario"].astype(str)
+                        fig_cost_eu = px.bar(
+                            df_cost_eu,
+                            x="Scenario",
+                            y=cost_col,
+                            color="End_Use",
+                            barmode="relative",
+                            title=f"Energy Cost /m² by End Use and Scenario [{_curr}] (Gross)",
+                            category_orders={"Scenario": scenario_order, "End_Use": END_USE_ORDER},
+                            color_discrete_map=color_map,
+                            text_auto=".1f",
+                            height=600,
+                        )
+                        fig_cost_eu.update_layout(
+                            xaxis_title="Scenario",
+                            yaxis_title=f"{_curr}/m²·a",
+                            legend_title_text="End Use",
+                        )
+                        fig_cost_eu.update_traces(textfont_size=14, textfont_color="white")
+                        fig_cost_eu.update_xaxes(type="category")
+                        st_plotly_chart(fig_cost_eu, use_container_width=True, key="scenario_cost_m2_by_enduse")
+
+
+            with st.expander("Life Cycle Comparission", expanded=True):
+                st.caption(
+                    "Life-cycle comparison uses the committed global LCC assumptions from the LCC-Analysis tab. "
+                    "Scenario-specific Energy_Balance overrides and LCC investment measures are included."
+                )
+
+                # Build one cumulative LCC trajectory per scenario. Nominal costs are shown as solid lines,
+                # discounted costs as dashed lines, using the same scenario color for both.
+                all_enduses_lcc_cmp = []
+                try:
+                    _base_lcc_df_cmp = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
+                    all_enduses_lcc_cmp.extend([c for c in _base_lcc_df_cmp.columns if c != "Month"])
+                except Exception:
+                    pass
+                try:
+                    for _sc_name in scenario_order:
+                        _df_tmp_lcc = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(_sc_name))
+                        all_enduses_lcc_cmp.extend([c for c in _df_tmp_lcc.columns if c != "Month"])
+                except Exception:
+                    pass
+                all_enduses_lcc_cmp = list(dict.fromkeys([_canon_enduse_name(str(u)) for u in all_enduses_lcc_cmp if str(u).strip()]))
+
+                if not all_enduses_lcc_cmp:
+                    st.info("No Energy_Balance data available for life-cycle comparison.")
+                else:
+                    project_year_lcc_cmp = int(st.session_state.get("project_year", 2025))
+                    lcc_global_cmp = _get_lcc_global_state_payload(all_enduses_lcc_cmp)
+                    analysis_period_lcc_cmp = max(1, _to_int_lcc(lcc_global_cmp.get("analysis_period", 30), 30))
+                    lcc_years_cmp = list(range(project_year_lcc_cmp, project_year_lcc_cmp + analysis_period_lcc_cmp))
+
+                    fig_lcc_cmp = go.Figure()
+                    lcc_summary_rows = []
+
+                    for _idx_sc, _sc_name in enumerate(scenario_order):
+                        _payload_sc = scenarios.get(_sc_name, {}) or {}
+                        _color_sc = scenario_color_map.get(_sc_name, SCENARIO_COLOR_PALETTE[_idx_sc % len(SCENARIO_COLOR_PALETTE)])
+                        try:
+                            _df_energy_sc = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(_sc_name))
+                            _end_uses_sc = [_canon_enduse_name(str(c)) for c in _df_energy_sc.columns if c != "Month"]
+                            _cf_sc = compute_lcc_cashflow_table(
+                                _df_energy_sc,
+                                _payload_sc,
+                                _end_uses_sc,
+                                project_year_lcc_cmp,
+                                lcc_global=lcc_global_cmp,
+                            )
+                        except Exception:
+                            _cf_sc = pd.DataFrame()
+
+                        if _cf_sc is None or _cf_sc.empty:
+                            continue
+
+                        _annual_lcc_sc = (
+                            _cf_sc.groupby("Year", as_index=True)[["Nominal Cost", "Discounted Cost"]]
+                            .sum()
+                            .reindex(lcc_years_cmp)
+                            .fillna(0.0)
+                        )
+                        _cum_nominal_sc = _annual_lcc_sc["Nominal Cost"].cumsum()
+                        _cum_discounted_sc = _annual_lcc_sc["Discounted Cost"].cumsum()
+
+                        fig_lcc_cmp.add_trace(go.Scatter(
+                            x=lcc_years_cmp,
+                            y=_cum_nominal_sc.values,
+                            mode="lines+markers",
+                            name=f"{_sc_name} — Nominal",
+                            line=dict(color=_color_sc, width=4, dash="solid"),
+                            marker=dict(color=_color_sc, size=8),
+                        ))
+                        fig_lcc_cmp.add_trace(go.Scatter(
+                            x=lcc_years_cmp,
+                            y=_cum_discounted_sc.values,
+                            mode="lines+markers",
+                            name=f"{_sc_name} — Discounted",
+                            line=dict(color=_color_sc, width=4, dash="dash"),
+                            marker=dict(color=_color_sc, size=8),
+                        ))
+                        lcc_summary_rows.append({
+                            "Scenario": _sc_name,
+                            f"Cumulative Nominal LCC ({_curr})": float(_cum_nominal_sc.iloc[-1]) if len(_cum_nominal_sc) else 0.0,
+                            f"Cumulative Discounted LCC ({_curr})": float(_cum_discounted_sc.iloc[-1]) if len(_cum_discounted_sc) else 0.0,
+                        })
+
+                    fig_emis_cum_cmp = go.Figure()
+                    emissions_summary_rows = []
+                    for _idx_sc, _sc_name in enumerate(scenario_order):
+                        _color_sc = scenario_color_map.get(_sc_name, SCENARIO_COLOR_PALETTE[_idx_sc % len(SCENARIO_COLOR_PALETTE)])
+                        try:
+                            _annual_emissions_t = float(
+                                df_cmp.loc[df_cmp["Scenario"].astype(str) == str(_sc_name), "Net CO2 (t/a)"].iloc[0]
+                            )
+                        except Exception:
+                            _annual_emissions_t = 0.0
+                        _cum_emissions_t = np.cumsum([_annual_emissions_t for _ in lcc_years_cmp])
+                        fig_emis_cum_cmp.add_trace(go.Scatter(
+                            x=lcc_years_cmp,
+                            y=_cum_emissions_t,
+                            mode="lines+markers",
+                            name=str(_sc_name),
+                            line=dict(color=_color_sc, width=4),
+                            marker=dict(color=_color_sc, size=8),
+                        ))
+                        emissions_summary_rows.append({
+                            "Scenario": _sc_name,
+                            "Annual Net CO₂ (t/a)": _annual_emissions_t,
+                            "Cumulative Net CO₂ (t)": float(_cum_emissions_t[-1]) if len(_cum_emissions_t) else 0.0,
+                        })
+
+                    lc1, lc2 = st.columns(2)
+                    with lc1:
+                        st.subheader("Cumulative LCC")
+                        if fig_lcc_cmp.data:
+                            fig_lcc_cmp.update_layout(
+                                height=650,
+                                xaxis_title="Year",
+                                yaxis_title=f"Cumulative cost ({_curr})",
+                                legend_title_text="Scenario / cost basis",
+                                legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
+                                margin=dict(l=40, r=20, t=50, b=120),
+                            )
+                            fig_lcc_cmp.update_yaxes(rangemode="tozero")
+                            st_plotly_chart(fig_lcc_cmp, use_container_width=True, key="scenario_lcc_cumulative_all")
+                        else:
+                            st.info("No LCC cash flows available. Add LCC inputs in the LCC-Analysis tab.")
+
+                    with lc2:
+                        st.subheader("Cumulative Emissions")
+                        if fig_emis_cum_cmp.data:
+                            fig_emis_cum_cmp.update_layout(
+                                height=650,
+                                xaxis_title="Year",
+                                yaxis_title="Cumulative net emissions (tCO₂e)",
+                                legend_title_text="Scenario",
+                                legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
+                                margin=dict(l=40, r=20, t=50, b=120),
+                            )
+                            fig_emis_cum_cmp.update_yaxes(rangemode="tozero")
+                            st_plotly_chart(fig_emis_cum_cmp, use_container_width=True, key="scenario_emissions_cumulative_all")
+                        else:
+                            st.info("No emissions data available for cumulative comparison.")
+
+                    show_life_cycle_data = st.checkbox(
+                        "Show Life Cycle comparison data tables",
+                        value=False,
+                        key="scenario_life_cycle_data_show",
                     )
-                    fig_cost_eu.update_layout(
-                        xaxis_title="Scenario",
-                        yaxis_title=f"{_curr}/m²·a",
-                        legend_title_text="End Use",
-                    )
-                    fig_cost_eu.update_traces(textfont_size=14, textfont_color="white")
-                    fig_cost_eu.update_xaxes(type="category")
-                    st_plotly_chart(fig_cost_eu, use_container_width=True, key="scenario_cost_m2_by_enduse")
+                    if show_life_cycle_data:
+                        if lcc_summary_rows:
+                            st.write("#### Cumulative LCC summary")
+                            st.dataframe(pd.DataFrame(lcc_summary_rows), use_container_width=True)
+                        if emissions_summary_rows:
+                            st.write("#### Cumulative emissions summary")
+                            st.dataframe(pd.DataFrame(emissions_summary_rows), use_container_width=True)
 
 
     if not uploaded_file:
