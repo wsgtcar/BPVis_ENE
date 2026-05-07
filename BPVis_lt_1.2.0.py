@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.4",
+    page_title="WSGT_BPVis_ENE 1.4.5",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.4")
+st.sidebar.write("Version 1.4.5")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -4489,78 +4489,91 @@ with tab_lcc:
                 st.success("LCC inputs updated. Global LCC parameters were applied to all scenarios; investment measures were applied to the active scenario.")
                 del st.session_state["_lcc_flash"]
 
+            # Global LCC parameters are intentionally outside the form so they behave as true
+            # global app state. This is important for the Operational End Uses filter: it must
+            # update immediately and must not be re-seeded from the active scenario when scenarios switch.
+            st.write("### Global LCC parameters")
+            p1, p2, p3 = st.columns(3)
+            with p1:
+                st.number_input(
+                    "Analysis Period (years)",
+                    min_value=1,
+                    max_value=100,
+                    step=1,
+                    format="%d",
+                    key="lcc_analysis_period",
+                )
+            with p2:
+                numeric_input(
+                    "Interest Rate / Discount Rate (%)",
+                    float(st.session_state.get("lcc_interest_rate_pct", 4.0)),
+                    key="lcc_interest_rate_pct",
+                    min_value=-100.0,
+                    max_value=100.0,
+                    fmt="{:.4f}",
+                )
+            with p3:
+                numeric_input(
+                    "CAPEX / O&M Inflation Rate (%)",
+                    float(st.session_state.get("lcc_capex_inflation_pct", 2.0)),
+                    key="lcc_capex_inflation_pct",
+                    min_value=-100.0,
+                    max_value=100.0,
+                    fmt="{:.4f}",
+                )
+
+            st.write("### Energy inflation rate by source")
+            inf_cols = st.columns(3)
+            for i, src in enumerate(ENERGY_SOURCE_ORDER):
+                with inf_cols[i % 3]:
+                    src_key = f"lcc_energy_inflation_pct_{_safe_state_key(src)}"
+                    numeric_input(
+                        f"{src} Inflation (%)",
+                        float(st.session_state.get(src_key, 2.0)),
+                        key=src_key,
+                        min_value=-100.0,
+                        max_value=100.0,
+                        fmt="{:.4f}",
+                    )
+
+            st.write("### Operational cost filter")
+            st.multiselect(
+                "Operational End Uses included in LCC energy cost",
+                options=valid_enduses_lcc,
+                default=st.session_state.get("lcc_selected_operational_end_uses", _lcc_default_selected_enduses(valid_enduses_lcc)),
+                format_func=ui_name,
+                key="lcc_selected_operational_end_uses",
+                help="Only the selected End Uses are included in the operational energy-cost part of the LCC analysis.",
+            )
+
+            ref_display_options = ref_options_lcc
+            st.selectbox(
+                "Discounted Payback Reference Scenario",
+                options=ref_display_options,
+                index=ref_display_options.index(st.session_state.get("lcc_payback_reference_scenario", "")) if st.session_state.get("lcc_payback_reference_scenario", "") in ref_display_options else 0,
+                format_func=lambda x: "None" if str(x) == "" else str(x),
+                key="lcc_payback_reference_scenario",
+                help="Discounted payback is calculated against this reference scenario using discounted incremental cash flows.",
+            )
+
+            # Persist global LCC assumptions immediately after the global widgets are rendered.
+            # Do not wait for the investment-table form submit; otherwise the filter can appear
+            # to reset after scenario switching because forms only commit on submit.
+            try:
+                st.session_state[LCC_GLOBAL_STATE_KEY] = _capture_lcc_global_from_widgets(valid_enduses_lcc)
+                _apply_lcc_global_to_all_scenarios(valid_enduses_lcc)
+            except Exception:
+                pass
+
+            st.write("### Investment, maintenance and replacement assumptions")
+            st.caption(
+                "Replacement cost is not entered separately. It is calculated as the initial investment cost escalated by the CAPEX/O&M inflation rate up to each replacement year. "
+                "For measures that affect several uses, enter multiple Assigned End Uses separated by commas (example: Heating, Cooling). "
+                "The measure cost is allocated equally across the assigned End Uses. "
+                "Submit the form only when the investment table is changed."
+            )
+
             with st.form("lcc_analysis_form", clear_on_submit=False):
-                st.write("### Global LCC parameters")
-                p1, p2, p3 = st.columns(3)
-                with p1:
-                    st.number_input(
-                        "Analysis Period (years)",
-                        min_value=1,
-                        max_value=100,
-                        step=1,
-                        format="%d",
-                        key="lcc_analysis_period",
-                    )
-                with p2:
-                    numeric_input(
-                        "Interest Rate / Discount Rate (%)",
-                        float(st.session_state.get("lcc_interest_rate_pct", 4.0)),
-                        key="lcc_interest_rate_pct",
-                        min_value=-100.0,
-                        max_value=100.0,
-                        fmt="{:.4f}",
-                    )
-                with p3:
-                    numeric_input(
-                        "CAPEX / O&M Inflation Rate (%)",
-                        float(st.session_state.get("lcc_capex_inflation_pct", 2.0)),
-                        key="lcc_capex_inflation_pct",
-                        min_value=-100.0,
-                        max_value=100.0,
-                        fmt="{:.4f}",
-                    )
-
-                st.write("### Energy inflation rate by source")
-                inf_cols = st.columns(3)
-                for i, src in enumerate(ENERGY_SOURCE_ORDER):
-                    with inf_cols[i % 3]:
-                        src_key = f"lcc_energy_inflation_pct_{_safe_state_key(src)}"
-                        numeric_input(
-                            f"{src} Inflation (%)",
-                            float(st.session_state.get(src_key, 2.0)),
-                            key=src_key,
-                            min_value=-100.0,
-                            max_value=100.0,
-                            fmt="{:.4f}",
-                        )
-
-                st.write("### Operational cost filter")
-                st.multiselect(
-                    "Operational End Uses included in LCC energy cost",
-                    options=valid_enduses_lcc,
-                    default=st.session_state.get("lcc_selected_operational_end_uses", _lcc_default_selected_enduses(valid_enduses_lcc)),
-                    format_func=ui_name,
-                    key="lcc_selected_operational_end_uses",
-                    help="Only the selected End Uses are included in the operational energy-cost part of the LCC analysis.",
-                )
-
-                ref_display_options = ref_options_lcc
-                st.selectbox(
-                    "Discounted Payback Reference Scenario",
-                    options=ref_display_options,
-                    index=ref_display_options.index(st.session_state.get("lcc_payback_reference_scenario", "")) if st.session_state.get("lcc_payback_reference_scenario", "") in ref_display_options else 0,
-                    format_func=lambda x: "None" if str(x) == "" else str(x),
-                    key="lcc_payback_reference_scenario",
-                    help="Discounted payback is calculated against this reference scenario using discounted incremental cash flows.",
-                )
-
-                st.write("### Investment, maintenance and replacement assumptions")
-                st.caption(
-                    "Replacement cost is not entered separately. It is calculated as the initial investment cost escalated by the CAPEX/O&M inflation rate up to each replacement year. "
-                    "For measures that affect several uses, enter multiple Assigned End Uses separated by commas (example: Heating, Cooling). "
-                    "The measure cost is allocated equally across the assigned End Uses."
-                )
-
                 editor_kwargs_lcc = {
                     "num_rows": "dynamic",
                     "use_container_width": True,
@@ -4612,7 +4625,7 @@ with tab_lcc:
                     **editor_kwargs_lcc,
                 )
 
-                apply_lcc_inputs = st.form_submit_button("Update LCC Analysis", use_container_width=False)
+                apply_lcc_inputs = st.form_submit_button("Update LCC Investment Measures", use_container_width=False)
 
             if apply_lcc_inputs:
                 committed_lcc_df = _lcc_investments_records_to_df(edited_lcc_investments, end_uses=valid_enduses_lcc)
