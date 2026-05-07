@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 1.4.10",
+    page_title="WSGT_BPVis_ENE 1.4.11",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -294,7 +294,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 1.4.10")
+st.sidebar.write("Version 1.4.11")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2829,12 +2829,24 @@ with tab1:
                 current_active = scenario_names[0]
                 st.session_state["active_scenario"] = current_active
 
-            # Keep the selector in sync BEFORE the widget is rendered.
-            # This is safe because "active_scenario_selector" has not been instantiated yet in this run.
-            if st.session_state.get("active_scenario_selector") not in scenario_names or st.session_state.get("active_scenario_selector") != current_active:
+            # Keep the selector valid BEFORE the widget is rendered.
+            # Do NOT force it back to current_active when the user has just selected
+            # another valid scenario: on the following rerun, Streamlit already stores
+            # the user's new dropdown value in active_scenario_selector, while
+            # active_scenario still contains the previous canonical value. If we
+            # overwrite the selector here, manual switching becomes impossible.
+            #
+            # For button actions (New / Duplicate / Rename / Delete), _activate_scenario
+            # sets _active_scenario_selector_sync_to. That flag is consumed here on
+            # the next run, safely before the selectbox widget is instantiated.
+            selector_sync_to = st.session_state.pop("_active_scenario_selector_sync_to", None)
+            if selector_sync_to in scenario_names:
+                st.session_state["active_scenario_selector"] = selector_sync_to
+            elif st.session_state.get("active_scenario_selector") not in scenario_names:
                 st.session_state["active_scenario_selector"] = current_active
 
-            active_idx = scenario_names.index(current_active) if current_active in scenario_names else 0
+            selector_value = st.session_state.get("active_scenario_selector", current_active)
+            active_idx = scenario_names.index(selector_value) if selector_value in scenario_names else (scenario_names.index(current_active) if current_active in scenario_names else 0)
             active_selected = st.selectbox(
                 "Active Scenario",
                 scenario_names,
@@ -2879,9 +2891,15 @@ with tab1:
                         load_scenario_into_widgets(scenarios[_scenario_name], _eu)
                         st.session_state["active_scenario"] = _scenario_name
                         st.session_state["_prev_active_scenario"] = _scenario_name
+                        # Do not write to the selectbox key in this run because the
+                        # widget may already exist. Instead, request a safe pre-widget
+                        # sync for the next rerun.
+                        st.session_state["_active_scenario_selector_sync_to"] = _scenario_name
                 except Exception:
-                    st.session_state["active_scenario"] = str(_scenario_name)
-                    st.session_state["_prev_active_scenario"] = str(_scenario_name)
+                    _scenario_name = str(_scenario_name)
+                    st.session_state["active_scenario"] = _scenario_name
+                    st.session_state["_prev_active_scenario"] = _scenario_name
+                    st.session_state["_active_scenario_selector_sync_to"] = _scenario_name
 
             # Manual scenario switch from the selectbox.
             if active_selected != current_active:
