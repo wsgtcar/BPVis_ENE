@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.1.0",
+    page_title="WSGT_BPVis_ENE 2.1.1",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.1.0")
+st.sidebar.write("Version 2.1.1")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1911,7 +1911,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.1.0"
+REPORT_VERSION = "2.1.1"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2226,9 +2226,38 @@ def _report_format_number(x, decimals=1, prefix="", suffix=""):
 
 
 def _report_add_chart(story, styles, title: str, png_buf: io.BytesIO, caption: str = ""):
+    """Add a chart image to the PDF without distorting its aspect ratio.
+
+    The previous implementation forced every image into a fixed width/height box,
+    which stretched wide or tall diagrams. This version reads the generated PNG
+    size and scales it proportionally to fit within an A4-safe content box.
+    """
     from reportlab.platypus import Paragraph, Spacer, Image, KeepTogether
     from reportlab.lib.units import cm
-    img = Image(png_buf, width=17.0 * cm, height=9.2 * cm)
+    from reportlab.lib.utils import ImageReader
+
+    max_w = 17.0 * cm
+    max_h = 10.2 * cm
+
+    try:
+        data = png_buf.getvalue()
+        reader = ImageReader(io.BytesIO(data))
+        iw, ih = reader.getSize()
+        if iw and ih:
+            scale = min(max_w / float(iw), max_h / float(ih))
+            img_w = float(iw) * scale
+            img_h = float(ih) * scale
+        else:
+            img_w, img_h = max_w, 9.2 * cm
+        img = Image(io.BytesIO(data), width=img_w, height=img_h)
+    except Exception:
+        # Fallback still preserves proportions through ReportLab's proportional mode.
+        try:
+            png_buf.seek(0)
+        except Exception:
+            pass
+        img = Image(png_buf, width=max_w, height=max_h, kind="proportional")
+
     block = [Paragraph(title, styles["Heading3"]), img]
     if caption:
         block.append(Paragraph(caption, styles["CaptionSmall"]))
@@ -2499,35 +2528,46 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     # Loads
     add_section("5. Loads Analysis")
     load_cols = [c for c in df_loads.columns if c not in ["hoy", "doy", "day", "month", "weekday", "hour"]]
-    selected_load = load_cols[0] if load_cols else ""
-    if selected_load:
-        s_load = pd.to_numeric(df_loads[selected_load], errors="coerce").dropna()
-        specific = (s_load / project_area_r) * 1000.0 if project_area_r else s_load * 0.0
-        add_kpi_table(f"Load KPIs - {ui_name(selected_load)}", [
-            ("Total load", f"{s_load.sum():,.0f} kWh"),
-            ("Maximum load", f"{s_load.max():,.1f} kW"),
-            ("Minimum load", f"{s_load.min():,.1f} kW"),
-            ("Maximum specific load", f"{specific.max():,.1f} W/m²"),
-            ("95th percentile specific load", f"{np.percentile(specific.dropna(), 95):,.1f} W/m²" if not specific.dropna().empty else "n/a"),
-            ("80th percentile specific load", f"{np.percentile(specific.dropna(), 80):,.1f} W/m²" if not specific.dropna().empty else "n/a"),
-        ])
-        if "month" in df_loads.columns:
-            monthly_load = df_loads.assign(_load=pd.to_numeric(df_loads[selected_load], errors="coerce")).groupby("month", as_index=False)["_load"].sum()
-            _report_add_chart(story, styles, "Monthly load sum", _report_bar_chart(monthly_load, "month", "_load", f"Monthly Load Sum - {ui_name(selected_load)}", "kWh", colors_loads.get(selected_load, CRREM_COLOR_BASELINE)), "Monthly load sum is calculated by summing the selected hourly load profile by month.")
-        _report_add_chart(story, styles, "Hourly load heatmap", _report_heatmap(df_loads, selected_load, f"Hourly Load Heatmap - {ui_name(selected_load)}"), "The heatmap shows hourly load intensity by day of year and hour.")
-        _report_add_chart(story, styles, "Load duration curve", _report_load_duration(df_loads, selected_load, f"Load Duration Curve - {ui_name(selected_load)}"), "The load duration curve sorts hourly load values descending and plots load against percentage of annual hours.")
-        try:
-            peaks = df_loads.loc[:, [c for c in ["month", "day", "weekday", "hour", selected_load] if c in df_loads.columns]].copy()
-            peaks[selected_load] = pd.to_numeric(peaks[selected_load], errors="coerce")
-            peaks = peaks.sort_values(selected_load, ascending=False).head(5)
-            rows_peak = [["month", "day", "weekday", "hour", selected_load]] + peaks.fillna("").astype(str).values.tolist()
-            story.append(Paragraph("Top 5 peak loads", styles["Heading3"]))
-            story.append(_report_table_flowable(rows_peak, font_size=6.8))
-        except Exception:
-            pass
+    load_cols = [c for c in load_cols if pd.to_numeric(df_loads.get(c, pd.Series(dtype=float)), errors="coerce").notna().any()]
+
+    if load_cols:
+        story.append(Paragraph(
+            "This section includes all load profiles available in the project's Loads_Balance data, not only the load selected in the interactive Streamlit view.",
+            styles["BodyText"]
+        ))
+
+        for idx_load, selected_load in enumerate(load_cols, start=1):
+            if idx_load > 1:
+                story.append(Spacer(1, 0.35 * cm))
+            story.append(Paragraph(f"Load profile {idx_load}: {ui_name(selected_load)}", styles["Heading3"]))
+
+            s_load = pd.to_numeric(df_loads[selected_load], errors="coerce").dropna()
+            specific = (s_load / project_area_r) * 1000.0 if project_area_r else s_load * 0.0
+            add_kpi_table(f"Load KPIs - {ui_name(selected_load)}", [
+                ("Total load", f"{s_load.sum():,.0f} kWh"),
+                ("Maximum load", f"{s_load.max():,.1f} kW"),
+                ("Minimum load", f"{s_load.min():,.1f} kW"),
+                ("Maximum specific load", f"{specific.max():,.1f} W/m²"),
+                ("95th percentile specific load", f"{np.percentile(specific.dropna(), 95):,.1f} W/m²" if not specific.dropna().empty else "n/a"),
+                ("80th percentile specific load", f"{np.percentile(specific.dropna(), 80):,.1f} W/m²" if not specific.dropna().empty else "n/a"),
+            ])
+            if "month" in df_loads.columns:
+                monthly_load = df_loads.assign(_load=pd.to_numeric(df_loads[selected_load], errors="coerce")).groupby("month", as_index=False)["_load"].sum()
+                _report_add_chart(story, styles, "Monthly load sum", _report_bar_chart(monthly_load, "month", "_load", f"Monthly Load Sum - {ui_name(selected_load)}", "kWh", colors_loads.get(selected_load, CRREM_COLOR_BASELINE)), "Monthly load sum is calculated by summing the hourly load profile by month.")
+            _report_add_chart(story, styles, "Hourly load heatmap", _report_heatmap(df_loads, selected_load, f"Hourly Load Heatmap - {ui_name(selected_load)}"), "The heatmap shows hourly load intensity by day of year and hour.")
+            _report_add_chart(story, styles, "Load duration curve", _report_load_duration(df_loads, selected_load, f"Load Duration Curve - {ui_name(selected_load)}"), "The load duration curve sorts hourly load values descending and plots load against percentage of annual hours.")
+            try:
+                peaks = df_loads.loc[:, [c for c in ["month", "day", "weekday", "hour", selected_load] if c in df_loads.columns]].copy()
+                peaks[selected_load] = pd.to_numeric(peaks[selected_load], errors="coerce")
+                peaks = peaks.sort_values(selected_load, ascending=False).head(5)
+                rows_peak = [["month", "day", "weekday", "hour", selected_load]] + peaks.fillna("").astype(str).values.tolist()
+                story.append(Paragraph(f"Top 5 peak loads - {ui_name(selected_load)}", styles["Heading3"]))
+                story.append(_report_table_flowable(rows_peak, font_size=6.8))
+            except Exception:
+                pass
     else:
         story.append(Paragraph("No Loads_Balance data available.", styles["BodyText"]))
-    add_input_table("Relevant inputs", [("Selected load shown in report", ui_name(selected_load) if selected_load else "n/a"), ("Project area", f"{project_area_r:,.1f} m²")])
+    add_input_table("Relevant inputs", [("Load profiles included", ", ".join([ui_name(c) for c in load_cols]) if load_cols else "n/a"), ("Number of load profiles", str(len(load_cols))), ("Project area", f"{project_area_r:,.1f} m²")])
 
     # Benchmark
     add_section("6. Benchmark")
@@ -4272,7 +4312,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_1_0.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_1_1.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -4281,7 +4321,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_1_0.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_1_1.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
