@@ -5,3 +5,5 @@ plotly
 openpyxl
 numpy
 pathlib
+matplotlib
+reportlab
