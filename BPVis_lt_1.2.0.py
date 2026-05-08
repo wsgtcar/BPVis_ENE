@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.0.4",
+    page_title="WSGT_BPVis_ENE 2.1.0",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.0.4")
+st.sidebar.write("Version 2.1.0")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1906,6 +1906,752 @@ def _format_payback(pb: Optional[float]) -> str:
     if pb is None or (isinstance(pb, float) and np.isnan(pb)):
         return "Not reached"
     return f"{float(pb):,.1f} years"
+
+
+# =========================
+# Report generation helpers (PDF)
+# =========================
+REPORT_VERSION = "2.1.0"
+
+
+def _report_sanitize_filename(text: str) -> str:
+    try:
+        out = re.sub(r"[^0-9A-Za-z._-]+", "_", str(text)).strip("_")
+        return out or "BPVis_Report"
+    except Exception:
+        return "BPVis_Report"
+
+
+def _report_active_payload(end_uses: list) -> Tuple[str, dict]:
+    """Return active scenario name and a fresh active scenario payload for the report."""
+    active = str(st.session_state.get("active_scenario", "Base") or "Base")
+    scenarios = st.session_state.get("scenarios", {})
+    if not isinstance(scenarios, dict):
+        scenarios = {}
+    payload = deepcopy(scenarios.get(active, {})) if isinstance(scenarios.get(active, {}), dict) else {}
+    try:
+        # Keep report aligned with the latest committed sidebar/widget values.
+        payload = capture_scenario_from_widgets(end_uses)
+        scenarios[active] = payload
+        st.session_state["scenarios"] = scenarios
+    except Exception:
+        pass
+    return active, payload
+
+
+def _report_prepare_energy_rows(df_energy: pd.DataFrame, payload: dict, apply_efficiency: bool = False) -> pd.DataFrame:
+    """Prepare monthly long-format energy rows for report calculations."""
+    if df_energy is None or df_energy.empty or "Month" not in df_energy.columns:
+        return pd.DataFrame(columns=["Month", "End_Use", "kWh", "Energy_Source"])
+    payload = payload or {}
+    df = df_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh").copy()
+    df["End_Use"] = df["End_Use"].apply(lambda x: _canon_enduse_name(str(x)))
+    df["kWh"] = pd.to_numeric(df["kWh"], errors="coerce").fillna(0.0)
+    if apply_efficiency:
+        eff = payload.get("efficiency", {}) or {}
+        df["Efficiency_Factor"] = df["End_Use"].map(lambda u: _to_float_lcc(eff.get(u, 1.0), 1.0)).replace(0.0, 1.0)
+        df["kWh"] = df["kWh"] / df["Efficiency_Factor"]
+    mapping = payload.get("mapping", {}) or {}
+    df["Energy_Source"] = df["End_Use"].map(lambda u: str(mapping.get(u, "Electricity")))
+    df.loc[~df["Energy_Source"].isin(ENERGY_SOURCE_ORDER), "Energy_Source"] = "Electricity"
+    return df[["Month", "End_Use", "kWh", "Energy_Source"]]
+
+
+def _report_factor_maps(payload: dict) -> Tuple[dict, dict]:
+    payload = payload or {}
+    factors = payload.get("factors", {}) or {}
+    tariffs = payload.get("tariffs", {}) or {}
+    factor_map = {src: _to_float_lcc(factors.get(src, 0.0), 0.0) for src in ENERGY_SOURCE_ORDER}
+    tariff_map = {src: _to_float_lcc(tariffs.get(src, 0.0), 0.0) for src in ENERGY_SOURCE_ORDER}
+    return factor_map, tariff_map
+
+
+def _report_colors_for(labels, color_dict=None, fallback="#777777"):
+    out = []
+    cmap = color_dict or {}
+    for i, lab in enumerate(list(labels)):
+        col = cmap.get(str(lab), cmap.get(_canon_enduse_name(str(lab)), None))
+        if not col:
+            col = SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)] if labels is not None else fallback
+        out.append(col)
+    return out
+
+
+def _report_apply_axis_style(ax):
+    ax.grid(True, axis="y", alpha=0.25, linewidth=0.7)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="both", labelsize=8)
+
+
+def _report_fig_to_png_bytes(fig) -> io.BytesIO:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=170, bbox_inches="tight", facecolor="white")
+    buf.seek(0)
+    try:
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+    except Exception:
+        pass
+    return buf
+
+
+def _report_stacked_monthly_chart(df: pd.DataFrame, value_col: str, category_col: str, title: str, y_label: str, color_dict: dict) -> io.BytesIO:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    if df is None or df.empty:
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center")
+        ax.set_axis_off()
+        return _report_fig_to_png_bytes(fig)
+    work = df.copy()
+    # The same helper is used for calendar-month charts and annual LCC charts.
+    # Use canonical month ordering only when the x values are month names; otherwise keep numeric/text order.
+    raw_x = work["Month"].astype(str)
+    if set(raw_x).intersection(set(MONTH_ORDER)):
+        work["_report_x"] = pd.Categorical(raw_x, categories=MONTH_ORDER, ordered=True)
+        x_order = [m for m in MONTH_ORDER if m in set(raw_x)]
+    else:
+        work["_report_x"] = raw_x
+        try:
+            x_order = [str(v) for v in sorted(pd.to_numeric(raw_x, errors="coerce").dropna().unique().tolist())]
+        except Exception:
+            x_order = []
+        if not x_order:
+            x_order = list(raw_x.dropna().unique())
+    cats = [c for c in END_USE_ORDER + ENERGY_SOURCE_ORDER + sorted(work[category_col].dropna().astype(str).unique().tolist()) if c in set(work[category_col].astype(str))]
+    pivot = work.groupby(["_report_x", category_col], observed=False)[value_col].sum().unstack(fill_value=0.0).reindex(x_order).fillna(0.0)
+    pos_bottom = np.zeros(len(pivot.index))
+    neg_bottom = np.zeros(len(pivot.index))
+    for cat, col in zip(cats, _report_colors_for(cats, color_dict)):
+        if cat not in pivot.columns:
+            continue
+        vals = pivot[cat].astype(float).values
+        pos = np.where(vals > 0, vals, 0.0)
+        neg = np.where(vals < 0, vals, 0.0)
+        if np.any(pos):
+            ax.bar(pivot.index.astype(str), pos, bottom=pos_bottom, label=ui_name(cat), color=col, width=0.72)
+            pos_bottom += pos
+        if np.any(neg):
+            ax.bar(pivot.index.astype(str), neg, bottom=neg_bottom, label=ui_name(cat), color=col, width=0.72)
+            neg_bottom += neg
+    totals = pivot.sum(axis=1).astype(float).values
+    ax.plot(pivot.index.astype(str), totals, color="black", linestyle="--", linewidth=1.4, marker="o", markersize=3, label="Net total")
+    ax.set_title(title, fontsize=11, weight="bold")
+    ax.set_ylabel(y_label, fontsize=9)
+    ax.tick_params(axis="x", rotation=45)
+    _report_apply_axis_style(ax)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        # Remove duplicate labels from positive/negative splits.
+        dedup = dict(zip(labels, handles))
+        ax.legend(dedup.values(), dedup.keys(), loc="upper center", bbox_to_anchor=(0.5, -0.28), ncol=3, fontsize=7, frameon=False)
+    fig.tight_layout(rect=[0, 0.12, 1, 1])
+    return _report_fig_to_png_bytes(fig)
+
+
+def _report_annual_stacked_chart(df: pd.DataFrame, value_col: str, category_col: str, title: str, y_label: str, color_dict: dict) -> io.BytesIO:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(5.2, 3.9))
+    if df is None or df.empty:
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center")
+        ax.set_axis_off()
+        return _report_fig_to_png_bytes(fig)
+    totals = df.groupby(category_col, as_index=True)[value_col].sum()
+    cats = [c for c in END_USE_ORDER + ENERGY_SOURCE_ORDER + sorted(totals.index.astype(str).tolist()) if c in set(totals.index.astype(str))]
+    pos_bottom = 0.0
+    neg_bottom = 0.0
+    for cat, col in zip(cats, _report_colors_for(cats, color_dict)):
+        val = float(totals.get(cat, 0.0))
+        if val >= 0:
+            ax.bar(["Total"], [val], bottom=[pos_bottom], label=ui_name(cat), color=col, width=0.48)
+            pos_bottom += val
+        else:
+            ax.bar(["Total"], [val], bottom=[neg_bottom], label=ui_name(cat), color=col, width=0.48)
+            neg_bottom += val
+    net = float(totals.sum())
+    ax.axhline(net, color="black", linestyle="--", linewidth=1.3)
+    ax.text(0, net, f" {net:,.0f}", fontsize=8, va="bottom" if net >= 0 else "top")
+    ax.set_title(title, fontsize=11, weight="bold")
+    ax.set_ylabel(y_label, fontsize=9)
+    _report_apply_axis_style(ax)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2, fontsize=7, frameon=False)
+    fig.tight_layout(rect=[0, 0.12, 1, 1])
+    return _report_fig_to_png_bytes(fig)
+
+
+def _report_pie_chart(series: pd.Series, title: str, center_text: str, color_dict: dict) -> io.BytesIO:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(5.2, 3.9))
+    if series is None or len(series) == 0:
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center")
+        ax.set_axis_off()
+        return _report_fig_to_png_bytes(fig)
+    s = pd.Series(series).copy()
+    s = s.replace([np.inf, -np.inf], np.nan).dropna()
+    s = s[s > 0]
+    if s.empty or float(s.sum()) == 0.0:
+        ax.text(0.5, 0.5, "No positive values available", ha="center", va="center")
+        ax.set_axis_off()
+        return _report_fig_to_png_bytes(fig)
+    labels = [ui_name(str(x)) for x in s.index.astype(str)]
+    colors = _report_colors_for(s.index.astype(str).tolist(), color_dict)
+    wedges, texts, autotexts = ax.pie(
+        s.values,
+        labels=None,
+        autopct=lambda p: f"{p:.0f}%" if p >= 4 else "",
+        startangle=90,
+        colors=colors,
+        pctdistance=0.78,
+        wedgeprops=dict(width=0.45, edgecolor="white"),
+        textprops=dict(fontsize=8),
+    )
+    ax.text(0, 0, center_text, ha="center", va="center", fontsize=10, weight="bold")
+    ax.set_title(title, fontsize=11, weight="bold")
+    ax.legend(wedges, labels, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=2, fontsize=7, frameon=False)
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    return _report_fig_to_png_bytes(fig)
+
+
+def _report_line_chart(series_dict: Dict[str, pd.Series], title: str, y_label: str, color_map_in: Optional[dict] = None, dashed: Optional[set] = None) -> io.BytesIO:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    dashed = dashed or set()
+    if not series_dict:
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center")
+        ax.set_axis_off()
+        return _report_fig_to_png_bytes(fig)
+    for i, (name, ser) in enumerate(series_dict.items()):
+        if ser is None or len(ser) == 0:
+            continue
+        ser = pd.Series(ser).dropna()
+        if ser.empty:
+            continue
+        col = (color_map_in or {}).get(name, SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)])
+        ax.plot(ser.index.astype(int), ser.values.astype(float), label=name, color=col, linewidth=1.5, linestyle="--" if name in dashed else "-", marker="o", markersize=2.8)
+    ax.set_title(title, fontsize=11, weight="bold")
+    ax.set_xlabel("Year", fontsize=9)
+    ax.set_ylabel(y_label, fontsize=9)
+    _report_apply_axis_style(ax)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=2, fontsize=7, frameon=False)
+    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    return _report_fig_to_png_bytes(fig)
+
+
+def _report_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, y_label: str, color: Optional[str] = None) -> io.BytesIO:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    if df is None or df.empty or x not in df.columns or y not in df.columns:
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center")
+        ax.set_axis_off()
+        return _report_fig_to_png_bytes(fig)
+    ax.bar(df[x].astype(str), pd.to_numeric(df[y], errors="coerce").fillna(0.0), color=color or CRREM_COLOR_BASELINE)
+    ax.set_title(title, fontsize=11, weight="bold")
+    ax.set_ylabel(y_label, fontsize=9)
+    ax.tick_params(axis="x", rotation=45)
+    _report_apply_axis_style(ax)
+    fig.tight_layout()
+    return _report_fig_to_png_bytes(fig)
+
+
+def _report_heatmap(df_loads: pd.DataFrame, load_col: str, title: str) -> io.BytesIO:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    try:
+        work = df_loads.copy()
+        work["doy"] = pd.to_numeric(work["doy"], errors="coerce")
+        work["hour"] = pd.to_numeric(work["hour"], errors="coerce")
+        work[load_col] = pd.to_numeric(work[load_col], errors="coerce")
+        piv = work.pivot_table(index="hour", columns="doy", values=load_col, aggfunc="mean").sort_index()
+        im = ax.imshow(piv.values, aspect="auto", origin="lower", cmap="inferno")
+        ax.set_xlabel("Day of year", fontsize=9)
+        ax.set_ylabel("Hour", fontsize=9)
+        ax.set_title(title, fontsize=11, weight="bold")
+        fig.colorbar(im, ax=ax, label=load_col, fraction=0.025, pad=0.02)
+    except Exception:
+        ax.text(0.5, 0.5, "No heatmap data available", ha="center", va="center")
+        ax.set_axis_off()
+    fig.tight_layout()
+    return _report_fig_to_png_bytes(fig)
+
+
+def _report_load_duration(df_loads: pd.DataFrame, load_col: str, title: str) -> io.BytesIO:
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    vals = pd.to_numeric(df_loads.get(load_col, pd.Series(dtype=float)), errors="coerce").dropna().sort_values(ascending=False).reset_index(drop=True)
+    if vals.empty:
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center")
+        ax.set_axis_off()
+    else:
+        pct = (np.arange(1, len(vals) + 1) / len(vals)) * 100.0
+        ax.plot(pct, vals.values, color=CRREM_COLOR_BASELINE, linewidth=1.6)
+        ax.fill_between(pct, vals.values, alpha=0.18, color=CRREM_COLOR_BASELINE)
+        ax.set_xlim(0, 100)
+        ax.set_xlabel("Percentage of hours (%)", fontsize=9)
+        ax.set_ylabel(f"{ui_name(load_col)} (kW)", fontsize=9)
+        ax.set_title(title, fontsize=11, weight="bold")
+        _report_apply_axis_style(ax)
+    fig.tight_layout()
+    return _report_fig_to_png_bytes(fig)
+
+
+def _report_table_flowable(rows, col_widths=None, font_size=7):
+    from reportlab.platypus import Table, TableStyle
+    from reportlab.lib import colors
+    if not rows:
+        rows = [["No data", ""]]
+    table = Table(rows, colWidths=col_widths, hAlign="LEFT", repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e9edf3")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), font_size),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#b8c0cc")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return table
+
+
+def _report_format_number(x, decimals=1, prefix="", suffix=""):
+    try:
+        return f"{prefix}{float(x):,.{decimals}f}{suffix}"
+    except Exception:
+        return f"{prefix}{x}{suffix}"
+
+
+def _report_add_chart(story, styles, title: str, png_buf: io.BytesIO, caption: str = ""):
+    from reportlab.platypus import Paragraph, Spacer, Image, KeepTogether
+    from reportlab.lib.units import cm
+    img = Image(png_buf, width=17.0 * cm, height=9.2 * cm)
+    block = [Paragraph(title, styles["Heading3"]), img]
+    if caption:
+        block.append(Paragraph(caption, styles["CaptionSmall"]))
+    block.append(Spacer(1, 0.18 * cm))
+    story.append(KeepTogether(block))
+
+
+def _report_crrem_limits_for_context(crrem: dict, target_id: str, crrem_use: str, mixed_records, years: list) -> Tuple[pd.Series, pd.Series]:
+    """Return CRREM carbon and EUI limits in kgCO2e/m2.a and kWh/m2.a for report years."""
+    if not crrem or not years:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+    try:
+        pt_df = crrem["property_types"].copy()
+        pc = crrem["pathways_carbon"].copy()
+        pe = crrem["pathways_eui"].copy()
+        pc_t = pc.loc[pc["target"].astype(str) == target_id]
+        pe_t = pe.loc[pe["target"].astype(str) == target_id]
+        carbon_pivot = pc_t.pivot_table(index="year", columns="property_type_code", values="kgco2e_per_m2_yr")
+        eui_pivot = pe_t.pivot_table(index="year", columns="property_type_code", values="kwh_per_m2_yr")
+        years_avail = [int(y) for y in years if int(y) in carbon_pivot.index and int(y) in eui_pivot.index]
+        if not years_avail:
+            return pd.Series(dtype=float), pd.Series(dtype=float)
+        if str(crrem_use) != "Mixed Use":
+            code_row = pt_df.loc[pt_df["app_use"].astype(str) == str(crrem_use)]
+            if code_row.empty:
+                return pd.Series(dtype=float), pd.Series(dtype=float)
+            p_code = str(code_row.iloc[0]["crrem_code"])
+            return carbon_pivot[p_code].reindex(years_avail).astype(float), eui_pivot[p_code].reindex(years_avail).astype(float)
+        mixed_df = _mixed_use_records_to_df(mixed_records)
+        if mixed_df.empty:
+            return pd.Series(dtype=float), pd.Series(dtype=float)
+        total_share = float(mixed_df["Area Share %"].sum()) or 100.0
+        use_to_code = dict(zip(pt_df["app_use"].astype(str), pt_df["crrem_code"].astype(str)))
+        carbon_limit = pd.Series(0.0, index=years_avail)
+        eui_limit = pd.Series(0.0, index=years_avail)
+        for _, row in mixed_df.iterrows():
+            u = str(row.get("Use Type", ""))
+            w = float(row.get("Area Share %", 0.0) or 0.0) / total_share
+            c = use_to_code.get(u)
+            if c and c in carbon_pivot.columns:
+                carbon_limit = carbon_limit + w * carbon_pivot[c].reindex(years_avail).astype(float)
+                eui_limit = eui_limit + w * eui_pivot[c].reindex(years_avail).astype(float)
+        return carbon_limit, eui_limit
+    except Exception:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+
+
+def _report_eui_series_for_payload(df_energy: pd.DataFrame, payload: dict, years: list, project_area: float) -> pd.Series:
+    """Return constant annual gross EUI series excluding on-site generation, with efficiency factors applied."""
+    try:
+        rows = _report_prepare_energy_rows(df_energy, payload, apply_efficiency=True)
+        onsite = set(get_onsite_generation_enduses(rows["End_Use"].unique())) | {ONSITE_GENERATION_ENDUSE, LEGACY_PV_ENDUSE}
+        consumption = rows.loc[~rows["End_Use"].isin(onsite), "kWh"].clip(lower=0.0).sum()
+        val = float(consumption) / float(project_area) if project_area else 0.0
+        return pd.Series({int(y): val for y in years}, dtype=float)
+    except Exception:
+        return pd.Series({int(y): 0.0 for y in years}, dtype=float)
+
+
+def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
+    """Generate an A4 PDF report for the active scenario, excluding the Raw Data tab."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image, KeepTogether
+    except Exception as exc:
+        raise RuntimeError("Report generation requires matplotlib and reportlab to be installed.") from exc
+
+    # Data and context
+    base_df = get_energy_balance_df(file_bytes, filename)
+    end_uses = [str(c) for c in base_df.columns if str(c) != "Month"]
+    active_name, payload = _report_active_payload(end_uses)
+    df_energy = get_energy_balance_df(file_bytes, filename, scenario_name=active_name)
+    df_loads = get_loads_balance_df(file_bytes, filename)
+
+    project_name_r = str(st.session_state.get("project_name", "Building Performance Dashboard") or "Building Performance Dashboard")
+    project_area_r = float(st.session_state.get("project_area", 0.0) or 0.0)
+    project_year_r = int(st.session_state.get("project_year", 2025) or 2025)
+    project_country_r = str(st.session_state.get("project_country", "Germany") or "Germany")
+    building_use_r = str(st.session_state.get("building_use", "Office") or "Office")
+    currency_r = str(st.session_state.get("currency_symbol", "€") or "€")
+    colors_eu = st.session_state.get("color_map_enduse", DEFAULT_COLOR_MAP)
+    colors_src = st.session_state.get("color_map_sources", DEFAULT_COLOR_MAP_SOURCES)
+    colors_loads = st.session_state.get("color_map_loads", DEFAULT_COLOR_MAP_LOADS)
+    colors_scenarios = st.session_state.get("color_map_scenarios", default_scenario_color_map(list(st.session_state.get("scenarios", {}).keys())))
+    scenario_color = colors_scenarios.get(active_name, CRREM_COLOR_BASELINE)
+    lcc_global = _get_lcc_global_state_payload(end_uses)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        rightMargin=1.5 * cm,
+        leftMargin=1.5 * cm,
+        topMargin=1.35 * cm,
+        bottomMargin=1.35 * cm,
+        title=f"BPVis ENE Report - {project_name_r}",
+    )
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="ReportTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=22, leading=26, alignment=TA_CENTER, spaceAfter=12))
+    styles.add(ParagraphStyle(name="SectionTitle", parent=styles["Heading1"], fontName="Helvetica-Bold", fontSize=17, leading=21, spaceAfter=10))
+    styles.add(ParagraphStyle(name="CaptionSmall", parent=styles["BodyText"], fontName="Helvetica", fontSize=7.4, leading=9, textColor=colors.HexColor("#4b5563"), spaceAfter=4))
+    styles["Heading2"].fontSize = 13
+    styles["Heading3"].fontSize = 10
+    styles["BodyText"].fontSize = 8.5
+    styles["BodyText"].leading = 10.5
+
+    story = []
+
+    def _page_number(canvas, doc_obj):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(colors.HexColor("#6b7280"))
+        canvas.drawRightString(A4[0] - 1.5 * cm, 0.75 * cm, f"BPVis ENE {REPORT_VERSION} | Page {doc_obj.page}")
+        canvas.restoreState()
+
+    def add_section(title: str):
+        if story:
+            story.append(PageBreak())
+        story.append(Paragraph(title, styles["SectionTitle"]))
+
+    def add_kpi_table(title: str, kpis: list):
+        story.append(Paragraph(title, styles["Heading3"]))
+        rows = [["KPI", "Value"]] + [[str(k), str(v)] for k, v in kpis]
+        story.append(_report_table_flowable(rows, col_widths=[8.0 * cm, 8.0 * cm], font_size=7.2))
+        story.append(Spacer(1, 0.25 * cm))
+
+    def add_input_table(title: str, inputs: list):
+        story.append(Paragraph(title, styles["Heading3"]))
+        rows = [["Input", "Value"]] + [[str(k), str(v)] for k, v in inputs]
+        story.append(_report_table_flowable(rows, col_widths=[8.0 * cm, 8.0 * cm], font_size=7.0))
+        story.append(Spacer(1, 0.25 * cm))
+
+    # Cover page
+    logo_candidates = [Path("WS_Logo.jpg"), Path("WS_Logo.png"), Path("Pamo_Icon_Black.png")]
+    logo_path = next((p for p in logo_candidates if p.exists()), None)
+    if logo_path is not None:
+        try:
+            story.append(Image(str(logo_path), width=12.0 * cm, height=3.0 * cm, kind="proportional"))
+            story.append(Spacer(1, 0.7 * cm))
+        except Exception:
+            pass
+    story.append(Paragraph("BPVis ENE - Automated Project Report", styles["ReportTitle"]))
+    story.append(Paragraph(f"Active scenario: <b>{active_name}</b>", styles["BodyText"]))
+    story.append(Spacer(1, 0.4 * cm))
+    project_rows = [
+        ["Project Data", "Value"],
+        ["Project name", project_name_r],
+        ["Building use", building_use_r],
+        ["Country", project_country_r],
+        ["Project year", str(project_year_r)],
+        ["Project area", f"{project_area_r:,.1f} m²"],
+        ["Currency", currency_r],
+        ["Report version", REPORT_VERSION],
+    ]
+    story.append(_report_table_flowable(project_rows, col_widths=[6.0 * cm, 10.0 * cm], font_size=8.5))
+    story.append(Spacer(1, 0.45 * cm))
+    story.append(Paragraph("This report presents the current active scenario only. It excludes the Raw Data tab and is formatted for A4 output. Each section starts on a new page.", styles["BodyText"]))
+
+    # Energy balance without factors
+    add_section("1. Energy Balance (without Factors)")
+    rows_raw = _report_prepare_energy_rows(df_energy, payload, apply_efficiency=False)
+    totals_eu = rows_raw.groupby("End_Use", as_index=True)["kWh"].sum()
+    totals_src = rows_raw.groupby("Energy_Source", as_index=True)["kWh"].sum()
+    eui_gross = totals_eu[totals_eu > 0].sum() / project_area_r if project_area_r else 0.0
+    net_eui = totals_eu.sum() / project_area_r if project_area_r else 0.0
+    add_kpi_table("Energy KPIs", [
+        ("Total annual consumption", f"{totals_eu[totals_eu > 0].sum():,.0f} kWh/a"),
+        ("Net annual energy", f"{totals_eu.sum():,.0f} kWh/a"),
+        ("Gross EUI", f"{eui_gross:,.1f} kWh/m²·a"),
+        ("Net EUI", f"{net_eui:,.1f} kWh/m²·a"),
+        ("Monthly average net energy", f"{rows_raw.groupby('Month')['kWh'].sum().mean():,.0f} kWh/month"),
+    ])
+    _report_add_chart(story, styles, "Monthly energy by end use", _report_stacked_monthly_chart(rows_raw, "kWh", "End_Use", "Monthly Energy by End Use", "kWh/month", colors_eu), "Monthly values are raw Energy_Balance values by end use. The dashed line is the monthly net total.")
+    _report_add_chart(story, styles, "Annual energy by end use", _report_annual_stacked_chart(rows_raw, "kWh", "End_Use", "Annual Energy by End Use", "kWh/a", colors_eu), "Annual values are the sum of all monthly Energy_Balance values. Negative on-site generation is shown below zero.")
+    pie_eu = (totals_eu[totals_eu > 0] / project_area_r) if project_area_r else totals_eu[totals_eu > 0]
+    _report_add_chart(story, styles, "Energy use intensity by end use", _report_pie_chart(pie_eu, "EUI Share by End Use", f"{eui_gross:,.1f}\nkWh/m²·a", colors_eu), "The donut uses positive consumption only and divides annual kWh by project area.")
+    _report_add_chart(story, styles, "Monthly energy by energy source", _report_stacked_monthly_chart(rows_raw.groupby(["Month", "Energy_Source"], as_index=False)["kWh"].sum(), "kWh", "Energy_Source", "Monthly Energy by Energy Source", "kWh/month", colors_src), "Monthly values are grouped by the active scenario end-use to energy-source mapping.")
+    _report_add_chart(story, styles, "Annual energy by energy source", _report_annual_stacked_chart(rows_raw, "kWh", "Energy_Source", "Annual Energy by Energy Source", "kWh/a", colors_src), "Annual source totals are calculated using the active scenario energy-source mapping.")
+    pie_src = (totals_src[totals_src > 0] / project_area_r) if project_area_r else totals_src[totals_src > 0]
+    _report_add_chart(story, styles, "Energy use intensity by energy source", _report_pie_chart(pie_src, "EUI Share by Energy Source", f"{pie_src.sum():,.1f}\nkWh/m²·a", colors_src), "Source intensity is annual kWh per source divided by project area.")
+    add_input_table("Relevant inputs", [
+        ("Scenario", active_name),
+        ("Project area", f"{project_area_r:,.1f} m²"),
+        ("Energy-source mapping", ", ".join([f"{ui_name(k)}={v}" for k, v in (payload.get("mapping", {}) or {}).items()])),
+    ])
+
+    # Energy balance with factors
+    add_section("2. Energy Balance (with Factors)")
+    rows_eff = _report_prepare_energy_rows(df_energy, payload, apply_efficiency=True)
+    totals_eff_eu = rows_eff.groupby("End_Use", as_index=True)["kWh"].sum()
+    totals_eff_src = rows_eff.groupby("Energy_Source", as_index=True)["kWh"].sum()
+    eui_eff_gross = totals_eff_eu[totals_eff_eu > 0].sum() / project_area_r if project_area_r else 0.0
+    net_eui_eff = totals_eff_eu.sum() / project_area_r if project_area_r else 0.0
+    add_kpi_table("Factored energy KPIs", [
+        ("Total annual consumption", f"{totals_eff_eu[totals_eff_eu > 0].sum():,.0f} kWh/a"),
+        ("Net annual energy", f"{totals_eff_eu.sum():,.0f} kWh/a"),
+        ("Gross EUI", f"{eui_eff_gross:,.1f} kWh/m²·a"),
+        ("Net EUI", f"{net_eui_eff:,.1f} kWh/m²·a"),
+        ("Monthly average net energy", f"{rows_eff.groupby('Month')['kWh'].sum().mean():,.0f} kWh/month"),
+    ])
+    _report_add_chart(story, styles, "Monthly factored energy by end use", _report_stacked_monthly_chart(rows_eff, "kWh", "End_Use", "Monthly Energy by End Use - with Factors", "kWh/month", colors_eu), "Each end-use kWh is divided by its efficiency factor before aggregation.")
+    _report_add_chart(story, styles, "Annual factored energy by end use", _report_annual_stacked_chart(rows_eff, "kWh", "End_Use", "Annual Energy by End Use - with Factors", "kWh/a", colors_eu), "Annual values are factored kWh after applying active scenario efficiency factors.")
+    pie_eff_eu = (totals_eff_eu[totals_eff_eu > 0] / project_area_r) if project_area_r else totals_eff_eu[totals_eff_eu > 0]
+    _report_add_chart(story, styles, "Factored EUI by end use", _report_pie_chart(pie_eff_eu, "Factored EUI Share by End Use", f"{eui_eff_gross:,.1f}\nkWh/m²·a", colors_eu), "The donut is based on positive factored consumption divided by project area.")
+    _report_add_chart(story, styles, "Monthly factored energy by source", _report_stacked_monthly_chart(rows_eff.groupby(["Month", "Energy_Source"], as_index=False)["kWh"].sum(), "kWh", "Energy_Source", "Monthly Energy by Source - with Factors", "kWh/month", colors_src), "Factored monthly kWh are grouped by energy source.")
+    _report_add_chart(story, styles, "Annual factored energy by source", _report_annual_stacked_chart(rows_eff, "kWh", "Energy_Source", "Annual Energy by Source - with Factors", "kWh/a", colors_src), "Source totals are after efficiency factors and source mapping.")
+    pie_eff_src = (totals_eff_src[totals_eff_src > 0] / project_area_r) if project_area_r else totals_eff_src[totals_eff_src > 0]
+    _report_add_chart(story, styles, "Factored EUI by energy source", _report_pie_chart(pie_eff_src, "Factored EUI Share by Energy Source", f"{pie_eff_src.sum():,.1f}\nkWh/m²·a", colors_src), "Source EUI is annual factored kWh divided by project area.")
+    add_input_table("Relevant inputs", [(f"Efficiency - {ui_name(k)}", f"{float(v):,.4f}") for k, v in (payload.get("efficiency", {}) or {}).items()])
+
+    # CO2 emissions
+    add_section("3. CO₂ Emissions (with Factors)")
+    factor_map, tariff_map = _report_factor_maps(payload)
+    rows_co2 = rows_eff.copy()
+    rows_co2["CO2_factor_kg_per_kWh"] = rows_co2["Energy_Source"].map(factor_map).fillna(0.0)
+    rows_co2["kgCO2"] = rows_co2["kWh"] * rows_co2["CO2_factor_kg_per_kWh"]
+    totals_co2_eu = rows_co2.groupby("End_Use", as_index=True)["kgCO2"].sum()
+    totals_co2_src = rows_co2.groupby("Energy_Source", as_index=True)["kgCO2"].sum()
+    gross_co2_int = totals_co2_eu[totals_co2_eu > 0].sum() / project_area_r if project_area_r else 0.0
+    net_co2_int = totals_co2_eu.sum() / project_area_r if project_area_r else 0.0
+    add_kpi_table("CO₂ KPIs", [
+        ("Total annual CO₂", f"{totals_co2_eu.sum():,.0f} kgCO₂/a"),
+        ("Monthly average CO₂", f"{rows_co2.groupby('Month')['kgCO2'].sum().mean():,.0f} kgCO₂/month"),
+        ("Net CO₂ intensity", f"{net_co2_int:,.1f} kgCO₂/m²·a"),
+        ("Gross CO₂ intensity", f"{gross_co2_int:,.1f} kgCO₂/m²·a"),
+    ])
+    _report_add_chart(story, styles, "Monthly CO₂ by end use", _report_stacked_monthly_chart(rows_co2, "kgCO2", "End_Use", "Monthly CO₂ by End Use", "kgCO₂/month", colors_eu), "CO₂ is calculated as factored kWh multiplied by the mapped energy-source emission factor.")
+    _report_add_chart(story, styles, "Annual CO₂ by end use", _report_annual_stacked_chart(rows_co2, "kgCO2", "End_Use", "Annual CO₂ by End Use", "kgCO₂/a", colors_eu), "Annual CO₂ is the sum of all monthly emissions by end use.")
+    pie_co2_eu = (totals_co2_eu[totals_co2_eu > 0] / project_area_r) if project_area_r else totals_co2_eu[totals_co2_eu > 0]
+    _report_add_chart(story, styles, "CO₂ intensity by end use", _report_pie_chart(pie_co2_eu, "CO₂ Intensity Share by End Use", f"{gross_co2_int:,.1f}\nkg/m²·a", colors_eu), "The donut uses positive annual kgCO₂ divided by project area.")
+    _report_add_chart(story, styles, "Monthly CO₂ by energy source", _report_stacked_monthly_chart(rows_co2.groupby(["Month", "Energy_Source"], as_index=False)["kgCO2"].sum(), "kgCO2", "Energy_Source", "Monthly CO₂ by Energy Source", "kgCO₂/month", colors_src), "Monthly CO₂ is grouped by energy source.")
+    _report_add_chart(story, styles, "Annual CO₂ by energy source", _report_annual_stacked_chart(rows_co2, "kgCO2", "Energy_Source", "Annual CO₂ by Energy Source", "kgCO₂/a", colors_src), "Annual source emissions are factored kWh times source-specific emission factors.")
+    pie_co2_src = (totals_co2_src[totals_co2_src > 0] / project_area_r) if project_area_r else totals_co2_src[totals_co2_src > 0]
+    _report_add_chart(story, styles, "CO₂ intensity by energy source", _report_pie_chart(pie_co2_src, "CO₂ Intensity Share by Energy Source", f"{pie_co2_src.sum():,.1f}\nkg/m²·a", colors_src), "Source CO₂ intensity is annual kgCO₂ per source divided by project area.")
+    add_input_table("Relevant inputs", [(f"Emission factor - {src}", f"{factor_map.get(src, 0.0):,.5f} kgCO₂/kWh") for src in ENERGY_SOURCE_ORDER])
+
+    # Energy cost
+    add_section("4. Energy Cost (with Factors)")
+    rows_cost = rows_eff.copy()
+    rows_cost["Tariff"] = rows_cost["Energy_Source"].map(tariff_map).fillna(0.0)
+    rows_cost["cost"] = rows_cost["kWh"] * rows_cost["Tariff"]
+    totals_cost_eu = rows_cost.groupby("End_Use", as_index=True)["cost"].sum()
+    totals_cost_src = rows_cost.groupby("Energy_Source", as_index=True)["cost"].sum()
+    gross_cost_int = totals_cost_eu[totals_cost_eu > 0].sum() / project_area_r if project_area_r else 0.0
+    net_cost_int = totals_cost_eu.sum() / project_area_r if project_area_r else 0.0
+    add_kpi_table("Cost KPIs", [
+        ("Total annual cost", f"{currency_r} {totals_cost_eu.sum():,.0f}/a"),
+        ("Monthly average cost", f"{currency_r} {rows_cost.groupby('Month')['cost'].sum().mean():,.0f}/month"),
+        ("Net cost intensity", f"{currency_r} {net_cost_int:,.2f}/m²·a"),
+        ("Gross cost intensity", f"{currency_r} {gross_cost_int:,.2f}/m²·a"),
+    ])
+    _report_add_chart(story, styles, "Monthly cost by end use", _report_stacked_monthly_chart(rows_cost, "cost", "End_Use", "Monthly Cost by End Use", f"{currency_r}/month", colors_eu), "Cost is factored kWh multiplied by the active scenario tariff of the mapped energy source.")
+    _report_add_chart(story, styles, "Annual cost by end use", _report_annual_stacked_chart(rows_cost, "cost", "End_Use", "Annual Cost by End Use", f"{currency_r}/a", colors_eu), "Annual costs are the sum of monthly costs. Negative on-site generation appears as avoided cost if present.")
+    pie_cost_eu = (totals_cost_eu[totals_cost_eu > 0] / project_area_r) if project_area_r else totals_cost_eu[totals_cost_eu > 0]
+    _report_add_chart(story, styles, "Cost intensity by end use", _report_pie_chart(pie_cost_eu, "Cost Intensity Share by End Use", f"{currency_r} {gross_cost_int:,.2f}\n/m²·a", colors_eu), "The donut uses positive annual costs divided by project area.")
+    _report_add_chart(story, styles, "Monthly cost by energy source", _report_stacked_monthly_chart(rows_cost.groupby(["Month", "Energy_Source"], as_index=False)["cost"].sum(), "cost", "Energy_Source", "Monthly Cost by Energy Source", f"{currency_r}/month", colors_src), "Monthly energy costs are grouped by source.")
+    _report_add_chart(story, styles, "Annual cost by energy source", _report_annual_stacked_chart(rows_cost, "cost", "Energy_Source", "Annual Cost by Energy Source", f"{currency_r}/a", colors_src), "Annual source costs are factored kWh times source-specific tariffs.")
+    pie_cost_src = (totals_cost_src[totals_cost_src > 0] / project_area_r) if project_area_r else totals_cost_src[totals_cost_src > 0]
+    _report_add_chart(story, styles, "Cost intensity by energy source", _report_pie_chart(pie_cost_src, "Cost Intensity Share by Energy Source", f"{currency_r} {pie_cost_src.sum():,.2f}\n/m²·a", colors_src), "Source cost intensity is annual cost per source divided by project area.")
+    add_input_table("Relevant inputs", [(f"Tariff - {src}", f"{currency_r} {tariff_map.get(src, 0.0):,.5f}/kWh") for src in ENERGY_SOURCE_ORDER])
+
+    # Loads
+    add_section("5. Loads Analysis")
+    load_cols = [c for c in df_loads.columns if c not in ["hoy", "doy", "day", "month", "weekday", "hour"]]
+    selected_load = load_cols[0] if load_cols else ""
+    if selected_load:
+        s_load = pd.to_numeric(df_loads[selected_load], errors="coerce").dropna()
+        specific = (s_load / project_area_r) * 1000.0 if project_area_r else s_load * 0.0
+        add_kpi_table(f"Load KPIs - {ui_name(selected_load)}", [
+            ("Total load", f"{s_load.sum():,.0f} kWh"),
+            ("Maximum load", f"{s_load.max():,.1f} kW"),
+            ("Minimum load", f"{s_load.min():,.1f} kW"),
+            ("Maximum specific load", f"{specific.max():,.1f} W/m²"),
+            ("95th percentile specific load", f"{np.percentile(specific.dropna(), 95):,.1f} W/m²" if not specific.dropna().empty else "n/a"),
+            ("80th percentile specific load", f"{np.percentile(specific.dropna(), 80):,.1f} W/m²" if not specific.dropna().empty else "n/a"),
+        ])
+        if "month" in df_loads.columns:
+            monthly_load = df_loads.assign(_load=pd.to_numeric(df_loads[selected_load], errors="coerce")).groupby("month", as_index=False)["_load"].sum()
+            _report_add_chart(story, styles, "Monthly load sum", _report_bar_chart(monthly_load, "month", "_load", f"Monthly Load Sum - {ui_name(selected_load)}", "kWh", colors_loads.get(selected_load, CRREM_COLOR_BASELINE)), "Monthly load sum is calculated by summing the selected hourly load profile by month.")
+        _report_add_chart(story, styles, "Hourly load heatmap", _report_heatmap(df_loads, selected_load, f"Hourly Load Heatmap - {ui_name(selected_load)}"), "The heatmap shows hourly load intensity by day of year and hour.")
+        _report_add_chart(story, styles, "Load duration curve", _report_load_duration(df_loads, selected_load, f"Load Duration Curve - {ui_name(selected_load)}"), "The load duration curve sorts hourly load values descending and plots load against percentage of annual hours.")
+        try:
+            peaks = df_loads.loc[:, [c for c in ["month", "day", "weekday", "hour", selected_load] if c in df_loads.columns]].copy()
+            peaks[selected_load] = pd.to_numeric(peaks[selected_load], errors="coerce")
+            peaks = peaks.sort_values(selected_load, ascending=False).head(5)
+            rows_peak = [["month", "day", "weekday", "hour", selected_load]] + peaks.fillna("").astype(str).values.tolist()
+            story.append(Paragraph("Top 5 peak loads", styles["Heading3"]))
+            story.append(_report_table_flowable(rows_peak, font_size=6.8))
+        except Exception:
+            pass
+    else:
+        story.append(Paragraph("No Loads_Balance data available.", styles["BodyText"]))
+    add_input_table("Relevant inputs", [("Selected load shown in report", ui_name(selected_load) if selected_load else "n/a"), ("Project area", f"{project_area_r:,.1f} m²")])
+
+    # Benchmark
+    add_section("6. Benchmark")
+    try:
+        benchmark_df = load_benchmark_data(building_use_r)
+        eui_net = net_eui_eff
+        co2_net = net_co2_int
+        cost_net = net_cost_int
+        bench_kpis = [("Net EUI", f"{eui_net:,.1f} kWh/m²·a"), ("Net CO₂ intensity", f"{co2_net:,.1f} kgCO₂/m²·a"), ("Net energy cost", f"{currency_r} {cost_net:,.2f}/m²·a")]
+        add_kpi_table("Benchmark KPIs", bench_kpis)
+        bench_df = pd.DataFrame({"KPI": ["EUI", "CO₂", "Cost"], "Value": [eui_net, co2_net, cost_net]})
+        _report_add_chart(story, styles, "Benchmark KPI overview", _report_bar_chart(bench_df, "KPI", "Value", "Project KPI Values", "Intensity / cost", CRREM_COLOR_BASELINE), "Benchmark categories depend on the selected building use and the benchmark template available in the app.")
+        if benchmark_df is not None and not benchmark_df.empty:
+            story.append(Paragraph("Benchmark data source loaded successfully for the selected building use.", styles["BodyText"]))
+        else:
+            story.append(Paragraph("No benchmark threshold sheet was found for the selected building use. The report therefore shows project KPI values only.", styles["BodyText"]))
+    except Exception:
+        add_kpi_table("Benchmark KPIs", [("Net EUI", f"{net_eui_eff:,.1f} kWh/m²·a"), ("Net CO₂ intensity", f"{net_co2_int:,.1f} kgCO₂/m²·a"), ("Net energy cost", f"{currency_r} {net_cost_int:,.2f}/m²·a")])
+    add_input_table("Relevant inputs", [("Building use", building_use_r), ("Country", project_country_r)])
+
+    # CRREM
+    add_section("7. CRREM-Analysis")
+    crrem = load_crrem_dataset(project_country_r)
+    if crrem is None:
+        story.append(Paragraph("CRREM dataset was not found. CRREM diagrams could not be generated.", styles["BodyText"]))
+    else:
+        target_label = str(st.session_state.get("crrem_target_select", "1.5°C") or "1.5°C")
+        target_id = "1.5C" if target_label.startswith("1.5") else "2C"
+        crrem_use = str(payload.get("crrem_use_type", st.session_state.get("crrem_use_type", "Office")) or "Office")
+        mixed_records = payload.get("crrem_mixed_use", st.session_state.get("crrem_mixed_use_df", []))
+        analysis_period = max(1, _to_int_lcc(lcc_global.get("analysis_period", 30), 30))
+        ef_grid = crrem.get("ef_grid")
+        max_year = int(min(int(project_year_r + analysis_period - 1), int(ef_grid.index.max()))) if ef_grid is not None and len(ef_grid) else int(project_year_r + analysis_period - 1)
+        years_crrem = list(range(int(project_year_r), max_year + 1))
+        carbon_limit, eui_limit = _report_crrem_limits_for_context(crrem, target_id, crrem_use, mixed_records, years_crrem)
+        if not carbon_limit.empty:
+            years_crrem = list(carbon_limit.index.astype(int))
+        annual_em_t = compute_crrem_like_scenario_emissions_series(df_energy, payload, crrem, project_year_r, years_crrem).reindex(years_crrem).fillna(0.0)
+        carbon_asset = (annual_em_t * 1000.0 / project_area_r) if project_area_r else annual_em_t * 0.0
+        eui_asset = _report_eui_series_for_payload(df_energy, payload, years_crrem, project_area_r)
+        stranding_c = find_stranding_year(carbon_asset, carbon_limit) if not carbon_limit.empty else None
+        stranding_e = find_stranding_year(eui_asset, eui_limit) if not eui_limit.empty else None
+        add_kpi_table("CRREM KPIs", [
+            ("CRREM target", target_label),
+            ("CRREM use type", crrem_use),
+            ("Stranding year - Carbon", "Not stranded" if stranding_c is None else str(stranding_c)),
+            ("Stranding year - EUI", "Not stranded" if stranding_e is None else str(stranding_e)),
+        ])
+        _report_add_chart(story, styles, "Carbon intensity vs CRREM pathway", _report_line_chart({"Project": carbon_asset, "CRREM limit": carbon_limit}, "Carbon Intensity vs CRREM", "kgCO₂e/m²·a", {"Project": scenario_color, "CRREM limit": CRREM_COLOR_LIMIT}, dashed={"CRREM limit"}), "Project annual emissions use CRREM decarbonization logic. The CRREM limit is the selected pathway for the project country and use type.")
+        _report_add_chart(story, styles, "EUI vs CRREM pathway", _report_line_chart({"Project": eui_asset, "CRREM limit": eui_limit}, "EUI vs CRREM", "kWh/m²·a", {"Project": scenario_color, "CRREM limit": CRREM_COLOR_LIMIT}, dashed={"CRREM limit"}), "Project EUI is the annual factored consumption intensity. The CRREM limit is taken from the pathway dataset.")
+        total_em_t = annual_em_t
+        total_em_limit_t = carbon_limit * project_area_r / 1000.0 if not carbon_limit.empty else pd.Series(dtype=float)
+        _report_add_chart(story, styles, "Total annual emissions", _report_line_chart({"Project": total_em_t, "CRREM limit": total_em_limit_t}, "Total Annual Emissions", "tCO₂e/a", {"Project": scenario_color, "CRREM limit": CRREM_COLOR_LIMIT}, dashed={"CRREM limit"}), "Annual emissions are converted from intensity to total emissions using project area.")
+        _report_add_chart(story, styles, "Cumulative emissions", _report_line_chart({"Project cumulative": total_em_t.cumsum(), "CRREM cumulative limit": total_em_limit_t.cumsum()}, "Cumulative Emissions", "tCO₂e", {"Project cumulative": scenario_color, "CRREM cumulative limit": CRREM_COLOR_LIMIT}, dashed={"CRREM cumulative limit"}), "Cumulative emissions are the running sum of annual decarbonized emissions.")
+    add_input_table("Relevant inputs", [("Country", project_country_r), ("Project year", project_year_r), ("Emission factors", ", ".join([f"{k}: {v:.4f}" for k, v in factor_map.items()])), ("CRREM target", str(st.session_state.get("crrem_target_select", "1.5°C")))])
+
+    # LCC Analysis
+    add_section("8. LCC-Analysis")
+    cf = compute_lcc_cashflow_table(df_energy, payload, end_uses, project_year_r, lcc_global=lcc_global)
+    if cf.empty:
+        story.append(Paragraph("No LCC cash-flow data available. Add LCC assumptions and investment measures in the LCC-Analysis tab.", styles["BodyText"]))
+    else:
+        by_year = cf.groupby("Year", as_index=True).agg({"Nominal Cost": "sum", "Discounted Cost": "sum"})
+        by_year["Cumulative Nominal Cost"] = by_year["Nominal Cost"].cumsum()
+        by_year["Cumulative Discounted Cost"] = by_year["Discounted Cost"].cumsum()
+        by_type = cf.groupby("Cost Type", as_index=True).agg({"Nominal Cost": "sum", "Discounted Cost": "sum"})
+        by_end = cf.groupby("End_Use", as_index=True)["Nominal Cost"].sum()
+        total_nom = float(by_year["Nominal Cost"].sum())
+        total_disc = float(by_year["Discounted Cost"].sum())
+        ref_name = str(lcc_global.get("payback_reference_scenario", "") or "")
+        pb = None
+        if ref_name and ref_name in st.session_state.get("scenarios", {}) and ref_name != active_name:
+            try:
+                ref_payload = st.session_state["scenarios"].get(ref_name, {}) or {}
+                ref_df = get_energy_balance_df(file_bytes, filename, scenario_name=ref_name)
+                ref_cf = compute_lcc_cashflow_table(ref_df, ref_payload, end_uses, project_year_r, lcc_global=lcc_global)
+                pb = discounted_payback_period(cf, ref_cf, project_year_r)
+            except Exception:
+                pb = None
+        add_kpi_table("LCC KPIs", [
+            ("Total nominal LCC", f"{currency_r} {total_nom:,.0f}"),
+            ("Total discounted LCC", f"{currency_r} {total_disc:,.0f}"),
+            ("Nominal LCC intensity", f"{currency_r} {total_nom / project_area_r:,.2f}/m²" if project_area_r else "n/a"),
+            ("Discounted LCC intensity", f"{currency_r} {total_disc / project_area_r:,.2f}/m²" if project_area_r else "n/a"),
+            ("Discounted payback period", _format_payback(pb)),
+        ])
+        type_df = by_type.reset_index().rename(columns={"Nominal Cost": "Cost"})
+        _report_add_chart(story, styles, "Annual LCC balance", _report_stacked_monthly_chart(cf.rename(columns={"Year": "Month"}), "Nominal Cost", "Cost Type", "Annual LCC Balance", f"{currency_r}/a", LCC_COST_TYPE_COLORS), "Annual LCC balance stacks energy, investment, maintenance and replacement costs by year.")
+        _report_add_chart(story, styles, "Cumulative LCC", _report_line_chart({"Nominal": by_year["Cumulative Nominal Cost"], "Discounted": by_year["Cumulative Discounted Cost"]}, "Cumulative LCC", currency_r, {"Nominal": scenario_color, "Discounted": scenario_color}, dashed={"Discounted"}), "Nominal cost is undiscounted cash flow. Discounted cost is future cash flow converted to present value using the interest rate.")
+        _report_add_chart(story, styles, "LCC by cost type", _report_pie_chart(by_type["Nominal Cost"], "Nominal LCC by Cost Type", f"{currency_r} {total_nom:,.0f}", LCC_COST_TYPE_COLORS), "Cost-type shares use total nominal cost over the analysis period.")
+        _report_add_chart(story, styles, "LCC by assigned end use", _report_pie_chart(by_end / project_area_r if project_area_r else by_end, "Nominal LCC per m² by End Use", f"{currency_r} {total_nom / project_area_r:,.0f}\n/m²" if project_area_r else f"{currency_r} {total_nom:,.0f}", colors_eu), "Costs assigned to multiple end uses are allocated equally across the assigned end uses.")
+    add_input_table("Relevant inputs", [
+        ("Analysis period", f"{int(lcc_global.get('analysis_period', 30))} years"),
+        ("Interest / discount rate", f"{float(lcc_global.get('interest_rate_pct', 0.0)):,.2f} %"),
+        ("CAPEX/O&M inflation", f"{float(lcc_global.get('capex_inflation_pct', 0.0)):,.2f} %"),
+        ("Operational end-use filter", ", ".join([ui_name(u) for u in lcc_global.get("selected_operational_end_uses", [])])),
+        ("Energy inflation", ", ".join([f"{src}: {float((lcc_global.get('energy_inflation_pct', {}) or {}).get(src, 0.0)):,.2f}%" for src in ENERGY_SOURCE_ORDER])),
+    ])
+
+    # Scenarios section - active scenario only per report rule
+    add_section("9. Scenarios")
+    story.append(Paragraph("The report is generated for the active scenario only. Multi-scenario comparison diagrams remain available interactively in the app.", styles["BodyText"]))
+    if not cf.empty:
+        by_year = cf.groupby("Year", as_index=True).agg({"Nominal Cost": "sum", "Discounted Cost": "sum"})
+        energy_by_year = cf.loc[cf["Cost Type"] == "Energy"].groupby("Year")["Nominal Cost"].sum().reindex(by_year.index).fillna(0.0)
+        _report_add_chart(story, styles, "Annual energy cost", _report_line_chart({active_name: energy_by_year}, "Annual Energy Cost", f"{currency_r}/a", {active_name: scenario_color}), "Annual energy cost is calculated from active-scenario factored kWh, tariffs and energy inflation.")
+        _report_add_chart(story, styles, "Cumulative LCC", _report_line_chart({"Nominal": by_year["Nominal Cost"].cumsum(), "Discounted": by_year["Discounted Cost"].cumsum()}, "Cumulative LCC - Active Scenario", currency_r, {"Nominal": scenario_color, "Discounted": scenario_color}, dashed={"Discounted"}), "Solid line is nominal cumulative cost; dashed line is discounted cumulative cost.")
+    if crrem is not None:
+        try:
+            analysis_period = max(1, _to_int_lcc(lcc_global.get("analysis_period", 30), 30))
+            years_sc = list(range(project_year_r, project_year_r + analysis_period))
+            annual_em_sc = compute_crrem_like_scenario_emissions_series(df_energy, payload, crrem, project_year_r, years_sc).reindex(years_sc).fillna(0.0)
+            target_id = "1.5C" if str(st.session_state.get("crrem_target_select", "1.5°C")).startswith("1.5") else "2C"
+            carbon_limit_sc, _ = _report_crrem_limits_for_context(crrem, target_id, str(payload.get("crrem_use_type", "Office")), payload.get("crrem_mixed_use", []), years_sc)
+            crrem_total = carbon_limit_sc * project_area_r / 1000.0 if not carbon_limit_sc.empty else pd.Series(dtype=float)
+            _report_add_chart(story, styles, "Annual emissions", _report_line_chart({active_name: annual_em_sc, "CRREM-Baseline": crrem_total}, "Annual Emissions - Active Scenario", "tCO₂e/a", {active_name: scenario_color, "CRREM-Baseline": CRREM_COLOR_LIMIT}, dashed={"CRREM-Baseline"}), "Annual emissions use the same decarbonization pathway logic as the CRREM tab.")
+            _report_add_chart(story, styles, "Cumulative emissions", _report_line_chart({active_name: annual_em_sc.cumsum(), "CRREM-Baseline": crrem_total.cumsum()}, "Cumulative Emissions - Active Scenario", "tCO₂e", {active_name: scenario_color, "CRREM-Baseline": CRREM_COLOR_LIMIT}, dashed={"CRREM-Baseline"}), "Cumulative emissions are the running sum of annual decarbonized emissions.")
+        except Exception:
+            pass
+    add_input_table("Relevant inputs", [("Active scenario", active_name), ("Scenario color", scenario_color), ("Scenario-specific raw Energy_Balance override", "Yes" if get_scenario_energy_balance_override(active_name) is not None else "No")])
+
+    doc.build(story, onFirstPage=_page_number, onLaterPages=_page_number)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> dict:
@@ -3513,6 +4259,32 @@ with tab1:
                     file_name=uploaded_file.name.replace(".xlsx", "_with_project.xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
+                )
+
+
+            # ---- Generate Report button (active scenario only)
+            if st.button("Generate Report", use_container_width=True, key="btn_generate_report"):
+                try:
+                    with st.spinner("Generating A4 PDF report for the active scenario..."):
+                        if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
+                            st.session_state["scenarios"][st.session_state["active_scenario"]] = capture_scenario_from_widgets(end_uses)
+                            if st.session_state.get("_lcc_global_initialized"):
+                                _apply_lcc_global_to_all_scenarios(end_uses)
+                        report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
+                        st.session_state["_generated_report_pdf"] = report_pdf
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_1_0.pdf"
+                    st.success("Report generated successfully.")
+                except Exception as exc:
+                    st.error(f"Report generation failed: {exc}")
+
+            if st.session_state.get("_generated_report_pdf"):
+                st.download_button(
+                    label="Download Report (PDF)",
+                    data=st.session_state["_generated_report_pdf"],
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_1_0.pdf"),
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key="download_generated_report_pdf",
                 )
 
             st.markdown("---")
