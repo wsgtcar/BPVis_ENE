@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.1.1",
+    page_title="WSGT_BPVis_ENE 2.1.2",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.1.1")
+st.sidebar.write("Version 2.1.2")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1911,7 +1911,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.1.1"
+REPORT_VERSION = "2.1.2"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -1966,10 +1966,35 @@ def _report_factor_maps(payload: dict) -> Tuple[dict, dict]:
     return factor_map, tariff_map
 
 
+# Consistent report-only chart typography. These settings affect the generated PDF only,
+# not the native Streamlit/Plotly charts shown in the app.
+REPORT_CHART_TITLE_SIZE = 10
+REPORT_AXIS_LABEL_SIZE = 7
+REPORT_TICK_LABEL_SIZE = 6
+REPORT_LEGEND_FONT_SIZE = 6
+REPORT_LEGEND_NCOL = 4
+REPORT_LINE_WIDTH = 1.15
+REPORT_MARKER_SIZE = 2.2
+
+
+def _report_unique_order(items) -> list:
+    """Return unique string items while preserving order and removing blanks."""
+    out = []
+    seen = set()
+    for item in list(items or []):
+        s = str(item)
+        if not s or s.lower() == "nan" or s in seen:
+            continue
+        out.append(s)
+        seen.add(s)
+    return out
+
+
 def _report_colors_for(labels, color_dict=None, fallback="#777777"):
     out = []
     cmap = color_dict or {}
-    for i, lab in enumerate(list(labels)):
+    label_list = list(labels or [])
+    for i, lab in enumerate(label_list):
         col = cmap.get(str(lab), cmap.get(_canon_enduse_name(str(lab)), None))
         if not col:
             col = SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)] if labels is not None else fallback
@@ -1978,10 +2003,77 @@ def _report_colors_for(labels, color_dict=None, fallback="#777777"):
 
 
 def _report_apply_axis_style(ax):
-    ax.grid(True, axis="y", alpha=0.25, linewidth=0.7)
+    ax.grid(True, axis="y", alpha=0.25, linewidth=0.6)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.tick_params(axis="both", labelsize=8)
+    ax.tick_params(axis="both", labelsize=REPORT_TICK_LABEL_SIZE, pad=2)
+    try:
+        ax.yaxis.get_offset_text().set_fontsize(REPORT_TICK_LABEL_SIZE)
+        ax.xaxis.get_offset_text().set_fontsize(REPORT_TICK_LABEL_SIZE)
+    except Exception:
+        pass
+
+
+def _report_reduce_xticks(ax, labels=None, max_ticks: int = 14, rotation: float = 45):
+    """Prevent dense year/month labels from overlapping in the PDF report."""
+    try:
+        import numpy as _np
+        if labels is not None:
+            labels = [str(x) for x in labels]
+            n = len(labels)
+            if n > 0:
+                step = max(1, int(_np.ceil(n / float(max_ticks))))
+                ticks = list(range(0, n, step))
+                if (n - 1) not in ticks:
+                    ticks.append(n - 1)
+                ax.set_xticks(ticks)
+                ax.set_xticklabels([labels[i] for i in ticks], rotation=rotation, ha="right" if rotation else "center")
+        else:
+            ticks = list(ax.get_xticks())
+            n = len(ticks)
+            if n > max_ticks:
+                step = max(1, int(_np.ceil(n / float(max_ticks))))
+                keep = ticks[::step]
+                if ticks[-1] not in keep:
+                    keep = list(keep) + [ticks[-1]]
+                ax.set_xticks(keep)
+        ax.tick_params(axis="x", labelsize=REPORT_TICK_LABEL_SIZE, pad=2)
+    except Exception:
+        pass
+
+
+def _report_apply_legend(ax, ncol: Optional[int] = None, bottom_anchor: float = -0.22):
+    """Consistent compact legend styling for all report diagrams."""
+    try:
+        handles, labels = ax.get_legend_handles_labels()
+        if not handles:
+            return
+        dedup_handles = []
+        dedup_labels = []
+        seen = set()
+        for h, lab in zip(handles, labels):
+            if lab in seen:
+                continue
+            seen.add(lab)
+            dedup_handles.append(h)
+            dedup_labels.append(lab)
+        n = len(dedup_labels)
+        cols = ncol or min(REPORT_LEGEND_NCOL, max(1, n))
+        ax.legend(
+            dedup_handles,
+            dedup_labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, bottom_anchor),
+            ncol=cols,
+            fontsize=REPORT_LEGEND_FONT_SIZE,
+            frameon=False,
+            handlelength=1.5,
+            columnspacing=0.9,
+            labelspacing=0.35,
+            borderaxespad=0.0,
+        )
+    except Exception:
+        pass
 
 
 def _report_fig_to_png_bytes(fig) -> io.BytesIO:
@@ -1998,7 +2090,7 @@ def _report_fig_to_png_bytes(fig) -> io.BytesIO:
 
 def _report_stacked_monthly_chart(df: pd.DataFrame, value_col: str, category_col: str, title: str, y_label: str, color_dict: dict) -> io.BytesIO:
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    fig, ax = plt.subplots(figsize=(7.2, 3.75))
     if df is None or df.empty:
         ax.text(0.5, 0.5, "No data available", ha="center", va="center")
         ax.set_axis_off()
@@ -2018,7 +2110,7 @@ def _report_stacked_monthly_chart(df: pd.DataFrame, value_col: str, category_col
             x_order = []
         if not x_order:
             x_order = list(raw_x.dropna().unique())
-    cats = [c for c in END_USE_ORDER + ENERGY_SOURCE_ORDER + sorted(work[category_col].dropna().astype(str).unique().tolist()) if c in set(work[category_col].astype(str))]
+    cats = _report_unique_order([c for c in END_USE_ORDER + ENERGY_SOURCE_ORDER + sorted(work[category_col].dropna().astype(str).unique().tolist()) if c in set(work[category_col].astype(str))])
     pivot = work.groupby(["_report_x", category_col], observed=False)[value_col].sum().unstack(fill_value=0.0).reindex(x_order).fillna(0.0)
     pos_bottom = np.zeros(len(pivot.index))
     neg_bottom = np.zeros(len(pivot.index))
@@ -2035,29 +2127,28 @@ def _report_stacked_monthly_chart(df: pd.DataFrame, value_col: str, category_col
             ax.bar(pivot.index.astype(str), neg, bottom=neg_bottom, label=ui_name(cat), color=col, width=0.72)
             neg_bottom += neg
     totals = pivot.sum(axis=1).astype(float).values
-    ax.plot(pivot.index.astype(str), totals, color="black", linestyle="--", linewidth=1.4, marker="o", markersize=3, label="Net total")
-    ax.set_title(title, fontsize=11, weight="bold")
-    ax.set_ylabel(y_label, fontsize=9)
-    ax.tick_params(axis="x", rotation=45)
+    ax.plot(pivot.index.astype(str), totals, color="black", linestyle="--", linewidth=REPORT_LINE_WIDTH, marker="o", markersize=REPORT_MARKER_SIZE, label="Net total")
+    ax.set_title(title, fontsize=REPORT_CHART_TITLE_SIZE, weight="bold")
+    ax.set_ylabel(y_label, fontsize=REPORT_AXIS_LABEL_SIZE)
+    if set(raw_x).intersection(set(MONTH_ORDER)):
+        _report_reduce_xticks(ax, pivot.index.astype(str).tolist(), max_ticks=12, rotation=45)
+    else:
+        _report_reduce_xticks(ax, pivot.index.astype(str).tolist(), max_ticks=10, rotation=45)
     _report_apply_axis_style(ax)
-    handles, labels = ax.get_legend_handles_labels()
-    if handles:
-        # Remove duplicate labels from positive/negative splits.
-        dedup = dict(zip(labels, handles))
-        ax.legend(dedup.values(), dedup.keys(), loc="upper center", bbox_to_anchor=(0.5, -0.28), ncol=3, fontsize=7, frameon=False)
-    fig.tight_layout(rect=[0, 0.12, 1, 1])
+    _report_apply_legend(ax, bottom_anchor=-0.24)
+    fig.tight_layout(rect=[0, 0.20, 1, 1])
     return _report_fig_to_png_bytes(fig)
 
 
 def _report_annual_stacked_chart(df: pd.DataFrame, value_col: str, category_col: str, title: str, y_label: str, color_dict: dict) -> io.BytesIO:
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(5.2, 3.9))
+    fig, ax = plt.subplots(figsize=(5.2, 3.75))
     if df is None or df.empty:
         ax.text(0.5, 0.5, "No data available", ha="center", va="center")
         ax.set_axis_off()
         return _report_fig_to_png_bytes(fig)
     totals = df.groupby(category_col, as_index=True)[value_col].sum()
-    cats = [c for c in END_USE_ORDER + ENERGY_SOURCE_ORDER + sorted(totals.index.astype(str).tolist()) if c in set(totals.index.astype(str))]
+    cats = _report_unique_order([c for c in END_USE_ORDER + ENERGY_SOURCE_ORDER + sorted(totals.index.astype(str).tolist()) if c in set(totals.index.astype(str))])
     pos_bottom = 0.0
     neg_bottom = 0.0
     for cat, col in zip(cats, _report_colors_for(cats, color_dict)):
@@ -2070,20 +2161,18 @@ def _report_annual_stacked_chart(df: pd.DataFrame, value_col: str, category_col:
             neg_bottom += val
     net = float(totals.sum())
     ax.axhline(net, color="black", linestyle="--", linewidth=1.3)
-    ax.text(0, net, f" {net:,.0f}", fontsize=8, va="bottom" if net >= 0 else "top")
-    ax.set_title(title, fontsize=11, weight="bold")
-    ax.set_ylabel(y_label, fontsize=9)
+    ax.text(0, net, f" {net:,.0f}", fontsize=REPORT_TICK_LABEL_SIZE, va="bottom" if net >= 0 else "top")
+    ax.set_title(title, fontsize=REPORT_CHART_TITLE_SIZE, weight="bold")
+    ax.set_ylabel(y_label, fontsize=REPORT_AXIS_LABEL_SIZE)
     _report_apply_axis_style(ax)
-    handles, labels = ax.get_legend_handles_labels()
-    if handles:
-        ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2, fontsize=7, frameon=False)
-    fig.tight_layout(rect=[0, 0.12, 1, 1])
+    _report_apply_legend(ax, bottom_anchor=-0.20)
+    fig.tight_layout(rect=[0, 0.20, 1, 1])
     return _report_fig_to_png_bytes(fig)
 
 
 def _report_pie_chart(series: pd.Series, title: str, center_text: str, color_dict: dict) -> io.BytesIO:
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(5.2, 3.9))
+    fig, ax = plt.subplots(figsize=(5.2, 3.75))
     if series is None or len(series) == 0:
         ax.text(0.5, 0.5, "No data available", ha="center", va="center")
         ax.set_axis_off()
@@ -2105,18 +2194,22 @@ def _report_pie_chart(series: pd.Series, title: str, center_text: str, color_dic
         colors=colors,
         pctdistance=0.78,
         wedgeprops=dict(width=0.45, edgecolor="white"),
-        textprops=dict(fontsize=8),
+        textprops=dict(fontsize=REPORT_TICK_LABEL_SIZE),
     )
-    ax.text(0, 0, center_text, ha="center", va="center", fontsize=10, weight="bold")
-    ax.set_title(title, fontsize=11, weight="bold")
-    ax.legend(wedges, labels, loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=2, fontsize=7, frameon=False)
-    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    ax.text(0, 0, center_text, ha="center", va="center", fontsize=9, weight="bold")
+    ax.set_title(title, fontsize=REPORT_CHART_TITLE_SIZE, weight="bold")
+    ax.legend(
+        wedges, labels, loc="upper center", bbox_to_anchor=(0.5, -0.08),
+        ncol=min(REPORT_LEGEND_NCOL, max(1, len(labels))), fontsize=REPORT_LEGEND_FONT_SIZE,
+        frameon=False, handlelength=1.3, columnspacing=0.9, labelspacing=0.35
+    )
+    fig.tight_layout(rect=[0, 0.14, 1, 1])
     return _report_fig_to_png_bytes(fig)
 
 
 def _report_line_chart(series_dict: Dict[str, pd.Series], title: str, y_label: str, color_map_in: Optional[dict] = None, dashed: Optional[set] = None) -> io.BytesIO:
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    fig, ax = plt.subplots(figsize=(7.2, 3.75))
     dashed = dashed or set()
     if not series_dict:
         ax.text(0.5, 0.5, "No data available", ha="center", va="center")
@@ -2129,35 +2222,36 @@ def _report_line_chart(series_dict: Dict[str, pd.Series], title: str, y_label: s
         if ser.empty:
             continue
         col = (color_map_in or {}).get(name, SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)])
-        ax.plot(ser.index.astype(int), ser.values.astype(float), label=name, color=col, linewidth=1.5, linestyle="--" if name in dashed else "-", marker="o", markersize=2.8)
-    ax.set_title(title, fontsize=11, weight="bold")
-    ax.set_xlabel("Year", fontsize=9)
-    ax.set_ylabel(y_label, fontsize=9)
+        ax.plot(ser.index.astype(int), ser.values.astype(float), label=name, color=col, linewidth=REPORT_LINE_WIDTH, linestyle="--" if name in dashed else "-", marker="o", markersize=REPORT_MARKER_SIZE)
+    ax.set_title(title, fontsize=REPORT_CHART_TITLE_SIZE, weight="bold")
+    ax.set_xlabel("Year", fontsize=REPORT_AXIS_LABEL_SIZE)
+    ax.set_ylabel(y_label, fontsize=REPORT_AXIS_LABEL_SIZE)
     _report_apply_axis_style(ax)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=2, fontsize=7, frameon=False)
-    fig.tight_layout(rect=[0, 0.10, 1, 1])
+    _report_reduce_xticks(ax, max_ticks=10, rotation=0)
+    _report_apply_legend(ax, bottom_anchor=-0.20)
+    fig.tight_layout(rect=[0, 0.18, 1, 1])
     return _report_fig_to_png_bytes(fig)
 
 
 def _report_bar_chart(df: pd.DataFrame, x: str, y: str, title: str, y_label: str, color: Optional[str] = None) -> io.BytesIO:
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    fig, ax = plt.subplots(figsize=(7.2, 3.75))
     if df is None or df.empty or x not in df.columns or y not in df.columns:
         ax.text(0.5, 0.5, "No data available", ha="center", va="center")
         ax.set_axis_off()
         return _report_fig_to_png_bytes(fig)
     ax.bar(df[x].astype(str), pd.to_numeric(df[y], errors="coerce").fillna(0.0), color=color or CRREM_COLOR_BASELINE)
-    ax.set_title(title, fontsize=11, weight="bold")
-    ax.set_ylabel(y_label, fontsize=9)
-    ax.tick_params(axis="x", rotation=45)
+    ax.set_title(title, fontsize=REPORT_CHART_TITLE_SIZE, weight="bold")
+    ax.set_ylabel(y_label, fontsize=REPORT_AXIS_LABEL_SIZE)
+    _report_reduce_xticks(ax, df[x].astype(str).tolist(), max_ticks=12, rotation=45)
     _report_apply_axis_style(ax)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
     return _report_fig_to_png_bytes(fig)
 
 
 def _report_heatmap(df_loads: pd.DataFrame, load_col: str, title: str) -> io.BytesIO:
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    fig, ax = plt.subplots(figsize=(7.2, 3.75))
     try:
         work = df_loads.copy()
         work["doy"] = pd.to_numeric(work["doy"], errors="coerce")
@@ -2165,34 +2259,38 @@ def _report_heatmap(df_loads: pd.DataFrame, load_col: str, title: str) -> io.Byt
         work[load_col] = pd.to_numeric(work[load_col], errors="coerce")
         piv = work.pivot_table(index="hour", columns="doy", values=load_col, aggfunc="mean").sort_index()
         im = ax.imshow(piv.values, aspect="auto", origin="lower", cmap="inferno")
-        ax.set_xlabel("Day of year", fontsize=9)
-        ax.set_ylabel("Hour", fontsize=9)
-        ax.set_title(title, fontsize=11, weight="bold")
-        fig.colorbar(im, ax=ax, label=load_col, fraction=0.025, pad=0.02)
+        ax.set_xlabel("Day of year", fontsize=REPORT_AXIS_LABEL_SIZE)
+        ax.set_ylabel("Hour", fontsize=REPORT_AXIS_LABEL_SIZE)
+        ax.set_title(title, fontsize=REPORT_CHART_TITLE_SIZE, weight="bold")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
+        cbar.set_label(load_col, fontsize=REPORT_AXIS_LABEL_SIZE)
+        cbar.ax.tick_params(labelsize=REPORT_TICK_LABEL_SIZE)
+        _report_reduce_xticks(ax, max_ticks=8, rotation=0)
+        ax.tick_params(axis="both", labelsize=REPORT_TICK_LABEL_SIZE, pad=2)
     except Exception:
         ax.text(0.5, 0.5, "No heatmap data available", ha="center", va="center")
         ax.set_axis_off()
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
     return _report_fig_to_png_bytes(fig)
 
 
 def _report_load_duration(df_loads: pd.DataFrame, load_col: str, title: str) -> io.BytesIO:
     import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(7.2, 3.9))
+    fig, ax = plt.subplots(figsize=(7.2, 3.75))
     vals = pd.to_numeric(df_loads.get(load_col, pd.Series(dtype=float)), errors="coerce").dropna().sort_values(ascending=False).reset_index(drop=True)
     if vals.empty:
         ax.text(0.5, 0.5, "No data available", ha="center", va="center")
         ax.set_axis_off()
     else:
         pct = (np.arange(1, len(vals) + 1) / len(vals)) * 100.0
-        ax.plot(pct, vals.values, color=CRREM_COLOR_BASELINE, linewidth=1.6)
+        ax.plot(pct, vals.values, color=CRREM_COLOR_BASELINE, linewidth=REPORT_LINE_WIDTH)
         ax.fill_between(pct, vals.values, alpha=0.18, color=CRREM_COLOR_BASELINE)
         ax.set_xlim(0, 100)
-        ax.set_xlabel("Percentage of hours (%)", fontsize=9)
-        ax.set_ylabel(f"{ui_name(load_col)} (kW)", fontsize=9)
-        ax.set_title(title, fontsize=11, weight="bold")
+        ax.set_xlabel("Percentage of hours (%)", fontsize=REPORT_AXIS_LABEL_SIZE)
+        ax.set_ylabel(f"{ui_name(load_col)} (kW)", fontsize=REPORT_AXIS_LABEL_SIZE)
+        ax.set_title(title, fontsize=REPORT_CHART_TITLE_SIZE, weight="bold")
         _report_apply_axis_style(ax)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.04, 1, 1])
     return _report_fig_to_png_bytes(fig)
 
 
@@ -4312,7 +4410,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_1_1.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_1_2.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -4321,7 +4419,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_1_1.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_1_2.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
