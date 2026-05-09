@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.4",
+    page_title="WSGT_BPVis_ENE 2.2.5",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.4")
+st.sidebar.write("Version 2.2.5")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.4"
+REPORT_VERSION = "2.2.5"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3068,6 +3068,20 @@ MODEL_INPUT_SOURCE_TYPES = [
     "Other",
 ]
 
+MODEL_INPUT_DHW_DEMAND_UNITS = [
+    "L/person·day",
+    "L/person·h",
+    "L/m²·day",
+    "L/m²·h",
+    "m³/year",
+    "m³/day",
+    "L/day",
+    "kWh/year",
+    "Other",
+]
+
+MODEL_INPUT_OBJECT_SCOPE_OPTIONS = ["Global", "Active scenario only"]
+
 MODEL_INPUT_QA_COLUMNS = [
     "Scenario",
     "Scope",
@@ -3145,32 +3159,42 @@ def default_model_inputs_global_rows() -> list:
     ]
 
 
-def room_type_template(item_name: str, scenario: str) -> list:
+def _model_input_scope_values(scope: str, scenario: str) -> Tuple[str, str]:
+    """Return (scenario_value, scope_value) for a global/scenario Model Inputs QA object."""
+    scope_clean = str(scope or "Scenario").strip()
+    if scope_clean.lower().startswith("global"):
+        return MODEL_INPUT_GLOBAL_SCENARIO, "Global"
+    return str(scenario or "Base"), "Scenario"
+
+
+def room_type_template(item_name: str, scenario: str, scope: str = "Global") -> list:
+    sc, scope_value = _model_input_scope_values(scope, scenario)
     return [
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Area", unit="m²", required=True, source_type="Design Document", source_ref="Area schedule / room book", min_check=0),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Occupancy density", unit="m²/person", required=False, source_type="Design Document", source_ref="Room data sheet / LEED calculator / design brief", min_check=1, max_check=100),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Lighting power density", unit="W/m²", required=True, source_type="Design Document", source_ref="Lighting concept / ASHRAE baseline / design brief", min_check=0, max_check=50),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Equipment power density", unit="W/m²", required=True, source_type="Design Document", source_ref="Equipment schedule / design brief", min_check=0, max_check=150),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "People sensible gain", unit="W/person", required=False, source_type="Assumption", reference="Document activity/metabolic assumption", min_check=0, max_check=200),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "People latent gain", unit="W/person", required=False, source_type="Assumption", reference="Document activity/metabolic assumption", min_check=0, max_check=200),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Heating delivery", value="", unit="-", required=False, source_type="Design Document", source_ref="HVAC concept / room data sheet", reference="Radiant Ceiling / Fan Coil / Floor Heating / Radiator / Air System / custom"),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Cooling delivery", value="", unit="-", required=False, source_type="Design Document", source_ref="HVAC concept / room data sheet", reference="Radiant Ceiling / Fan Coil / Floor Cooling / Fan Coil / Air System / custom"),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Heating setpoint", unit="°C", required=True, source_type="Design Document", source_ref="Owner requirements / room data sheet", min_check=10, max_check=26),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Cooling setpoint", unit="°C", required=True, source_type="Design Document", source_ref="Owner requirements / room data sheet", min_check=18, max_check=35),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Night setback / setup", unit="°C or rule", required=False, source_type="Assumption", reference="Document unoccupied temperature control logic"),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Occupancy schedule", unit="-", required=True, source_type="Design Document", source_ref="Operation concept / design brief", reference="Weekday/weekend and holiday operation"),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Lighting schedule", unit="-", required=True, source_type="Assumption", source_ref="Operation concept / lighting controls", reference="Equivalent full-load hours or schedule name"),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Equipment schedule", unit="-", required=True, source_type="Assumption", source_ref="Operation concept / equipment load assumptions", reference="Equivalent full-load hours or schedule name"),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Outdoor air per person", unit="L/s.person", required=False, source_type="Standard / Reference", source_ref="ASHRAE 62.1 / EN 16798 / project brief", min_check=0, max_check=50),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Outdoor air per area", unit="L/s.m²", required=False, source_type="Standard / Reference", source_ref="ASHRAE 62.1 / EN 16798 / project brief", min_check=0, max_check=10),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Demand controlled ventilation permitted", unit="yes/no", required=False, source_type="Design Document", source_ref="Controls narrative"),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Demand controlled ventilation rule", unit="-", required=False, source_type="Design Document", source_ref="Controls narrative", reference="CO₂ setpoint, minimum outdoor air, occupancy sensor logic"),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Natural ventilation permitted", unit="yes/no", required=False, source_type="Design Document", source_ref="Ventilation / façade / controls concept"),
-        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Natural ventilation rule", unit="-", required=False, source_type="Design Document", source_ref="Ventilation / controls concept", reference="Opening schedule, temperature limits, CO₂ limits, wind/rain lockout"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Area", unit="m²", required=True, source_type="Design Document", source_ref="Area schedule / room book", min_check=0),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Occupancy density", unit="m²/person", required=False, source_type="Design Document", source_ref="Room data sheet / LEED calculator / design brief", min_check=1, max_check=100),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Lighting power density", unit="W/m²", required=True, source_type="Design Document", source_ref="Lighting concept / ASHRAE baseline / design brief", min_check=0, max_check=50),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Equipment power density", unit="W/m²", required=True, source_type="Design Document", source_ref="Equipment schedule / design brief", min_check=0, max_check=150),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "People sensible gain", unit="W/person", required=False, source_type="Assumption", reference="Document activity/metabolic assumption", min_check=0, max_check=200),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "People latent gain", unit="W/person", required=False, source_type="Assumption", reference="Document activity/metabolic assumption", min_check=0, max_check=200),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Heating delivery", value="", unit="-", required=False, source_type="Design Document", source_ref="HVAC concept / room data sheet", reference="Radiant Ceiling / Fan Coil / Floor Heating / Radiator / Air System / custom"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Cooling delivery", value="", unit="-", required=False, source_type="Design Document", source_ref="HVAC concept / room data sheet", reference="Radiant Ceiling / Fan Coil / Floor Cooling / Fan Coil / Air System / custom"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Heating setpoint", unit="°C", required=True, source_type="Design Document", source_ref="Owner requirements / room data sheet", min_check=10, max_check=26),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Cooling setpoint", unit="°C", required=True, source_type="Design Document", source_ref="Owner requirements / room data sheet", min_check=18, max_check=35),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Night setback / setup", unit="°C or rule", required=False, source_type="Assumption", reference="Document unoccupied temperature control logic"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Occupancy schedule", unit="-", required=True, source_type="Design Document", source_ref="Operation concept / design brief", reference="Weekday/weekend and holiday operation"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Lighting schedule", unit="-", required=True, source_type="Assumption", source_ref="Operation concept / lighting controls", reference="Equivalent full-load hours or schedule name"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Equipment schedule", unit="-", required=True, source_type="Assumption", source_ref="Operation concept / equipment load assumptions", reference="Equivalent full-load hours or schedule name"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Outdoor air per person", unit="L/s.person", required=False, source_type="Standard / Reference", source_ref="ASHRAE 62.1 / EN 16798 / project brief", min_check=0, max_check=50),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Outdoor air per area", unit="L/s.m²", required=False, source_type="Standard / Reference", source_ref="ASHRAE 62.1 / EN 16798 / project brief", min_check=0, max_check=10),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Demand controlled ventilation permitted", unit="yes/no", required=False, source_type="Design Document", source_ref="Controls narrative"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Demand controlled ventilation rule", unit="-", required=False, source_type="Design Document", source_ref="Controls narrative", reference="CO₂ setpoint, minimum outdoor air, occupancy sensor logic"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Natural ventilation permitted", unit="yes/no", required=False, source_type="Design Document", source_ref="Ventilation / façade / controls concept"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Natural ventilation rule", unit="-", required=False, source_type="Design Document", source_ref="Ventilation / controls concept", reference="Opening schedule, temperature limits, CO₂ limits, wind/rain lockout"),
     ]
 
 
-def envelope_component_template(component_type: str, item_name: str, scenario: str) -> list:
+def envelope_component_template(component_type: str, item_name: str, scenario: str, scope: str = "Scenario") -> list:
+    sc, scope_value = _model_input_scope_values(scope, scenario)
     ct = str(component_type)
     if ct == "External Walls":
         params = [
@@ -3222,10 +3246,11 @@ def envelope_component_template(component_type: str, item_name: str, scenario: s
             ("Main performance value", "project unit", False, "Assumption", "Project documentation", "Document unit and method", None, None),
             ("Modelling rule", "-", False, "Simulation Model", "Energy model input", "", None, None),
         ]
-    return [_mi_row(scenario, "Scenario", "Thermal Envelope", ct, item_name, p, unit=u, required=req, source_type=src, source_ref=ref, reference=tgt, min_check=mn, max_check=mx) for p, u, req, src, ref, tgt, mn, mx in params]
+    return [_mi_row(sc, scope_value, "Thermal Envelope", ct, item_name, p, unit=u, required=req, source_type=src, source_ref=ref, reference=tgt, min_check=mn, max_check=mx) for p, u, req, src, ref, tgt, mn, mx in params]
 
 
-def system_template(system_type: str, item_name: str, scenario: str) -> list:
+def system_template(system_type: str, item_name: str, scenario: str, scope: str = "Scenario") -> list:
+    sc, scope_value = _model_input_scope_values(scope, scenario)
     stype = str(system_type)
     if stype == "AHU / Ventilation":
         params = [
@@ -3272,6 +3297,7 @@ def system_template(system_type: str, item_name: str, scenario: str) -> list:
             ("System type", "-", True, "Design Document", "DHW concept", "Boiler, heat pump, district heating, electric, solar thermal", None, None),
             ("Energy source", "-", True, "Design Document", "DHW concept / energy source mapping", "", None, None),
             ("Generator efficiency / COP", "-", True, "Design Document", "Equipment datasheet / model input", "", 0, 10),
+            ("Hot Water Demand", "L/person·day", True, "Calculation", "DHW calculation / design brief / plumbing fixture schedule", "Document basis: persons, area, fixtures, schedule or annual volume", 0, None),
             ("DHW demand calculation method", "-", False, "Calculation", "DHW calculation / design brief", "Persons, fixtures, litres/day, schedule", None, None),
             ("Storage volume", "L", False, "Design Document", "DHW specification", "", 0, None),
             ("Storage losses", "kWh/a or W", False, "Assumption", "DHW calculation / model input", "", 0, None),
@@ -3285,7 +3311,7 @@ def system_template(system_type: str, item_name: str, scenario: str) -> list:
             ("Efficiency / control assumption", "-", False, "Assumption", "Model input / specification", "", None, None),
             ("Operation schedule", "-", False, "Design Document", "Controls / operation concept", "", None, None),
         ]
-    return [_mi_row(scenario, "Scenario", stype if stype in MODEL_INPUT_CATEGORIES else "Other / Custom Inputs", stype, item_name, p, unit=u, required=req, source_type=src, source_ref=ref, reference=tgt, min_check=mn, max_check=mx) for p, u, req, src, ref, tgt, mn, mx in params]
+    return [_mi_row(sc, scope_value, stype if stype in MODEL_INPUT_CATEGORIES else "Other / Custom Inputs", stype, item_name, p, unit=u, required=req, source_type=src, source_ref=ref, reference=tgt, min_check=mn, max_check=mx) for p, u, req, src, ref, tgt, mn, mx in params]
 
 
 def default_model_inputs_qa_df() -> pd.DataFrame:
@@ -3420,6 +3446,51 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     except Exception:
         pass
 
+    # Backwards compatibility for v2.2.5: ensure existing Domestic Hot Water
+    # system objects include a standard Hot Water Demand parameter.
+    try:
+        dhw_items = out.loc[
+            out["Category"].astype(str).eq("Domestic Hot Water")
+            & out["Item Type"].astype(str).eq("Domestic Hot Water"),
+            ["Scenario", "Scope", "Item Name"]
+        ].drop_duplicates()
+        dhw_rows = []
+        for _, item in dhw_items.iterrows():
+            sc = str(item.get("Scenario", "Base"))
+            scope = str(item.get("Scope", "Scenario")) or "Scenario"
+            nm = str(item.get("Item Name", "DHW System"))
+            existing_params = set(out.loc[
+                out["Scenario"].astype(str).eq(sc)
+                & out["Category"].astype(str).eq("Domestic Hot Water")
+                & out["Item Type"].astype(str).eq("Domestic Hot Water")
+                & out["Item Name"].astype(str).eq(nm),
+                "Parameter"
+            ].astype(str))
+            if "Hot Water Demand" not in existing_params:
+                dhw_rows.append(_mi_row(
+                    sc,
+                    scope if scope in ["Global", "Scenario"] else "Scenario",
+                    "Domestic Hot Water",
+                    "Domestic Hot Water",
+                    nm,
+                    "Hot Water Demand",
+                    value="",
+                    unit="L/person·day",
+                    required=True,
+                    source_type="Calculation",
+                    source_ref="DHW calculation / design brief / plumbing fixture schedule",
+                    reference="Document basis: persons, area, fixtures, schedule or annual volume",
+                    min_check=0,
+                    max_check=np.nan,
+                ))
+        if dhw_rows:
+            out = pd.concat([out, pd.DataFrame(dhw_rows)], ignore_index=True)
+            out = out[MODEL_INPUT_QA_COLUMNS].copy()
+            for col in ["Min Check", "Max Check"]:
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+    except Exception:
+        pass
+
     return out.reset_index(drop=True)
 
 
@@ -3541,19 +3612,19 @@ def add_model_input_rows(rows: list) -> None:
     st.session_state["model_inputs_qa_df"] = sanitize_model_inputs_qa_df(df)
 
 
-def add_model_room_type(item_name: str, scenario_name: str) -> None:
+def add_model_room_type(item_name: str, scenario_name: str, scope: str = "Global") -> None:
     nm = str(item_name or "Room Type").strip() or "Room Type"
-    add_model_input_rows(room_type_template(nm, str(scenario_name or "Base")))
+    add_model_input_rows(room_type_template(nm, str(scenario_name or "Base"), scope=scope))
 
 
-def add_model_envelope_component(component_type: str, item_name: str, scenario_name: str) -> None:
+def add_model_envelope_component(component_type: str, item_name: str, scenario_name: str, scope: str = "Scenario") -> None:
     nm = str(item_name or component_type or "Component").strip() or "Component"
-    add_model_input_rows(envelope_component_template(str(component_type or "Other Envelope Component"), nm, str(scenario_name or "Base")))
+    add_model_input_rows(envelope_component_template(str(component_type or "Other Envelope Component"), nm, str(scenario_name or "Base"), scope=scope))
 
 
-def add_model_system(system_type: str, item_name: str, scenario_name: str) -> None:
+def add_model_system(system_type: str, item_name: str, scenario_name: str, scope: str = "Scenario") -> None:
     nm = str(item_name or system_type or "System").strip() or "System"
-    add_model_input_rows(system_template(str(system_type or "Other System"), nm, str(scenario_name or "Base")))
+    add_model_input_rows(system_template(str(system_type or "Other System"), nm, str(scenario_name or "Base"), scope=scope))
 
 
 def add_model_custom_parameter(scenario_name: str, scope: str, category: str, item_type: str, item_name: str, parameter_name: str) -> None:
@@ -5305,7 +5376,7 @@ with tab_model_qa:
 
         st.caption(
             "This tab documents the inputs and assumptions used in the energy simulation. "
-            "General model setup inputs are global. Room types, envelope components and systems are scenario-specific."
+            "General model setup inputs are global. Room types are global by default; room types, envelope components, systems and custom parameters can also be created as active-scenario-specific objects when required."
         )
         st.info(
             "Inputs tagged as **Assumption** are highlighted in the QA review table and should be replaced by documented project references where possible. "
@@ -5345,7 +5416,7 @@ with tab_model_qa:
         st.write("### Add model input objects")
         st.caption(
             "Use the controls below to add room types, envelope constructions/components, HVAC/DHW systems and custom parameters. "
-            "All non-general inputs are stored for the active scenario only. The controls are inside a form, so typing or changing dropdowns does not rerun the page."
+            "Each new object can be stored as a global object or as an active-scenario-specific object. Room types are global by default. The controls are inside a form, so typing or changing dropdowns does not rerun the page."
         )
 
         df_for_custom = model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_selected)
@@ -5366,16 +5437,25 @@ with tab_model_qa:
             with add_col1:
                 with st.expander("Add room type", expanded=True):
                     new_room_type_name = st.text_input("Room type name", value="Office", key="mi_new_room_type_name")
+                    new_room_scope_label = st.selectbox(
+                        "Scope",
+                        MODEL_INPUT_OBJECT_SCOPE_OPTIONS,
+                        index=0,
+                        key="mi_new_room_scope",
+                        help="Room types are global by default, but can be made scenario-specific when the room definition changes between scenarios.",
+                    )
                     add_room_submit = st.form_submit_button("Add Room Type", use_container_width=True)
             with add_col2:
                 with st.expander("Add envelope component", expanded=True):
                     new_env_type = st.selectbox("Construction/component type", MODEL_INPUT_ENVELOPE_COMPONENT_TYPES, key="mi_new_envelope_type")
                     new_env_name = st.text_input("Component name", value="New component", key="mi_new_envelope_name")
+                    new_env_scope_label = st.selectbox("Scope", MODEL_INPUT_OBJECT_SCOPE_OPTIONS, index=1, key="mi_new_envelope_scope")
                     add_env_submit = st.form_submit_button("Add Envelope Component", use_container_width=True)
             with add_col3:
                 with st.expander("Add system", expanded=True):
                     new_system_type = st.selectbox("System type", MODEL_INPUT_SYSTEM_TYPES, key="mi_new_system_type")
                     new_system_name = st.text_input("System name", value="New system", key="mi_new_system_name")
+                    new_system_scope_label = st.selectbox("Scope", MODEL_INPUT_OBJECT_SCOPE_OPTIONS, index=1, key="mi_new_system_scope")
                     add_system_submit = st.form_submit_button("Add System", use_container_width=True)
 
             with st.expander("Add custom parameter", expanded=False):
@@ -5384,15 +5464,15 @@ with tab_model_qa:
                 add_custom_submit = st.form_submit_button("Add Custom Parameter", use_container_width=False)
 
         if add_room_submit:
-            add_model_room_type(new_room_type_name, active_selected)
+            add_model_room_type(new_room_type_name, active_selected, scope="Global" if new_room_scope_label == "Global" else "Scenario")
             st.session_state["_model_inputs_qa_flash"] = "updated"
             st.rerun()
         if add_env_submit:
-            add_model_envelope_component(new_env_type, new_env_name, active_selected)
+            add_model_envelope_component(new_env_type, new_env_name, active_selected, scope="Global" if new_env_scope_label == "Global" else "Scenario")
             st.session_state["_model_inputs_qa_flash"] = "updated"
             st.rerun()
         if add_system_submit:
-            add_model_system(new_system_type, new_system_name, active_selected)
+            add_model_system(new_system_type, new_system_name, active_selected, scope="Global" if new_system_scope_label == "Global" else "Scenario")
             st.session_state["_model_inputs_qa_flash"] = "updated"
             st.rerun()
         if add_custom_submit:
@@ -5477,23 +5557,33 @@ with tab_model_qa:
 
         with st.form("model_inputs_qa_structured_form", clear_on_submit=False):
             for cat in MODEL_INPUT_CATEGORIES:
-                cat_df = mi_edit.loc[mi_edit["Category"].astype(str) == cat].copy()
+                # Room Types are rendered inside the General Model Setup expander for easier navigation.
+                if cat == "Room Types":
+                    continue
+                if cat == "General Model Setup":
+                    cat_df = mi_edit.loc[mi_edit["Category"].astype(str).isin(["General Model Setup", "Room Types"])].copy()
+                else:
+                    cat_df = mi_edit.loc[mi_edit["Category"].astype(str) == cat].copy()
                 if cat_df.empty:
                     continue
-                with st.expander(cat, expanded=(cat in ["General Model Setup", "Room Types", "Thermal Envelope"])):
-                    item_df_keys = cat_df[["Scenario", "Scope", "Item Type", "Item Name"]].drop_duplicates().reset_index(drop=True)
+                with st.expander(cat, expanded=(cat in ["General Model Setup", "Thermal Envelope"])):
+                    if cat == "General Model Setup" and (cat_df["Category"].astype(str) == "Room Types").any():
+                        st.caption("This section contains global simulation setup inputs and room-type definitions. Room types are global by default, but can also be created for the active scenario only.")
+                    item_df_keys = cat_df[["Scenario", "Scope", "Category", "Item Type", "Item Name"]].drop_duplicates().reset_index(drop=True)
                     for _, item in item_df_keys.iterrows():
                         scenario_i = str(item.get("Scenario", MODEL_INPUT_GLOBAL_SCENARIO))
                         scope_i = str(item.get("Scope", "Scenario"))
-                        item_type_i = str(item.get("Item Type", cat))
+                        category_i = str(item.get("Category", cat))
+                        item_type_i = str(item.get("Item Type", category_i))
                         item_name_i = str(item.get("Item Name", "General"))
-                        item_key_tuple = (scenario_i, cat, item_type_i, item_name_i)
-                        item_title = f"{item_type_i}: {item_name_i}" if cat != "General Model Setup" else str(item_name_i)
+                        item_key_tuple = (scenario_i, category_i, item_type_i, item_name_i)
+                        item_title = str(item_name_i) if category_i == "General Model Setup" else f"{category_i} | {item_type_i}: {item_name_i}"
                         badge = "GLOBAL" if scope_i == "Global" or scenario_i == MODEL_INPUT_GLOBAL_SCENARIO else f"Scenario-specific: {active_selected}"
 
                         rows_item = cat_df.loc[
                             cat_df["Scenario"].astype(str).eq(scenario_i)
                             & cat_df["Scope"].astype(str).eq(scope_i)
+                            & cat_df["Category"].astype(str).eq(category_i)
                             & cat_df["Item Type"].astype(str).eq(item_type_i)
                             & cat_df["Item Name"].astype(str).eq(item_name_i)
                         ].copy()
@@ -5517,19 +5607,19 @@ with tab_model_qa:
                             _status_suffix.append("assumption")
                         _status_txt = f" — {', '.join(_status_suffix)}" if _status_suffix else ""
                         _object_label = f"{item_title} | {badge}{_status_txt}"
-                        _object_expanded = bool(cat == "General Model Setup")
+                        _object_expanded = bool(category_i == "General Model Setup")
 
                         # Object-level expander inside the category expander keeps long input registers navigable.
                         # Streamlit still executes/render widgets inside collapsed expanders, so unchanged rows are preserved on update.
                         with st.expander(_object_label, expanded=_object_expanded):
-                            item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, cat, item_type_i, item_name_i)
+                            item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, category_i, item_type_i, item_name_i)
                             delete_item = st.checkbox("Remove this complete object", key=item_delete_key)
                             if delete_item:
                                 deleted_item_keys.add(item_key_tuple)
 
                             for _, row in rows_item.iterrows():
                                 orig_idx = int(row.get("_orig_index", -1))
-                                key_prefix = _safe_model_input_key("mi", _editor_key_token, orig_idx, scenario_i, cat, item_type_i, item_name_i, row.get("Parameter", ""))
+                                key_prefix = _safe_model_input_key("mi", _editor_key_token, orig_idx, scenario_i, category_i, item_type_i, item_name_i, row.get("Parameter", ""))
                                 if str(row.get("Source Type", "")) == "Assumption":
                                     st.markdown("<div style='background-color:#fff3cd;padding:4px 8px;border-radius:4px;margin-top:6px;'><b>Assumption-tagged input</b></div>", unsafe_allow_html=True)
                                 c1, c2, c3, c4, c5 = st.columns([2.2, 2.0, 0.9, 0.8, 0.8])
@@ -5538,7 +5628,19 @@ with tab_model_qa:
                                 with c2:
                                     value = _value_widget(row, key_prefix)
                                 with c3:
-                                    unit = st.text_input("Unit", value=str(row.get("Unit", "")), key=f"{key_prefix}_unit")
+                                    if str(parameter).strip().lower() == "hot water demand":
+                                        _unit_current = str(row.get("Unit", "L/person·day"))
+                                        _unit_options = MODEL_INPUT_DHW_DEMAND_UNITS
+                                        if _unit_current not in _unit_options:
+                                            _unit_options = [_unit_current] + _unit_options
+                                        unit = st.selectbox(
+                                            "Unit",
+                                            _unit_options,
+                                            index=_unit_options.index(_unit_current) if _unit_current in _unit_options else 0,
+                                            key=f"{key_prefix}_unit",
+                                        )
+                                    else:
+                                        unit = st.text_input("Unit", value=str(row.get("Unit", "")), key=f"{key_prefix}_unit")
                                 with c4:
                                     required = st.checkbox("Required", value=bool(row.get("Required", False)), key=f"{key_prefix}_required")
                                 with c5:
@@ -5576,7 +5678,7 @@ with tab_model_qa:
                                     deleted_orig_indices.add(orig_idx)
                                 else:
                                     edited_rows.append(_mi_row(
-                                        scenario_i, scope_i, cat, item_type_i, item_name_i,
+                                        scenario_i, scope_i, category_i, item_type_i, item_name_i,
                                         parameter, value=value, unit=unit, required=required,
                                         source_type=source_type, source_ref=source_ref,
                                         reference=reference, min_check=min_check, max_check=max_check,
