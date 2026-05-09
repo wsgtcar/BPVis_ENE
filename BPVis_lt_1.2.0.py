@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.7",
+    page_title="WSGT_BPVis_ENE 2.2.8",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.7")
+st.sidebar.write("Version 2.2.8")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.7"
+REPORT_VERSION = "2.2.8"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -5392,7 +5392,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_2_7.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_2_8.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -5401,7 +5401,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_2_7.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_2_8.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -5992,6 +5992,21 @@ with tab_model_qa:
                         if not room_item_keys.empty:
                             with st.expander("Room Types", expanded=False):
                                 for _, item in room_item_keys.iterrows():
+                                    _render_model_input_item(item, cat_df)
+                    elif cat == "Thermal Envelope":
+                        st.caption("Envelope components are grouped by construction/component type. Open a component-type group first, then open the specific construction/object to edit its parameters.")
+                        try:
+                            _item_types_present = item_df_keys["Item Type"].dropna().astype(str).tolist()
+                        except Exception:
+                            _item_types_present = []
+                        _ordered_env_types = [t for t in MODEL_INPUT_ENVELOPE_COMPONENT_TYPES if t in set(_item_types_present)]
+                        _extra_env_types = sorted([t for t in set(_item_types_present) if t not in set(_ordered_env_types)])
+                        for _env_type in _ordered_env_types + _extra_env_types:
+                            _env_type_keys = item_df_keys.loc[item_df_keys["Item Type"].astype(str).eq(str(_env_type))].copy()
+                            if _env_type_keys.empty:
+                                continue
+                            with st.expander(str(_env_type), expanded=False):
+                                for _, item in _env_type_keys.iterrows():
                                     _render_model_input_item(item, cat_df)
                     else:
                         for _, item in item_df_keys.iterrows():
