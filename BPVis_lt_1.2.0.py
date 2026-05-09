@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.8",
+    page_title="WSGT_BPVis_ENE 2.2.9",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.8")
+st.sidebar.write("Version 2.2.9")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.8"
+REPORT_VERSION = "2.2.9"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2688,46 +2688,8 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         add_kpi_table("Benchmark KPIs", [("Net EUI", f"{net_eui_eff:,.1f} kWh/m²·a"), ("Net CO₂ intensity", f"{net_co2_int:,.1f} kgCO₂/m²·a"), ("Net energy cost", f"{currency_r} {net_cost_int:,.2f}/m²·a")])
     add_input_table("Relevant inputs", [("Building use", building_use_r), ("Country", project_country_r)])
 
-    # Model Inputs QA
-    add_section("7. Model Inputs QA")
-    try:
-        mi_df = model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_name)
-        mi_qa = evaluate_model_inputs_qa_df(mi_df)
-        mi_summary = model_inputs_qa_summary(mi_df)
-        add_kpi_table("Model Inputs QA KPIs", [
-            ("Input completeness", f"{mi_summary['completeness']} %"),
-            ("Required inputs", f"{mi_summary['required']}"),
-            ("Missing required", f"{mi_summary['missing']}"),
-            ("Assumption-tagged inputs", f"{mi_summary['assumptions']}"),
-            ("QA review flags", f"{mi_summary['review']}"),
-        ])
-        story.append(Paragraph("The report includes global model setup inputs and scenario-specific model inputs for the active scenario only. Assumption-tagged inputs should be reviewed and replaced with documented project references where possible.", styles["BodyText"]))
-        story.append(Spacer(1, 0.25 * cm))
-        for cat in MODEL_INPUT_CATEGORIES:
-            sub_cat = mi_qa.loc[mi_qa["Category"].astype(str) == cat].copy()
-            if sub_cat.empty:
-                continue
-            story.append(Paragraph(cat, styles["Heading3"]))
-            for (scope_i, item_type_i, item_name_i), sub in sub_cat.groupby(["Scope", "Item Type", "Item Name"], dropna=False):
-                story.append(Paragraph(f"{scope_i} — {item_type_i}: {item_name_i}", styles["BodyText"]))
-                rows_mi = [["Parameter", "Value", "Unit", "Source", "QA", "Justification"]]
-                for _, r in sub.iterrows():
-                    rows_mi.append([
-                        str(r.get("Parameter", "")),
-                        str(r.get("Value", "")),
-                        str(r.get("Unit", "")),
-                        str(r.get("Source Type", "")),
-                        str(r.get("QA Status", "")),
-                        str(r.get("Range Justification", "")),
-                    ])
-                story.append(_report_table_flowable(rows_mi, col_widths=[3.5 * cm, 2.5 * cm, 1.5 * cm, 2.6 * cm, 2.2 * cm, 3.2 * cm], font_size=5.5))
-                story.append(Spacer(1, 0.15 * cm))
-    except Exception:
-        story.append(Paragraph("Model Inputs QA data could not be loaded for this report.", styles["BodyText"]))
-    add_input_table("Relevant inputs", [("Register source", "Model_Inputs_QA workbook sheet / Model Inputs QA tab"), ("Global inputs", "General Model Setup"), ("Scenario-specific inputs", "Room types, envelope components and systems"), ("Assumption tag", "Source Type = Assumption")])
-
     # CRREM
-    add_section("8. CRREM-Analysis")
+    add_section("7. CRREM-Analysis")
     crrem = load_crrem_dataset(project_country_r)
     if crrem is None:
         story.append(Paragraph("CRREM dataset was not found. CRREM diagrams could not be generated.", styles["BodyText"]))
@@ -2763,7 +2725,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     add_input_table("Relevant inputs", [("Country", project_country_r), ("Project year", project_year_r), ("Emission factors", ", ".join([f"{k}: {v:.4f}" for k, v in factor_map.items()])), ("CRREM target", str(st.session_state.get("crrem_target_select", "1.5°C")))])
 
     # LCC Analysis
-    add_section("9. LCC-Analysis")
+    add_section("8. LCC-Analysis")
     cf = compute_lcc_cashflow_table(df_energy, payload, end_uses, project_year_r, lcc_global=lcc_global)
     if cf.empty:
         story.append(Paragraph("No LCC cash-flow data available. Add LCC assumptions and investment measures in the LCC-Analysis tab.", styles["BodyText"]))
@@ -2806,7 +2768,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     ])
 
     # Scenarios section - active scenario only per report rule
-    add_section("10. Scenarios")
+    add_section("9. Scenarios")
     story.append(Paragraph("The report is generated for the active scenario only. Multi-scenario comparison diagrams remain available interactively in the app.", styles["BodyText"]))
     if not cf.empty:
         by_year = cf.groupby("Year", as_index=True).agg({"Nominal Cost": "sum", "Discounted Cost": "sum"})
@@ -2826,6 +2788,45 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         except Exception:
             pass
     add_input_table("Relevant inputs", [("Active scenario", active_name), ("Scenario color", scenario_color), ("Scenario-specific raw Energy_Balance override", "Yes" if get_scenario_energy_balance_override(active_name) is not None else "No")])
+
+    # Model Inputs QA
+    add_section("10. Model Inputs QA")
+    try:
+        mi_df = model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_name)
+        mi_qa = evaluate_model_inputs_qa_df(mi_df)
+        mi_summary = model_inputs_qa_summary(mi_df)
+        add_kpi_table("Model Inputs QA KPIs", [
+            ("Input completeness", f"{mi_summary['completeness']} %"),
+            ("Required inputs", f"{mi_summary['required']}"),
+            ("Missing required", f"{mi_summary['missing']}"),
+            ("Assumption-tagged inputs", f"{mi_summary['assumptions']}"),
+            ("QA review flags", f"{mi_summary['review']}"),
+        ])
+        story.append(Paragraph("The report includes global model setup inputs and scenario-specific model inputs for the active scenario only. Assumption-tagged inputs should be reviewed and replaced with documented project references where possible.", styles["BodyText"]))
+        story.append(Spacer(1, 0.25 * cm))
+        for cat in MODEL_INPUT_CATEGORIES:
+            sub_cat = mi_qa.loc[mi_qa["Category"].astype(str) == cat].copy()
+            if sub_cat.empty:
+                continue
+            story.append(Paragraph(cat, styles["Heading3"]))
+            for (scope_i, item_type_i, item_name_i), sub in sub_cat.groupby(["Scope", "Item Type", "Item Name"], dropna=False):
+                story.append(Paragraph(f"{scope_i} — {item_type_i}: {item_name_i}", styles["BodyText"]))
+                rows_mi = [["Parameter", "Value", "Unit", "Source", "QA", "Justification"]]
+                for _, r in sub.iterrows():
+                    rows_mi.append([
+                        str(r.get("Parameter", "")),
+                        str(r.get("Value", "")),
+                        str(r.get("Unit", "")),
+                        str(r.get("Source Type", "")),
+                        str(r.get("QA Status", "")),
+                        str(r.get("Range Justification", "")),
+                    ])
+                story.append(_report_table_flowable(rows_mi, col_widths=[3.5 * cm, 2.5 * cm, 1.5 * cm, 2.6 * cm, 2.2 * cm, 3.2 * cm], font_size=5.5))
+                story.append(Spacer(1, 0.15 * cm))
+    except Exception:
+        story.append(Paragraph("Model Inputs QA data could not be loaded for this report.", styles["BodyText"]))
+    add_input_table("Relevant inputs", [("Register source", "Model_Inputs_QA workbook sheet / Model Inputs QA tab"), ("Global inputs", "General Model Setup"), ("Scenario-specific inputs", "Room types, envelope components and systems"), ("Assumption tag", "Source Type = Assumption")])
+
 
     doc.build(story, onFirstPage=_page_number, onLaterPages=_page_number)
     buf.seek(0)
@@ -3789,6 +3790,114 @@ def model_inputs_df_for_scenario(df: Optional[pd.DataFrame], scenario_name: Opti
     mask = out["Scenario"].astype(str).eq(MODEL_INPUT_GLOBAL_SCENARIO) | out["Scenario"].astype(str).eq(sc)
     return out.loc[mask].reset_index(drop=True)
 
+
+
+def _format_model_input_value_for_comparison(row) -> str:
+    """Return a compact display value for scenario-comparison tables."""
+    try:
+        val = str(row.get("Value", "")).strip()
+        unit = str(row.get("Unit", "")).strip()
+        src = str(row.get("Source Type", "")).strip()
+        if val == "":
+            base = "Missing"
+        elif unit and unit not in ["-", "nan", "None"]:
+            base = f"{val} {unit}"
+        else:
+            base = val
+        if src == "Assumption":
+            base = f"⚠ {base} (Assumption)"
+        return base
+    except Exception:
+        return "Missing"
+
+
+def model_inputs_scenario_differences(df: Optional[pd.DataFrame], scenario_names: list) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return a wide table and a chart table with inputs that differ across scenarios.
+
+    Comparison is based on the effective input set per scenario: global rows plus
+    rows belonging to each scenario. Rows are matched by Category, Item Type,
+    Item Name and Parameter. Missing objects/parameters in a scenario are shown
+    as "Not defined" and are treated as differences.
+    """
+    try:
+        scenario_names = [str(x) for x in scenario_names if str(x).strip()]
+    except Exception:
+        scenario_names = []
+    if len(scenario_names) <= 1:
+        return pd.DataFrame(), pd.DataFrame()
+
+    base_df = sanitize_model_inputs_qa_df(df)
+    key_cols = ["Category", "Item Type", "Item Name", "Parameter"]
+    scenario_maps = {}
+    all_keys = set()
+
+    for sc in scenario_names:
+        eff = model_inputs_df_for_scenario(base_df, sc).copy()
+        if eff.empty:
+            scenario_maps[sc] = {}
+            continue
+
+        # If the same parameter exists as both global and scenario-specific,
+        # use the scenario-specific row as the effective value.
+        eff["_priority"] = np.where(eff["Scenario"].astype(str).eq(MODEL_INPUT_GLOBAL_SCENARIO), 0, 1)
+        eff = eff.sort_values(by=key_cols + ["_priority"], kind="stable")
+        eff = eff.drop_duplicates(subset=key_cols, keep="last")
+
+        smap = {}
+        for _, r in eff.iterrows():
+            key = tuple(str(r.get(c, "")) for c in key_cols)
+            all_keys.add(key)
+            smap[key] = {
+                "display": _format_model_input_value_for_comparison(r),
+                "raw": str(r.get("Value", "")).strip(),
+                "unit": str(r.get("Unit", "")).strip(),
+                "scope": str(r.get("Scope", "")),
+                "source": str(r.get("Source Type", "")),
+            }
+        scenario_maps[sc] = smap
+
+    rows = []
+    chart_rows = []
+    for key in sorted(all_keys, key=lambda k: (k[0], k[1], k[2], k[3])):
+        values = []
+        raw_values = []
+        for sc in scenario_names:
+            item = scenario_maps.get(sc, {}).get(key)
+            if item is None:
+                values.append("Not defined")
+                raw_values.append("__NOT_DEFINED__")
+            else:
+                values.append(item.get("display", "Missing"))
+                raw_values.append(f"{item.get('raw','')}|{item.get('unit','')}|{item.get('source','')}")
+        # Show only inputs with at least two different effective values/sources.
+        if len(set(raw_values)) <= 1:
+            continue
+        category, item_type, item_name, parameter = key
+        row = {
+            "Category": category,
+            "Object Type": item_type,
+            "Object Name": item_name,
+            "Parameter": parameter,
+        }
+        for sc, val in zip(scenario_names, values):
+            row[sc] = val
+        rows.append(row)
+
+        # For the chart, count scenarios that deviate from the most common value.
+        try:
+            vc = pd.Series(raw_values).value_counts(dropna=False)
+            common = str(vc.index[0]) if not vc.empty else raw_values[0]
+        except Exception:
+            common = raw_values[0]
+        for sc, raw in zip(scenario_names, raw_values):
+            if str(raw) != str(common):
+                chart_rows.append({"Scenario": sc, "Category": category, "Differing inputs": 1})
+
+    diff_df = pd.DataFrame(rows)
+    chart_df = pd.DataFrame(chart_rows)
+    if not chart_df.empty:
+        chart_df = chart_df.groupby(["Scenario", "Category"], as_index=False)["Differing inputs"].sum()
+    return diff_df, chart_df
 
 def evaluate_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     """Add QA status columns for completeness, assumption tagging, sanity ranges and usual-value bounds."""
@@ -6046,6 +6155,56 @@ with tab_model_qa:
             st.rerun()
 
         st.markdown("---")
+        with st.expander("Scenario input differences", expanded=False):
+            st.caption(
+                "This overview compares the effective Model Inputs QA values across all project scenarios. "
+                "Global values are included in every scenario; scenario-specific values override matching global values. "
+                "Only parameters with different values, units, source tags, or missing definitions are shown."
+            )
+            _sc_names_mi = list(st.session_state.get("scenarios", {}).keys())
+            if len(_sc_names_mi) <= 1:
+                st.info("Only one scenario is available. Add more scenarios to compare Model Inputs QA assumptions.")
+            else:
+                _diff_df_mi, _diff_chart_mi = model_inputs_scenario_differences(
+                    st.session_state.get("model_inputs_qa_df"),
+                    _sc_names_mi,
+                )
+                if _diff_df_mi.empty:
+                    st.success("No differing Model Inputs QA values were found between scenarios.")
+                else:
+                    st.write("### Differing parameters between scenarios")
+                    st.dataframe(_diff_df_mi, use_container_width=True, height=420)
+                    st.caption(
+                        "Cells marked with ⚠ are assumption-tagged values. 'Not defined' means the object or parameter exists in at least one scenario, "
+                        "but not in that scenario's effective input set."
+                    )
+                    if not _diff_chart_mi.empty:
+                        st.write("### Difference count by scenario and category")
+                        _scenario_color_map_mi = st.session_state.get(
+                            "color_map_scenarios",
+                            default_scenario_color_map(_sc_names_mi),
+                        )
+                        fig_mi_diff = px.bar(
+                            _diff_chart_mi,
+                            x="Category",
+                            y="Differing inputs",
+                            color="Scenario",
+                            barmode="group",
+                            color_discrete_map=_scenario_color_map_mi,
+                            text_auto=".0f",
+                            height=420,
+                            title="Model Inputs QA differences by category",
+                        )
+                        fig_mi_diff.update_layout(
+                            xaxis_title="Model input category",
+                            yaxis_title="Number of differing inputs",
+                            legend_title_text="Scenario",
+                            margin=dict(l=40, r=20, t=55, b=95),
+                        )
+                        fig_mi_diff.update_xaxes(tickangle=-30)
+                        fig_mi_diff.update_traces(textfont_size=12)
+                        st_plotly_chart(fig_mi_diff, use_container_width=True, key="mi_scenario_difference_chart")
+
         with st.expander("QA interpretation", expanded=False):
             st.markdown(
                 """
