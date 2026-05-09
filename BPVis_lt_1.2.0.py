@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.1.2",
+    page_title="WSGT_BPVis_ENE 2.2.1",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.0")
+st.sidebar.write("Version 2.2.1")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.0"
+REPORT_VERSION = "2.2.1"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2691,7 +2691,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     # Model Inputs QA
     add_section("7. Model Inputs QA")
     try:
-        mi_df = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
+        mi_df = model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_name)
         mi_qa = evaluate_model_inputs_qa_df(mi_df)
         mi_summary = model_inputs_qa_summary(mi_df)
         add_kpi_table("Model Inputs QA KPIs", [
@@ -2701,27 +2701,29 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
             ("Assumption-tagged inputs", f"{mi_summary['assumptions']}"),
             ("Sanity-check review", f"{mi_summary['review']}"),
         ])
-        story.append(Paragraph("Assumption-tagged inputs should be reviewed and replaced with documented project references where possible. Sanity checks are informative and must be adjusted to the applicable project standard, climate zone and model basis.", styles["BodyText"]))
+        story.append(Paragraph("The report includes global model setup inputs and scenario-specific model inputs for the active scenario only. Assumption-tagged inputs should be reviewed and replaced with documented project references where possible.", styles["BodyText"]))
         story.append(Spacer(1, 0.25 * cm))
         for cat in MODEL_INPUT_CATEGORIES:
-            sub = mi_qa.loc[mi_qa["Category"].astype(str) == cat].copy()
-            if sub.empty:
+            sub_cat = mi_qa.loc[mi_qa["Category"].astype(str) == cat].copy()
+            if sub_cat.empty:
                 continue
             story.append(Paragraph(cat, styles["Heading3"]))
-            rows_mi = [["Parameter", "Value", "Unit", "Source", "QA"]]
-            for _, r in sub.iterrows():
-                rows_mi.append([
-                    str(r.get("Parameter", "")),
-                    str(r.get("Value", "")),
-                    str(r.get("Unit", "")),
-                    str(r.get("Source Type", "")),
-                    str(r.get("QA Status", "")),
-                ])
-            story.append(_report_table_flowable(rows_mi, col_widths=[4.3 * cm, 3.0 * cm, 2.0 * cm, 3.3 * cm, 2.6 * cm], font_size=6.1))
-            story.append(Spacer(1, 0.18 * cm))
+            for (scope_i, item_type_i, item_name_i), sub in sub_cat.groupby(["Scope", "Item Type", "Item Name"], dropna=False):
+                story.append(Paragraph(f"{scope_i} — {item_type_i}: {item_name_i}", styles["BodyText"]))
+                rows_mi = [["Parameter", "Value", "Unit", "Source", "QA"]]
+                for _, r in sub.iterrows():
+                    rows_mi.append([
+                        str(r.get("Parameter", "")),
+                        str(r.get("Value", "")),
+                        str(r.get("Unit", "")),
+                        str(r.get("Source Type", "")),
+                        str(r.get("QA Status", "")),
+                    ])
+                story.append(_report_table_flowable(rows_mi, col_widths=[4.3 * cm, 3.0 * cm, 2.0 * cm, 3.3 * cm, 2.6 * cm], font_size=6.0))
+                story.append(Spacer(1, 0.15 * cm))
     except Exception:
         story.append(Paragraph("Model Inputs QA data could not be loaded for this report.", styles["BodyText"]))
-    add_input_table("Relevant inputs", [("Register source", "Model_Inputs_QA workbook sheet / Model Inputs QA tab"), ("Assumption tag", "Source Type = Assumption"), ("Sanity range", "Min Check / Max Check columns")])
+    add_input_table("Relevant inputs", [("Register source", "Model_Inputs_QA workbook sheet / Model Inputs QA tab"), ("Global inputs", "General Model Setup"), ("Scenario-specific inputs", "Room types, envelope components and systems"), ("Assumption tag", "Source Type = Assumption")])
 
     # CRREM
     add_section("8. CRREM-Analysis")
@@ -3018,17 +3020,41 @@ def build_mapping_df(end_uses) -> pd.DataFrame:
 # =========================
 # Model Inputs QA helpers
 # =========================
+MODEL_INPUT_GLOBAL_SCENARIO = "GLOBAL"
+
 MODEL_INPUT_CATEGORIES = [
     "General Model Setup",
+    "Room Types",
     "Thermal Envelope",
     "AHU / Ventilation",
     "Heating",
     "Cooling",
     "Domestic Hot Water",
-    "Internal Loads by Area Use Type",
-    "Outdoor Air by Area Use Type",
-    "Setpoints and Schedules",
-    "Other / Exceptional Calculations",
+    "Pumps / Auxiliaries",
+    "Controls",
+    "Other / Custom Inputs",
+]
+
+MODEL_INPUT_ENVELOPE_COMPONENT_TYPES = [
+    "External Walls",
+    "Roofs",
+    "Floors / Slabs",
+    "Glazings",
+    "External Doors",
+    "Shading Devices",
+    "Thermal Bridges",
+    "Infiltration / Airtightness",
+    "Other Envelope Component",
+]
+
+MODEL_INPUT_SYSTEM_TYPES = [
+    "AHU / Ventilation",
+    "Heating",
+    "Cooling",
+    "Domestic Hot Water",
+    "Pumps / Auxiliaries",
+    "Controls",
+    "Other System",
 ]
 
 MODEL_INPUT_SOURCE_TYPES = [
@@ -3043,7 +3069,11 @@ MODEL_INPUT_SOURCE_TYPES = [
 ]
 
 MODEL_INPUT_QA_COLUMNS = [
+    "Scenario",
+    "Scope",
     "Category",
+    "Item Type",
+    "Item Name",
     "Parameter",
     "Value",
     "Unit",
@@ -3056,120 +3086,279 @@ MODEL_INPUT_QA_COLUMNS = [
     "Notes",
 ]
 
+# Report/backwards-compatible alias. The previous version used a flat list of categories;
+# the new implementation still exports one flat sheet, but the UI renders it as objects.
+MODEL_INPUT_DISPLAY_CATEGORIES = MODEL_INPUT_CATEGORIES
+
+
+def _mi_row(
+        scenario: str,
+        scope: str,
+        category: str,
+        item_type: str,
+        item_name: str,
+        parameter: str,
+        value: str = "",
+        unit: str = "-",
+        required: bool = False,
+        source_type: str = "Assumption",
+        source_ref: str = "",
+        reference: str = "",
+        min_check=None,
+        max_check=None,
+        notes: str = "",
+) -> dict:
+    return {
+        "Scenario": str(scenario or MODEL_INPUT_GLOBAL_SCENARIO),
+        "Scope": str(scope or "Scenario"),
+        "Category": str(category or "Other / Custom Inputs"),
+        "Item Type": str(item_type or "Custom"),
+        "Item Name": str(item_name or "General"),
+        "Parameter": str(parameter or ""),
+        "Value": "" if value is None else str(value),
+        "Unit": "" if unit is None else str(unit),
+        "Required": bool(required),
+        "Source Type": str(source_type or "Assumption"),
+        "Source Document / Reference": "" if source_ref is None else str(source_ref),
+        "Reference / Target": "" if reference is None else str(reference),
+        "Min Check": min_check,
+        "Max Check": max_check,
+        "Notes": "" if notes is None else str(notes),
+    }
+
+
+def default_model_inputs_global_rows() -> list:
+    """Global model setup inputs. These are intentionally project-wide, not scenario-specific."""
+    return [
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Simulation tool", unit="-", required=True, source_type="Simulation Model", reference="e.g. IESVE / EnergyPlus / DesignBuilder"),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Simulation tool version", unit="-", required=True, source_type="Simulation Model", reference="Version used for the final simulation results"),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Weather file", unit="-", required=True, source_type="Simulation Model", reference="Weather station/file used in annual simulation"),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Climate zone", unit="-", required=False, source_type="Standard / Reference", source_ref="ASHRAE / LEED / local code documentation", reference="Required when comparing against a formal baseline"),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Simulation timestep", unit="min", required=False, source_type="Simulation Model", reference="Typically 60 min or sub-hourly", min_check=1, max_check=60),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Annual simulation period", unit="months", required=True, source_type="Simulation Model", reference="Should normally cover 12 months", min_check=12, max_check=12),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Modelled floor area", unit="m²", required=True, source_type="Design Document", source_ref="Area schedule / simulation model geometry", reference="Should match project area or document difference", min_check=1),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Area basis", unit="-", required=False, source_type="Design Document", reference="GFA / NFA / conditioned area / treated floor area"),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Geometry / zoning source", unit="-", required=True, source_type="Design Document", source_ref="Architectural drawings / BIM / simulation model", reference="Trace model version and drawing issue"),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Simulation purpose / rating basis", unit="-", required=False, source_type="Standard / Reference", reference="Design support / LEED / ASHRAE 90.1 PRM / local code / internal benchmark"),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Excluded areas / systems", unit="-", required=False, source_type="Design Document", source_ref="Energy model report / compliance narrative", reference="Document any excluded systems or loads"),
+        _mi_row(MODEL_INPUT_GLOBAL_SCENARIO, "Global", "General Model Setup", "General", "Simulation Model", "Modeller / reviewer", unit="-", required=False, source_type="Other", reference="Responsible person and QA reviewer"),
+    ]
+
+
+def room_type_template(item_name: str, scenario: str) -> list:
+    return [
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Area", unit="m²", required=True, source_type="Design Document", source_ref="Area schedule / room book", min_check=0),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Occupancy density", unit="m²/person", required=False, source_type="Design Document", source_ref="Room data sheet / LEED calculator / design brief", min_check=1, max_check=100),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Lighting power density", unit="W/m²", required=True, source_type="Design Document", source_ref="Lighting concept / ASHRAE baseline / design brief", min_check=0, max_check=50),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Equipment power density", unit="W/m²", required=True, source_type="Design Document", source_ref="Equipment schedule / design brief", min_check=0, max_check=150),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "People sensible gain", unit="W/person", required=False, source_type="Assumption", reference="Document activity/metabolic assumption", min_check=0, max_check=200),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "People latent gain", unit="W/person", required=False, source_type="Assumption", reference="Document activity/metabolic assumption", min_check=0, max_check=200),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Heating setpoint", unit="°C", required=True, source_type="Design Document", source_ref="Owner requirements / room data sheet", min_check=10, max_check=26),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Cooling setpoint", unit="°C", required=True, source_type="Design Document", source_ref="Owner requirements / room data sheet", min_check=18, max_check=35),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Night setback / setup", unit="°C or rule", required=False, source_type="Assumption", reference="Document unoccupied temperature control logic"),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Occupancy schedule", unit="-", required=True, source_type="Design Document", source_ref="Operation concept / design brief", reference="Weekday/weekend and holiday operation"),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Lighting schedule", unit="-", required=True, source_type="Assumption", source_ref="Operation concept / lighting controls", reference="Equivalent full-load hours or schedule name"),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Equipment schedule", unit="-", required=True, source_type="Assumption", source_ref="Operation concept / equipment load assumptions", reference="Equivalent full-load hours or schedule name"),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Outdoor air per person", unit="L/s.person", required=False, source_type="Standard / Reference", source_ref="ASHRAE 62.1 / EN 16798 / project brief", min_check=0, max_check=50),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Outdoor air per area", unit="L/s.m²", required=False, source_type="Standard / Reference", source_ref="ASHRAE 62.1 / EN 16798 / project brief", min_check=0, max_check=10),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Demand controlled ventilation permitted", unit="yes/no", required=False, source_type="Design Document", source_ref="Controls narrative"),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Demand controlled ventilation rule", unit="-", required=False, source_type="Design Document", source_ref="Controls narrative", reference="CO₂ setpoint, minimum outdoor air, occupancy sensor logic"),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Natural ventilation permitted", unit="yes/no", required=False, source_type="Design Document", source_ref="Ventilation / façade / controls concept"),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Natural ventilation rule", unit="-", required=False, source_type="Design Document", source_ref="Ventilation / controls concept", reference="Opening schedule, temperature limits, CO₂ limits, wind/rain lockout"),
+    ]
+
+
+def envelope_component_template(component_type: str, item_name: str, scenario: str) -> list:
+    ct = str(component_type)
+    if ct == "External Walls":
+        params = [
+            ("Area", "m²", True, "Design Document", "Envelope schedule / model geometry", "", 0, None),
+            ("U-value", "W/m²K", True, "Design Document", "U-value calculation / envelope specification", "Compare with code/baseline", 0.05, 2.5),
+            ("Thermal bridge allowance", "% or W/K", False, "Calculation", "Envelope calculation", "Document method", 0, 50),
+            ("Solar absorptance", "-", False, "Assumption", "Material specification", "", 0, 1),
+            ("Orientation / exposure", "-", False, "Design Document", "Model geometry", "", None, None),
+        ]
+    elif ct == "Roofs":
+        params = [
+            ("Area", "m²", True, "Design Document", "Envelope schedule / model geometry", "", 0, None),
+            ("U-value", "W/m²K", True, "Design Document", "U-value calculation / envelope specification", "Compare with code/baseline", 0.04, 1.5),
+            ("Solar absorptance", "-", False, "Assumption", "Roof finish specification", "", 0, 1),
+            ("Green roof / cool roof assumption", "yes/no/rule", False, "Design Document", "Roof concept", "", None, None),
+        ]
+    elif ct == "Floors / Slabs":
+        params = [
+            ("Area", "m²", True, "Design Document", "Envelope schedule / model geometry", "", 0, None),
+            ("U-value", "W/m²K", True, "Design Document", "U-value calculation / envelope specification", "Compare with code/baseline", 0.04, 2.0),
+            ("Ground temperature / boundary condition", "-", False, "Simulation Model", "Model input", "", None, None),
+        ]
+    elif ct == "Glazings":
+        params = [
+            ("Area", "m²", True, "Design Document", "Façade schedule / model geometry", "", 0, None),
+            ("U-value", "W/m²K", True, "Design Document", "Glazing specification", "Compare with code/baseline", 0.5, 6.0),
+            ("SHGC / g-value", "-", True, "Design Document", "Glazing specification", "", 0.05, 0.9),
+            ("Visible transmittance", "-", False, "Design Document", "Glazing specification", "", 0.05, 0.9),
+            ("Frame fraction", "%", False, "Design Document", "Façade schedule", "", 0, 80),
+            ("Orientation", "-", False, "Design Document", "Model geometry", "", None, None),
+            ("Shading device / control", "-", False, "Design Document", "Shading concept / controls", "Internal/external, fixed/dynamic, schedule/rule", None, None),
+        ]
+    elif ct == "Shading Devices":
+        params = [
+            ("Shading type", "-", True, "Design Document", "Façade / shading concept", "Fixed, movable, electrochromic, internal blind, etc.", None, None),
+            ("Geometry / projection", "m or rule", False, "Design Document", "Façade drawings", "Overhang/fin depth, spacing, angle", None, None),
+            ("Control rule", "-", False, "Design Document", "Controls narrative", "Solar radiation, glare, schedule, temperature, manual", None, None),
+            ("Reduction factor", "-", False, "Assumption", "Simulation model", "Document if simplified", 0, 1),
+        ]
+    elif ct == "Infiltration / Airtightness":
+        params = [
+            ("Infiltration rate", "1/h or L/s.m²", True, "Assumption", "Airtightness concept / model input", "Flag assumption unless measured/specified", 0, 5),
+            ("Infiltration schedule / rule", "-", False, "Assumption", "Simulation model", "Wind/stack/schedule logic", None, None),
+            ("Airtightness test value", "n50 or q50", False, "Measurement", "Blower-door test / specification", "", 0, 20),
+        ]
+    else:
+        params = [
+            ("Area / quantity", "m² or unit", False, "Design Document", "Project documentation", "", 0, None),
+            ("Main performance value", "project unit", False, "Assumption", "Project documentation", "Document unit and method", None, None),
+            ("Modelling rule", "-", False, "Simulation Model", "Energy model input", "", None, None),
+        ]
+    return [_mi_row(scenario, "Scenario", "Thermal Envelope", ct, item_name, p, unit=u, required=req, source_type=src, source_ref=ref, reference=tgt, min_check=mn, max_check=mx) for p, u, req, src, ref, tgt, mn, mx in params]
+
+
+def system_template(system_type: str, item_name: str, scenario: str) -> list:
+    stype = str(system_type)
+    if stype == "AHU / Ventilation":
+        params = [
+            ("Served room types / zones", "-", True, "Design Document", "MEP concept / zone list", "", None, None),
+            ("Supply airflow", "m³/h", True, "Design Document", "Air balance / AHU schedule", "", 0, None),
+            ("Outdoor airflow", "m³/h", True, "Design Document", "Air balance / ventilation calculation", "", 0, None),
+            ("Exhaust airflow", "m³/h", False, "Design Document", "Air balance", "", 0, None),
+            ("Heat recovery type", "-", False, "Design Document", "AHU specification", "Plate, rotary, run-around, none", None, None),
+            ("Heat recovery efficiency", "%", False, "Design Document", "AHU specification", "Sensible/total effectiveness used in model", 0, 95),
+            ("Specific fan power", "W/(L/s)", False, "Design Document", "Fan/AHU schedule", "Check against selected standard/project target", 0, 8),
+            ("Supply air temperature", "°C", False, "Design Document", "Controls sequence / AHU schedule", "", 10, 35),
+            ("AHU operation schedule", "-", True, "Design Document", "Controls narrative / operation concept", "", None, None),
+            ("Demand controlled ventilation", "yes/no", False, "Design Document", "Controls narrative", "", None, None),
+            ("Demand controlled ventilation rule", "-", False, "Design Document", "Controls narrative", "CO₂ setpoint, occupancy sensor, min OA", None, None),
+            ("Free cooling / economizer rule", "-", False, "Design Document", "Controls narrative", "Outdoor air temperature/enthalpy limits", None, None),
+            ("Humidification / dehumidification", "yes/no/rule", False, "Design Document", "MEP concept / controls", "", None, None),
+        ]
+    elif stype == "Heating":
+        params = [
+            ("System type", "-", True, "Design Document", "MEP concept", "Boiler, heat pump, district heating, etc.", None, None),
+            ("Energy source", "-", True, "Design Document", "MEP concept / energy source mapping", "Must be consistent with Energy_Balance mapping", None, None),
+            ("Overall efficiency / seasonal COP", "-", True, "Design Document", "Equipment datasheet / model input", "Boiler efficiency or heat-pump SCOP", 0, 10),
+            ("Supply temperature", "°C", False, "Design Document", "Heating concept", "", 20, 90),
+            ("Return temperature", "°C", False, "Design Document", "Heating concept", "", 15, 80),
+            ("Design heating load", "kW", False, "Simulation Model", "Loads analysis / sizing report", "", 0, None),
+            ("Heating operation schedule", "-", False, "Design Document", "Controls narrative", "", None, None),
+            ("Control rule", "-", False, "Design Document", "Controls narrative", "Weather compensation, setback, room control", None, None),
+            ("Distribution / storage losses", "% or kWh/a", False, "Assumption", "MEP calculation / model input", "Document method", 0, 50),
+        ]
+    elif stype == "Cooling":
+        params = [
+            ("System type", "-", True, "Design Document", "MEP concept", "Chiller, heat pump, district cooling, VRF, etc.", None, None),
+            ("Energy source", "-", True, "Design Document", "MEP concept / energy source mapping", "Must be consistent with Energy_Balance mapping", None, None),
+            ("Overall efficiency / seasonal COP", "-", True, "Design Document", "Equipment datasheet / model input", "Chiller COP, SEER, EER, DC assumption", 0, 15),
+            ("Supply temperature", "°C", False, "Design Document", "Cooling concept", "", 4, 25),
+            ("Return temperature", "°C", False, "Design Document", "Cooling concept", "", 6, 30),
+            ("Design cooling load", "kW", False, "Simulation Model", "Loads analysis / sizing report", "", 0, None),
+            ("Cooling operation schedule", "-", False, "Design Document", "Controls narrative", "", None, None),
+            ("Free cooling rule", "-", False, "Design Document", "Controls narrative", "", None, None),
+            ("Distribution / storage losses", "% or kWh/a", False, "Assumption", "MEP calculation / model input", "Document method", 0, 50),
+        ]
+    elif stype == "Domestic Hot Water":
+        params = [
+            ("System type", "-", True, "Design Document", "DHW concept", "Boiler, heat pump, district heating, electric, solar thermal", None, None),
+            ("Energy source", "-", True, "Design Document", "DHW concept / energy source mapping", "", None, None),
+            ("Generator efficiency / COP", "-", True, "Design Document", "Equipment datasheet / model input", "", 0, 10),
+            ("DHW demand calculation method", "-", False, "Calculation", "DHW calculation / design brief", "Persons, fixtures, litres/day, schedule", None, None),
+            ("Storage volume", "L", False, "Design Document", "DHW specification", "", 0, None),
+            ("Storage losses", "kWh/a or W", False, "Assumption", "DHW calculation / model input", "", 0, None),
+            ("Circulation losses", "kWh/a or %", False, "Assumption", "DHW calculation / model input", "", 0, None),
+            ("DHW operation schedule", "-", False, "Design Document", "Operation concept", "", None, None),
+        ]
+    else:
+        params = [
+            ("System description", "-", True, "Design Document", "MEP concept / simulation model", "", None, None),
+            ("Energy source", "-", False, "Design Document", "MEP concept / energy source mapping", "", None, None),
+            ("Efficiency / control assumption", "-", False, "Assumption", "Model input / specification", "", None, None),
+            ("Operation schedule", "-", False, "Design Document", "Controls / operation concept", "", None, None),
+        ]
+    return [_mi_row(scenario, "Scenario", stype if stype in MODEL_INPUT_CATEGORIES else "Other / Custom Inputs", stype, item_name, p, unit=u, required=req, source_type=src, source_ref=ref, reference=tgt, min_check=mn, max_check=mx) for p, u, req, src, ref, tgt, mn, mx in params]
+
 
 def default_model_inputs_qa_df() -> pd.DataFrame:
-    """Return a first-version model input register for energy simulation QA.
-
-    The default ranges are sanity-check ranges, not compliance limits. For formal LEED/ASHRAE checks,
-    the user should overwrite the reference/target fields with project-specific values from the selected
-    standard, climate zone, drawings/specifications, or energy model documentation.
-    """
-    rows = [
-        # General setup
-        ("General Model Setup", "Simulation tool", "", "-", True, "Simulation Model", "", "e.g. IESVE / EnergyPlus / DesignBuilder", None, None, ""),
-        ("General Model Setup", "Simulation tool version", "", "-", True, "Simulation Model", "", "Version used for final results", None, None, ""),
-        ("General Model Setup", "Weather file", "", "-", True, "Simulation Model", "", "Weather station / file used in annual simulation", None, None, ""),
-        ("General Model Setup", "ASHRAE climate zone", "", "-", False, "Standard / Reference", "ASHRAE 90.1 / LEED energy model documentation", "Needed for 90.1 baseline checks", None, None, ""),
-        ("General Model Setup", "Simulation timestep", "", "min", False, "Simulation Model", "", "Typical hourly or sub-hourly timestep", 1, 60, ""),
-        ("General Model Setup", "Annual simulation period", "", "months", True, "Simulation Model", "", "Should normally cover 12 calendar months", 12, 12, ""),
-        ("General Model Setup", "Conditioned floor area", "", "m²", True, "Design Document", "Area schedule / model geometry", "Should match project area used in dashboard", 1, None, ""),
-        ("General Model Setup", "Geometry / zoning source", "", "-", True, "Design Document", "Architectural drawings / BIM / simulation model", "Trace model version and drawing issue", None, None, ""),
-        ("General Model Setup", "Excluded areas / systems", "", "-", False, "Design Document", "ASHRAE 90.1 Appendix G documentation", "Document areas/systems excluded from model", None, None, ""),
-
-        # Envelope
-        ("Thermal Envelope", "External wall U-value", "", "W/m²K", True, "Design Document", "Envelope schedule / U-value calculation", "Compare with selected code/baseline envelope", 0.05, 2.5, ""),
-        ("Thermal Envelope", "Roof U-value", "", "W/m²K", True, "Design Document", "Envelope schedule / U-value calculation", "Compare with selected code/baseline envelope", 0.04, 1.5, ""),
-        ("Thermal Envelope", "Ground floor / slab U-value", "", "W/m²K", False, "Design Document", "Envelope schedule / U-value calculation", "Compare with selected code/baseline envelope", 0.04, 2.0, ""),
-        ("Thermal Envelope", "Window U-value", "", "W/m²K", True, "Design Document", "Façade / window schedule", "Compare with selected code/baseline envelope", 0.5, 6.0, ""),
-        ("Thermal Envelope", "Window SHGC / g-value", "", "-", True, "Design Document", "Façade / glass specification", "Check against design intent and climate", 0.05, 0.9, ""),
-        ("Thermal Envelope", "Visible transmittance", "", "-", False, "Design Document", "Façade / glass specification", "Used for daylight and solar-control plausibility", 0.05, 0.9, ""),
-        ("Thermal Envelope", "Window-to-wall ratio", "", "%", False, "Calculation", "Geometry / façade schedule", "Check against model geometry and baseline assumption", 0, 100, ""),
-        ("Thermal Envelope", "Infiltration rate", "", "1/h or L/s·m²", True, "Assumption", "Airtightness concept / model input", "Flag as assumption unless measured or specified", 0, 5, ""),
-        ("Thermal Envelope", "Thermal bridge allowance", "", "% or W/K", False, "Assumption", "Envelope calculation", "Document method if included", 0, 50, ""),
-
-        # AHU / ventilation
-        ("AHU / Ventilation", "Supply airflow intensity", "", "L/s·m²", True, "Design Document", "MEP design / air balance", "Cross-check with AHU sizing and outdoor air rates", 0, 20, ""),
-        ("AHU / Ventilation", "Outdoor air intensity", "", "L/s·m²", True, "Design Document", "Ventilation concept / air balance", "Check against occupancy and area ventilation requirement", 0, 15, ""),
-        ("AHU / Ventilation", "Heat recovery efficiency", "", "%", False, "Design Document", "AHU specification", "Sensible/total effectiveness used in model", 0, 95, ""),
-        ("AHU / Ventilation", "Specific fan power", "", "W/(L/s)", False, "Design Document", "Fan/AHU specification", "Check against project target / baseline", 0, 5, ""),
-        ("AHU / Ventilation", "Ventilation schedule source", "", "-", True, "Design Document", "Operation concept / BMS strategy", "Document occupied/unoccupied operation", None, None, ""),
-        ("AHU / Ventilation", "Demand-controlled ventilation", "", "yes/no", False, "Design Document", "Controls specification", "Document CO₂/DCV assumptions", None, None, ""),
-
-        # Heating
-        ("Heating", "Heating system type", "", "-", True, "Design Document", "MEP concept / schematic design", "e.g. heat pump, boiler, district heating", None, None, ""),
-        ("Heating", "Heating energy source", "", "-", True, "Design Document", "MEP concept / energy source mapping", "Must be consistent with dashboard energy source assignment", None, None, ""),
-        ("Heating", "Design heating load", "", "W/m²", False, "Simulation Model", "Loads simulation / sizing report", "Useful for plausibility and system sizing", 0, 250, ""),
-        ("Heating", "Heating generator efficiency / SCOP", "", "-", True, "Design Document", "Equipment specification / simulation input", "Boiler efficiency or seasonal COP for heat pump", 0.5, 8, ""),
-        ("Heating", "Heating supply temperature", "", "°C", False, "Design Document", "Heating concept", "Relevant for heat pump performance", 20, 90, ""),
-
-        # Cooling
-        ("Cooling", "Cooling system type", "", "-", True, "Design Document", "MEP concept / schematic design", "e.g. chiller, reversible heat pump, district cooling", None, None, ""),
-        ("Cooling", "Cooling energy source", "", "-", True, "Design Document", "MEP concept / energy source mapping", "Must be consistent with dashboard energy source assignment", None, None, ""),
-        ("Cooling", "Design cooling load", "", "W/m²", False, "Simulation Model", "Loads simulation / sizing report", "Useful for plausibility and system sizing", 0, 300, ""),
-        ("Cooling", "Cooling generator COP / SEER", "", "-", True, "Design Document", "Equipment specification / simulation input", "Seasonal or modelled cooling efficiency", 0.5, 12, ""),
-        ("Cooling", "Cooling supply temperature", "", "°C", False, "Design Document", "Cooling concept", "Relevant for chiller/heat-pump performance", 4, 20, ""),
-
-        # DHW
-        ("Domestic Hot Water", "DHW system type", "", "-", False, "Design Document", "MEP concept", "Generator/storage/circulation concept", None, None, ""),
-        ("Domestic Hot Water", "DHW demand", "", "L/person·day", False, "Assumption", "Project brief / occupancy concept", "Flag as assumption if not specified", 0, 100, ""),
-        ("Domestic Hot Water", "DHW useful energy", "", "kWh/m²·a", False, "Calculation", "Simulation output / DHW calculation", "Useful load before generator losses", 0, 80, ""),
-        ("Domestic Hot Water", "DHW generator efficiency / COP", "", "-", False, "Design Document", "Equipment specification / simulation input", "Boiler efficiency or heat pump COP", 0.5, 8, ""),
-        ("Domestic Hot Water", "DHW storage / circulation losses", "", "% or kWh/a", False, "Assumption", "DHW calculation / model input", "Document if included", 0, 80, ""),
-
-        # Internal loads
-        ("Internal Loads by Area Use Type", "Area use type", "", "-", True, "Design Document", "Area schedule / room data sheet", "Repeat/add rows for each use type if needed", None, None, ""),
-        ("Internal Loads by Area Use Type", "Area", "", "m²", True, "Design Document", "Area schedule / model geometry", "Area represented by this use type", 0, None, ""),
-        ("Internal Loads by Area Use Type", "Occupancy density", "", "m²/person", False, "Design Document", "Occupancy schedule / project brief", "Check against project use and ventilation basis", 1, 100, ""),
-        ("Internal Loads by Area Use Type", "Lighting power density", "", "W/m²", True, "Design Document", "Lighting concept / ASHRAE 90.1 baseline", "Compare with selected standard or project target", 0, 50, ""),
-        ("Internal Loads by Area Use Type", "Equipment power density", "", "W/m²", True, "Assumption", "Tenant/process load assumption", "Often unregulated/process load; review carefully", 0, 100, ""),
-        ("Internal Loads by Area Use Type", "Occupancy equivalent full-load hours", "", "h/a", False, "Assumption", "Schedules", "Annual equivalent occupied hours", 0, 8760, ""),
-
-        # Outdoor air by use
-        ("Outdoor Air by Area Use Type", "Area use type", "", "-", True, "Design Document", "Area schedule / room data sheet", "Repeat/add rows for each use type if needed", None, None, ""),
-        ("Outdoor Air by Area Use Type", "Outdoor air per person", "", "L/s·person", False, "Standard / Reference", "ASHRAE 62.1 / local code / project brief", "People component of outdoor air", 0, 30, ""),
-        ("Outdoor Air by Area Use Type", "Outdoor air per area", "", "L/s·m²", False, "Standard / Reference", "ASHRAE 62.1 / local code / project brief", "Area component of outdoor air", 0, 5, ""),
-        ("Outdoor Air by Area Use Type", "Total outdoor air", "", "L/s", False, "Calculation", "Ventilation calculation / simulation input", "Cross-check with AHU outdoor air", 0, None, ""),
-
-        # Schedules
-        ("Setpoints and Schedules", "Heating setpoint", "", "°C", True, "Design Document", "Room data sheet / operation concept", "Occupied heating setpoint", 16, 26, ""),
-        ("Setpoints and Schedules", "Cooling setpoint", "", "°C", True, "Design Document", "Room data sheet / operation concept", "Occupied cooling setpoint", 18, 32, ""),
-        ("Setpoints and Schedules", "Night setback / setup", "", "°C", False, "Design Document", "Controls concept", "Document unoccupied operation", 10, 35, ""),
-        ("Setpoints and Schedules", "Lighting equivalent full-load hours", "", "h/a", False, "Assumption", "Lighting schedule", "Review if based on assumption", 0, 8760, ""),
-        ("Setpoints and Schedules", "Equipment equivalent full-load hours", "", "h/a", False, "Assumption", "Equipment schedule", "Review if based on assumption", 0, 8760, ""),
-
-        # Exceptional calculations
-        ("Other / Exceptional Calculations", "Exceptional calculation description", "", "-", False, "Calculation", "ASHRAE 90.1 Appendix G / LEED documentation", "Document method, baseline and proposed values", None, None, ""),
-        ("Other / Exceptional Calculations", "Process loads included", "", "yes/no", False, "Design Document", "Process load narrative / energy model", "Document regulated/unregulated treatment", None, None, ""),
-    ]
-    return pd.DataFrame(rows, columns=MODEL_INPUT_QA_COLUMNS)
+    """Return the default global register. Scenario-specific objects are added by the user."""
+    return sanitize_model_inputs_qa_df(pd.DataFrame(default_model_inputs_global_rows()))
 
 
 def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Clean Model Inputs QA data and provide backwards compatibility with the v2.2.0 flat table."""
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return default_model_inputs_qa_df()
-    out = df.copy()
+        out = pd.DataFrame(default_model_inputs_global_rows())
+    else:
+        out = df.copy()
+
+    # Backwards compatibility from the first flat implementation.
+    cat_series = out["Category"].astype(str) if "Category" in out.columns else pd.Series([""] * len(out), index=out.index)
+    if "Scenario" not in out.columns:
+        out["Scenario"] = np.where(cat_series.eq("General Model Setup"), MODEL_INPUT_GLOBAL_SCENARIO, "Base")
+    if "Scope" not in out.columns:
+        out["Scope"] = np.where(out["Scenario"].astype(str).eq(MODEL_INPUT_GLOBAL_SCENARIO), "Global", "Scenario")
+    if "Item Type" not in out.columns:
+        out["Item Type"] = cat_series.replace("", "Other / Custom Inputs")
+    if "Item Name" not in out.columns:
+        out["Item Name"] = np.where(cat_series.eq("General Model Setup"), "Simulation Model", cat_series.replace("", "Custom"))
+
     for col in MODEL_INPUT_QA_COLUMNS:
         if col not in out.columns:
             if col == "Required":
                 out[col] = False
             elif col in ["Min Check", "Max Check"]:
                 out[col] = np.nan
+            elif col == "Scenario":
+                out[col] = MODEL_INPUT_GLOBAL_SCENARIO
+            elif col == "Scope":
+                out[col] = "Scenario"
             else:
                 out[col] = ""
+
     out = out[MODEL_INPUT_QA_COLUMNS].copy()
-    for col in ["Category", "Parameter", "Value", "Unit", "Source Type", "Source Document / Reference", "Reference / Target", "Notes"]:
+    for col in ["Scenario", "Scope", "Category", "Item Type", "Item Name", "Parameter", "Value", "Unit", "Source Type", "Source Document / Reference", "Reference / Target", "Notes"]:
         out[col] = out[col].fillna("").astype(str)
-    out["Category"] = out["Category"].replace("", "Other / Exceptional Calculations")
+
+    out["Scenario"] = out["Scenario"].replace("", MODEL_INPUT_GLOBAL_SCENARIO)
+    out["Scope"] = out["Scope"].replace("", "Scenario")
+    out.loc[out["Scenario"].astype(str).eq(MODEL_INPUT_GLOBAL_SCENARIO), "Scope"] = "Global"
+    out.loc[out["Scope"].astype(str).str.lower().eq("global"), "Scenario"] = MODEL_INPUT_GLOBAL_SCENARIO
+    out["Category"] = out["Category"].replace("", "Other / Custom Inputs")
+    out["Item Type"] = out["Item Type"].replace("", out["Category"])
+    out["Item Name"] = out["Item Name"].replace("", "General")
     out["Source Type"] = out["Source Type"].replace("", "Assumption")
-    # robust boolean parsing
+
     def _to_bool(x):
         if isinstance(x, bool):
             return x
         s = str(x).strip().lower()
         return s in {"1", "true", "yes", "y", "x", "required"}
+
     out["Required"] = out["Required"].apply(_to_bool)
     for col in ["Min Check", "Max Check"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    # Drop fully empty parameter rows.
+    try:
+        out = out.loc[out["Parameter"].astype(str).str.strip() != ""].reset_index(drop=True)
+    except Exception:
+        pass
+
+    # Ensure global setup rows exist once.
+    existing_global_params = set(out.loc[out["Scenario"].astype(str).eq(MODEL_INPUT_GLOBAL_SCENARIO), "Parameter"].astype(str))
+    add_rows = [r for r in default_model_inputs_global_rows() if str(r.get("Parameter")) not in existing_global_params]
+    if add_rows:
+        out = pd.concat([out, pd.DataFrame(add_rows)], ignore_index=True)
+        out = out[MODEL_INPUT_QA_COLUMNS].copy()
+        for col in ["Min Check", "Max Check"]:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
     return out.reset_index(drop=True)
 
 
@@ -3190,6 +3379,14 @@ def _extract_first_number(value) -> Optional[float]:
         return float(m.group(0))
     except Exception:
         return None
+
+
+def model_inputs_df_for_scenario(df: Optional[pd.DataFrame], scenario_name: Optional[str]) -> pd.DataFrame:
+    """Return global rows plus rows belonging to the selected scenario."""
+    out = sanitize_model_inputs_qa_df(df)
+    sc = str(scenario_name or "Base")
+    mask = out["Scenario"].astype(str).eq(MODEL_INPUT_GLOBAL_SCENARIO) | out["Scenario"].astype(str).eq(sc)
+    return out.loc[mask].reset_index(drop=True)
 
 
 def evaluate_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -3269,6 +3466,61 @@ def _style_model_inputs_qa(row):
         color = ""
     return [color for _ in row]
 
+
+def _safe_model_input_key(*parts) -> str:
+    raw = "_".join([str(x) for x in parts])
+    safe = re.sub(r"[^0-9A-Za-z_]+", "_", raw).strip("_")
+    return safe[:120]
+
+
+def add_model_input_rows(rows: list) -> None:
+    df = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
+    if rows:
+        df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
+    st.session_state["model_inputs_qa_df"] = sanitize_model_inputs_qa_df(df)
+
+
+def add_model_room_type(item_name: str, scenario_name: str) -> None:
+    nm = str(item_name or "Room Type").strip() or "Room Type"
+    add_model_input_rows(room_type_template(nm, str(scenario_name or "Base")))
+
+
+def add_model_envelope_component(component_type: str, item_name: str, scenario_name: str) -> None:
+    nm = str(item_name or component_type or "Component").strip() or "Component"
+    add_model_input_rows(envelope_component_template(str(component_type or "Other Envelope Component"), nm, str(scenario_name or "Base")))
+
+
+def add_model_system(system_type: str, item_name: str, scenario_name: str) -> None:
+    nm = str(item_name or system_type or "System").strip() or "System"
+    add_model_input_rows(system_template(str(system_type or "Other System"), nm, str(scenario_name or "Base")))
+
+
+def add_model_custom_parameter(scenario_name: str, scope: str, category: str, item_type: str, item_name: str, parameter_name: str) -> None:
+    sc = MODEL_INPUT_GLOBAL_SCENARIO if str(scope).lower() == "global" else str(scenario_name or "Base")
+    add_model_input_rows([_mi_row(sc, "Global" if sc == MODEL_INPUT_GLOBAL_SCENARIO else "Scenario", category, item_type, item_name, str(parameter_name or "Custom parameter"), unit="-", required=False, source_type="Assumption")])
+
+
+def duplicate_model_inputs_for_scenario(source_scenario: str, target_scenario: str) -> None:
+    df = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
+    src = str(source_scenario)
+    tgt = str(target_scenario)
+    subset = df.loc[df["Scenario"].astype(str).eq(src)].copy()
+    if not subset.empty:
+        subset["Scenario"] = tgt
+        df = pd.concat([df, subset], ignore_index=True)
+        st.session_state["model_inputs_qa_df"] = sanitize_model_inputs_qa_df(df)
+
+
+def rename_model_inputs_scenario(old_name: str, new_name: str) -> None:
+    df = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
+    df.loc[df["Scenario"].astype(str).eq(str(old_name)), "Scenario"] = str(new_name)
+    st.session_state["model_inputs_qa_df"] = sanitize_model_inputs_qa_df(df)
+
+
+def delete_model_inputs_scenario(scenario_name: str) -> None:
+    df = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
+    df = df.loc[~df["Scenario"].astype(str).eq(str(scenario_name))].reset_index(drop=True)
+    st.session_state["model_inputs_qa_df"] = sanitize_model_inputs_qa_df(df)
 
 # =========================
 # Benchmark Functions
@@ -4208,6 +4460,10 @@ with tab1:
                 except Exception:
                     pass
                 try:
+                    duplicate_model_inputs_for_scenario(current_active, new_name)
+                except Exception:
+                    pass
+                try:
                     cmap_sc = st.session_state.get("color_map_scenarios", {})
                     cmap_sc[new_name] = cmap_sc.get(current_active, SCENARIO_COLOR_PALETTE[(len(scenarios) - 1) % len(SCENARIO_COLOR_PALETTE)])
                     st.session_state["color_map_scenarios"] = cmap_sc
@@ -4239,6 +4495,10 @@ with tab1:
                     except Exception:
                         pass
                     try:
+                        rename_model_inputs_scenario(current_active, rename_to_clean)
+                    except Exception:
+                        pass
+                    try:
                         cmap_sc = st.session_state.get("color_map_scenarios", {})
                         if current_active in cmap_sc:
                             cmap_sc[rename_to_clean] = cmap_sc.pop(current_active)
@@ -4259,6 +4519,10 @@ with tab1:
 
                     try:
                         delete_scenario_energy_balance_override(current_active)
+                    except Exception:
+                        pass
+                    try:
+                        delete_model_inputs_scenario(current_active)
                     except Exception:
                         pass
 
@@ -4979,25 +5243,26 @@ with tab_model_qa:
         st.metric("Active Scenario", active_selected)
 
         st.caption(
-            "This register documents the key assumptions and source references used in the energy simulation model. "
-            "Rows tagged as **Assumption** are highlighted in yellow in the QA table so they can be reviewed before final reporting."
+            "This tab documents the inputs and assumptions used in the energy simulation. "
+            "General model setup inputs are global. Room types, envelope components and systems are scenario-specific."
         )
         st.info(
-            "The built-in Min/Max checks are project sanity ranges, not automatic code-compliance limits. "
-            "For formal LEED/ASHRAE documentation, overwrite the reference/target fields with values from the applicable standard, "
-            "climate zone, drawings, specifications, model report, or approved calculation."
+            "Inputs tagged as **Assumption** are highlighted in the QA review table and should be replaced by documented project references where possible. "
+            "The sanity ranges are informative quality-control checks, not automatic code-compliance limits."
         )
 
         if "model_inputs_qa_df" not in st.session_state or not isinstance(st.session_state.get("model_inputs_qa_df"), pd.DataFrame):
             st.session_state["model_inputs_qa_df"] = default_model_inputs_qa_df()
+        st.session_state["model_inputs_qa_df"] = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
 
         if st.session_state.get("_model_inputs_qa_flash") == "updated":
-            st.success("Model Inputs QA register updated.")
+            st.success("Model Inputs QA updated.")
             del st.session_state["_model_inputs_qa_flash"]
 
-        model_inputs_df = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
-        qa_eval = evaluate_model_inputs_qa_df(model_inputs_df)
-        summary = model_inputs_qa_summary(model_inputs_df)
+        all_model_inputs_df = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
+        current_model_inputs_df = model_inputs_df_for_scenario(all_model_inputs_df, active_selected)
+        qa_eval = evaluate_model_inputs_qa_df(current_model_inputs_df)
+        summary = model_inputs_qa_summary(current_model_inputs_df)
 
         m1, m2, m3, m4, m5 = st.columns(5)
         with m1:
@@ -5012,103 +5277,237 @@ with tab_model_qa:
             st.metric("Sanity-check review", f"{summary['review']}")
 
         if summary["missing"] > 0:
-            st.warning("Some required simulation inputs are still missing. Complete them or document why they are not applicable.")
+            st.warning("Some required inputs for the active scenario are still missing.")
         if summary["assumptions"] > 0:
-            st.warning("Assumption-tagged values should be reviewed and replaced by documented project references where possible.")
+            st.warning("Assumption-tagged inputs should be reviewed before issuing final simulation results.")
 
-        st.write("### Simulation input register")
+        st.write("### Add model input objects")
         st.caption(
-            "Use one row per parameter. For repeated items such as internal loads per space type or outdoor-air rates per use type, "
-            "add additional rows in the corresponding expander. Click **Update Model Inputs QA** to commit changes and include them in Save Project."
+            "Use the controls below to add room types, envelope constructions/components, HVAC/DHW systems and custom parameters. "
+            "All non-general inputs are stored for the active scenario only."
         )
 
-        edited_parts = []
-        _editor_key_token = hashlib.md5(str(st.session_state.get(_RAW_TOKEN_KEY, "model_inputs")).encode("utf-8")).hexdigest()[:8]
+        add_col1, add_col2, add_col3 = st.columns(3)
+        with add_col1:
+            with st.expander("Add room type", expanded=True):
+                new_room_type_name = st.text_input("Room type name", value="Office", key="mi_new_room_type_name")
+                if st.button("Add Room Type", key="mi_add_room_type", use_container_width=True):
+                    add_model_room_type(new_room_type_name, active_selected)
+                    st.session_state["_model_inputs_qa_flash"] = "updated"
+                    st.rerun()
+        with add_col2:
+            with st.expander("Add envelope component", expanded=True):
+                new_env_type = st.selectbox("Construction/component type", MODEL_INPUT_ENVELOPE_COMPONENT_TYPES, key="mi_new_envelope_type")
+                new_env_name = st.text_input("Component name", value="New component", key="mi_new_envelope_name")
+                if st.button("Add Envelope Component", key="mi_add_envelope", use_container_width=True):
+                    add_model_envelope_component(new_env_type, new_env_name, active_selected)
+                    st.session_state["_model_inputs_qa_flash"] = "updated"
+                    st.rerun()
+        with add_col3:
+            with st.expander("Add system", expanded=True):
+                new_system_type = st.selectbox("System type", MODEL_INPUT_SYSTEM_TYPES, key="mi_new_system_type")
+                new_system_name = st.text_input("System name", value="New system", key="mi_new_system_name")
+                if st.button("Add System", key="mi_add_system", use_container_width=True):
+                    add_model_system(new_system_type, new_system_name, active_selected)
+                    st.session_state["_model_inputs_qa_flash"] = "updated"
+                    st.rerun()
 
-        with st.form("model_inputs_qa_form", clear_on_submit=False):
+        with st.expander("Add custom parameter", expanded=False):
+            df_for_custom = model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_selected)
+            item_options = []
+            for _, r in df_for_custom[["Scenario", "Scope", "Category", "Item Type", "Item Name"]].drop_duplicates().iterrows():
+                sc_label = "Global" if str(r["Scope"]) == "Global" else f"Scenario: {active_selected}"
+                label = f"{sc_label} | {r['Category']} | {r['Item Type']} | {r['Item Name']}"
+                item_options.append(label)
+            item_options = sorted(set(item_options))
+            custom_target = st.selectbox("Target item", item_options if item_options else ["Global | General Model Setup | General | Simulation Model"], key="mi_custom_target")
+            custom_param = st.text_input("Custom parameter name", value="Custom parameter", key="mi_custom_parameter_name")
+            if st.button("Add Custom Parameter", key="mi_add_custom_parameter", use_container_width=False):
+                try:
+                    parts = [x.strip() for x in str(custom_target).split("|")]
+                    scope_label = parts[0]
+                    category = parts[1]
+                    item_type = parts[2]
+                    item_name = parts[3]
+                    scope = "Global" if scope_label == "Global" else "Scenario"
+                except Exception:
+                    scope, category, item_type, item_name = "Global", "General Model Setup", "General", "Simulation Model"
+                add_model_custom_parameter(active_selected, scope, category, item_type, item_name, custom_param)
+                st.session_state["_model_inputs_qa_flash"] = "updated"
+                st.rerun()
+
+        st.markdown("---")
+        st.write("### Structured input editor")
+        st.caption(
+            "Edits are collected in a form. The app updates calculations/export data only after **Update Model Inputs QA** is clicked. "
+            "Mark a parameter or complete item for removal and click update to delete it."
+        )
+
+        # Work with the full dataframe so non-active scenario rows are preserved.
+        mi_full = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df")).reset_index().rename(columns={"index": "_orig_index"})
+        mask_active = mi_full["Scenario"].astype(str).eq(MODEL_INPUT_GLOBAL_SCENARIO) | mi_full["Scenario"].astype(str).eq(str(active_selected))
+        mi_edit = mi_full.loc[mask_active].copy()
+        mi_keep_other = mi_full.loc[~mask_active].drop(columns=["_orig_index"]).copy()
+
+        _editor_key_token = hashlib.md5(str(st.session_state.get(_RAW_TOKEN_KEY, "model_inputs_structured")).encode("utf-8")).hexdigest()[:8]
+        edited_rows = []
+        deleted_orig_indices = set()
+        deleted_item_keys = set()
+
+        def _value_widget(row, key_prefix):
+            param = str(row.get("Parameter", ""))
+            unit = str(row.get("Unit", ""))
+            value = str(row.get("Value", ""))
+            p_low = param.lower()
+            u_low = unit.lower()
+            if "energy source" in p_low:
+                opts = [""] + ENERGY_SOURCE_ORDER + ["Other"]
+                val = value if value in opts else ""
+                return st.selectbox("Value", opts, index=opts.index(val), key=f"{key_prefix}_value")
+            if u_low.strip() == "yes/no" or p_low.endswith("permitted") or p_low in ["demand controlled ventilation", "natural ventilation permitted"]:
+                opts = ["", "Yes", "No", "Not applicable"]
+                val = value if value in opts else ""
+                return st.selectbox("Value", opts, index=opts.index(val), key=f"{key_prefix}_value")
+            return st.text_input("Value", value=value, key=f"{key_prefix}_value")
+
+        with st.form("model_inputs_qa_structured_form", clear_on_submit=False):
             for cat in MODEL_INPUT_CATEGORIES:
-                with st.expander(cat, expanded=(cat in ["General Model Setup", "Thermal Envelope"])):
-                    sub = model_inputs_df.loc[model_inputs_df["Category"].astype(str) == cat].copy()
-                    if sub.empty:
-                        sub = pd.DataFrame([{c: "" for c in MODEL_INPUT_QA_COLUMNS}])
-                        sub["Category"] = cat
-                        sub["Required"] = False
-                    editor_kwargs = {
-                        "num_rows": "dynamic",
-                        "use_container_width": True,
-                        "hide_index": True,
-                        "key": f"model_inputs_editor_{_editor_key_token}_{re.sub(r'[^0-9A-Za-z]+', '_', cat)}",
-                    }
-                    if hasattr(st, "column_config"):
-                        editor_kwargs["column_config"] = {
-                            "Category": st.column_config.SelectboxColumn("Category", options=MODEL_INPUT_CATEGORIES, required=True),
-                            "Parameter": st.column_config.TextColumn("Parameter", required=True),
-                            "Value": st.column_config.TextColumn("Value"),
-                            "Unit": st.column_config.TextColumn("Unit"),
-                            "Required": st.column_config.CheckboxColumn("Required"),
-                            "Source Type": st.column_config.SelectboxColumn("Source Type", options=MODEL_INPUT_SOURCE_TYPES, required=True),
-                            "Source Document / Reference": st.column_config.TextColumn("Source Document / Reference"),
-                            "Reference / Target": st.column_config.TextColumn("Reference / Target"),
-                            "Min Check": st.column_config.NumberColumn("Min Check", step=0.1, format="%.3f"),
-                            "Max Check": st.column_config.NumberColumn("Max Check", step=0.1, format="%.3f"),
-                            "Notes": st.column_config.TextColumn("Notes"),
-                        }
-                    edited_parts.append(st.data_editor(sub[MODEL_INPUT_QA_COLUMNS], **editor_kwargs))
+                cat_df = mi_edit.loc[mi_edit["Category"].astype(str) == cat].copy()
+                if cat_df.empty:
+                    continue
+                with st.expander(cat, expanded=(cat in ["General Model Setup", "Room Types", "Thermal Envelope"])):
+                    item_df_keys = cat_df[["Scenario", "Scope", "Item Type", "Item Name"]].drop_duplicates().reset_index(drop=True)
+                    for _, item in item_df_keys.iterrows():
+                        scenario_i = str(item.get("Scenario", MODEL_INPUT_GLOBAL_SCENARIO))
+                        scope_i = str(item.get("Scope", "Scenario"))
+                        item_type_i = str(item.get("Item Type", cat))
+                        item_name_i = str(item.get("Item Name", "General"))
+                        item_key_tuple = (scenario_i, cat, item_type_i, item_name_i)
+                        item_title = f"{item_type_i}: {item_name_i}" if cat != "General Model Setup" else str(item_name_i)
+                        badge = "GLOBAL" if scope_i == "Global" or scenario_i == MODEL_INPUT_GLOBAL_SCENARIO else f"Scenario-specific: {active_selected}"
+                        st.markdown(f"#### {item_title}  ")
+                        st.caption(badge)
+                        item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, cat, item_type_i, item_name_i)
+                        delete_item = st.checkbox("Remove this complete object", key=item_delete_key)
+                        if delete_item:
+                            deleted_item_keys.add(item_key_tuple)
+
+                        rows_item = cat_df.loc[
+                            cat_df["Scenario"].astype(str).eq(scenario_i)
+                            & cat_df["Scope"].astype(str).eq(scope_i)
+                            & cat_df["Item Type"].astype(str).eq(item_type_i)
+                            & cat_df["Item Name"].astype(str).eq(item_name_i)
+                        ].copy()
+                        for _, row in rows_item.iterrows():
+                            orig_idx = int(row.get("_orig_index", -1))
+                            key_prefix = _safe_model_input_key("mi", _editor_key_token, orig_idx, scenario_i, cat, item_type_i, item_name_i, row.get("Parameter", ""))
+                            if str(row.get("Source Type", "")) == "Assumption":
+                                st.markdown("<div style='background-color:#fff3cd;padding:4px 8px;border-radius:4px;margin-top:6px;'><b>Assumption-tagged input</b></div>", unsafe_allow_html=True)
+                            c1, c2, c3, c4, c5 = st.columns([2.2, 2.0, 0.9, 0.8, 0.8])
+                            with c1:
+                                parameter = st.text_input("Parameter", value=str(row.get("Parameter", "")), key=f"{key_prefix}_param")
+                            with c2:
+                                value = _value_widget(row, key_prefix)
+                            with c3:
+                                unit = st.text_input("Unit", value=str(row.get("Unit", "")), key=f"{key_prefix}_unit")
+                            with c4:
+                                required = st.checkbox("Required", value=bool(row.get("Required", False)), key=f"{key_prefix}_required")
+                            with c5:
+                                remove_param = st.checkbox("Remove", value=False, key=f"{key_prefix}_remove")
+
+                            c6, c7, c8, c9, c10, c11 = st.columns([1.3, 2.1, 2.0, 0.9, 0.9, 2.2])
+                            with c6:
+                                current_source = str(row.get("Source Type", "Assumption"))
+                                if current_source not in MODEL_INPUT_SOURCE_TYPES:
+                                    current_source = "Other"
+                                source_type = st.selectbox("Source Type", MODEL_INPUT_SOURCE_TYPES, index=MODEL_INPUT_SOURCE_TYPES.index(current_source), key=f"{key_prefix}_source")
+                            with c7:
+                                source_ref = st.text_input("Source document / reference", value=str(row.get("Source Document / Reference", "")), key=f"{key_prefix}_source_ref")
+                            with c8:
+                                reference = st.text_input("Reference / target", value=str(row.get("Reference / Target", "")), key=f"{key_prefix}_reference")
+                            with c9:
+                                min_default = "" if pd.isna(row.get("Min Check", np.nan)) else str(row.get("Min Check"))
+                                min_check_txt = st.text_input("Min", value=min_default, key=f"{key_prefix}_min")
+                            with c10:
+                                max_default = "" if pd.isna(row.get("Max Check", np.nan)) else str(row.get("Max Check"))
+                                max_check_txt = st.text_input("Max", value=max_default, key=f"{key_prefix}_max")
+                            with c11:
+                                notes = st.text_input("Notes", value=str(row.get("Notes", "")), key=f"{key_prefix}_notes")
+
+                            try:
+                                min_check = float(str(min_check_txt).replace(",", ".")) if str(min_check_txt).strip() != "" else np.nan
+                            except Exception:
+                                min_check = np.nan
+                            try:
+                                max_check = float(str(max_check_txt).replace(",", ".")) if str(max_check_txt).strip() != "" else np.nan
+                            except Exception:
+                                max_check = np.nan
+
+                            if remove_param:
+                                deleted_orig_indices.add(orig_idx)
+                            else:
+                                edited_rows.append(_mi_row(
+                                    scenario_i, scope_i, cat, item_type_i, item_name_i,
+                                    parameter, value=value, unit=unit, required=required,
+                                    source_type=source_type, source_ref=source_ref,
+                                    reference=reference, min_check=min_check, max_check=max_check,
+                                    notes=notes,
+                                ))
+                            st.markdown("---")
 
             c_upd, c_reset = st.columns([1, 1])
             with c_upd:
                 update_model_inputs = st.form_submit_button("Update Model Inputs QA", use_container_width=True)
             with c_reset:
-                reset_model_inputs = st.form_submit_button("Reset to default register", use_container_width=True)
+                reset_global_inputs = st.form_submit_button("Reset global setup inputs", use_container_width=True)
 
-        if reset_model_inputs:
-            st.session_state["model_inputs_qa_df"] = default_model_inputs_qa_df()
+        if reset_global_inputs:
+            df_current = sanitize_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
+            df_current = df_current.loc[~df_current["Scenario"].astype(str).eq(MODEL_INPUT_GLOBAL_SCENARIO)].copy()
+            df_current = pd.concat([pd.DataFrame(default_model_inputs_global_rows()), df_current], ignore_index=True)
+            st.session_state["model_inputs_qa_df"] = sanitize_model_inputs_qa_df(df_current)
             st.session_state["_model_inputs_qa_flash"] = "updated"
             st.rerun()
 
         if update_model_inputs:
-            try:
-                combined = pd.concat([x for x in edited_parts if isinstance(x, pd.DataFrame)], ignore_index=True)
-            except Exception:
-                combined = model_inputs_df.copy()
+            # Remove full objects selected for deletion.
+            rows_filtered = []
+            for rec in edited_rows:
+                item_key = (str(rec.get("Scenario")), str(rec.get("Category")), str(rec.get("Item Type")), str(rec.get("Item Name")))
+                if item_key not in deleted_item_keys:
+                    rows_filtered.append(rec)
+            combined = pd.concat([mi_keep_other, pd.DataFrame(rows_filtered)], ignore_index=True)
             combined = sanitize_model_inputs_qa_df(combined)
-            # Drop completely empty dynamic rows, but keep category rows with a parameter.
-            try:
-                mask_keep = combined["Parameter"].astype(str).str.strip() != ""
-                combined = combined.loc[mask_keep].reset_index(drop=True)
-            except Exception:
-                pass
-            if combined.empty:
-                combined = default_model_inputs_qa_df()
             st.session_state["model_inputs_qa_df"] = combined
             st.session_state["_model_inputs_qa_flash"] = "updated"
             st.rerun()
 
         st.markdown("---")
         st.write("### QA review table")
-        qa_eval = evaluate_model_inputs_qa_df(st.session_state.get("model_inputs_qa_df"))
+        qa_eval = evaluate_model_inputs_qa_df(model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_selected))
         qa_cols = [
-            "Category", "Parameter", "Value", "Unit", "Required", "Source Type",
+            "Scope", "Category", "Item Type", "Item Name", "Parameter", "Value", "Unit", "Required", "Source Type",
             "Source Document / Reference", "Reference / Target", "QA Status", "QA Message", "Notes"
         ]
         try:
             st.dataframe(
                 qa_eval[qa_cols].style.apply(_style_model_inputs_qa, axis=1),
                 use_container_width=True,
-                height=520,
+                height=560,
             )
         except Exception:
-            st.dataframe(qa_eval[qa_cols], use_container_width=True, height=520)
+            st.dataframe(qa_eval[qa_cols], use_container_width=True, height=560)
 
         with st.expander("QA interpretation", expanded=False):
             st.markdown(
                 """
+**Global** rows apply to all scenarios. **Scenario** rows apply only to the active scenario shown above.  
 **Missing** means a required input has no value.  
 **Assumption** means the value is explicitly tagged as an assumption and should be reviewed.  
 **Review** means a numeric value is outside the configured sanity range.  
 **OK** means the field is filled and has no current sanity-check warning.
 
-The table is intended as a traceability and model-quality check. It does not replace formal ASHRAE 90.1, LEED, local-code, or certification documentation.
+The QA is intended as traceability and model-quality control. It does not replace formal ASHRAE 90.1, LEED, local-code, or certification documentation.
                 """
             )
 
