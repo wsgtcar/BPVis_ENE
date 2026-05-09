@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.2",
+    page_title="WSGT_BPVis_ENE 2.2.3",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.2")
+st.sidebar.write("Version 2.2.3")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.2"
+REPORT_VERSION = "2.2.3"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -5388,12 +5388,6 @@ with tab_model_qa:
                         item_key_tuple = (scenario_i, cat, item_type_i, item_name_i)
                         item_title = f"{item_type_i}: {item_name_i}" if cat != "General Model Setup" else str(item_name_i)
                         badge = "GLOBAL" if scope_i == "Global" or scenario_i == MODEL_INPUT_GLOBAL_SCENARIO else f"Scenario-specific: {active_selected}"
-                        st.markdown(f"#### {item_title}  ")
-                        st.caption(badge)
-                        item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, cat, item_type_i, item_name_i)
-                        delete_item = st.checkbox("Remove this complete object", key=item_delete_key)
-                        if delete_item:
-                            deleted_item_keys.add(item_key_tuple)
 
                         rows_item = cat_df.loc[
                             cat_df["Scenario"].astype(str).eq(scenario_i)
@@ -5401,62 +5395,92 @@ with tab_model_qa:
                             & cat_df["Item Type"].astype(str).eq(item_type_i)
                             & cat_df["Item Name"].astype(str).eq(item_name_i)
                         ].copy()
-                        for _, row in rows_item.iterrows():
-                            orig_idx = int(row.get("_orig_index", -1))
-                            key_prefix = _safe_model_input_key("mi", _editor_key_token, orig_idx, scenario_i, cat, item_type_i, item_name_i, row.get("Parameter", ""))
-                            if str(row.get("Source Type", "")) == "Assumption":
-                                st.markdown("<div style='background-color:#fff3cd;padding:4px 8px;border-radius:4px;margin-top:6px;'><b>Assumption-tagged input</b></div>", unsafe_allow_html=True)
-                            c1, c2, c3, c4, c5 = st.columns([2.2, 2.0, 0.9, 0.8, 0.8])
-                            with c1:
-                                parameter = st.text_input("Parameter", value=str(row.get("Parameter", "")), key=f"{key_prefix}_param")
-                            with c2:
-                                value = _value_widget(row, key_prefix)
-                            with c3:
-                                unit = st.text_input("Unit", value=str(row.get("Unit", "")), key=f"{key_prefix}_unit")
-                            with c4:
-                                required = st.checkbox("Required", value=bool(row.get("Required", False)), key=f"{key_prefix}_required")
-                            with c5:
-                                remove_param = st.checkbox("Remove", value=False, key=f"{key_prefix}_remove")
 
-                            c6, c7, c8, c9, c10, c11 = st.columns([1.3, 2.1, 2.0, 0.9, 0.9, 2.2])
-                            with c6:
-                                current_source = str(row.get("Source Type", "Assumption"))
-                                if current_source not in MODEL_INPUT_SOURCE_TYPES:
-                                    current_source = "Other"
-                                source_type = st.selectbox("Source Type", MODEL_INPUT_SOURCE_TYPES, index=MODEL_INPUT_SOURCE_TYPES.index(current_source), key=f"{key_prefix}_source")
-                            with c7:
-                                source_ref = st.text_input("Source document / reference", value=str(row.get("Source Document / Reference", "")), key=f"{key_prefix}_source_ref")
-                            with c8:
-                                reference = st.text_input("Reference / target", value=str(row.get("Reference / Target", "")), key=f"{key_prefix}_reference")
-                            with c9:
-                                min_default = "" if pd.isna(row.get("Min Check", np.nan)) else str(row.get("Min Check"))
-                                min_check_txt = st.text_input("Min", value=min_default, key=f"{key_prefix}_min")
-                            with c10:
-                                max_default = "" if pd.isna(row.get("Max Check", np.nan)) else str(row.get("Max Check"))
-                                max_check_txt = st.text_input("Max", value=max_default, key=f"{key_prefix}_max")
-                            with c11:
-                                notes = st.text_input("Notes", value=str(row.get("Notes", "")), key=f"{key_prefix}_notes")
+                        _item_has_assumption = False
+                        try:
+                            _item_has_assumption = rows_item["Source Type"].astype(str).eq("Assumption").any()
+                        except Exception:
+                            _item_has_assumption = False
+                        _item_missing_required = False
+                        try:
+                            _tmp_eval = evaluate_model_inputs_qa_df(rows_item.drop(columns=["_orig_index"], errors="ignore"))
+                            _item_missing_required = _tmp_eval["QA Status"].astype(str).isin(["Missing", "Review"]).any()
+                        except Exception:
+                            _item_missing_required = False
 
-                            try:
-                                min_check = float(str(min_check_txt).replace(",", ".")) if str(min_check_txt).strip() != "" else np.nan
-                            except Exception:
-                                min_check = np.nan
-                            try:
-                                max_check = float(str(max_check_txt).replace(",", ".")) if str(max_check_txt).strip() != "" else np.nan
-                            except Exception:
-                                max_check = np.nan
+                        _status_suffix = []
+                        if _item_missing_required:
+                            _status_suffix.append("needs review")
+                        if _item_has_assumption:
+                            _status_suffix.append("assumption")
+                        _status_txt = f" — {', '.join(_status_suffix)}" if _status_suffix else ""
+                        _object_label = f"{item_title} | {badge}{_status_txt}"
+                        _object_expanded = bool(cat == "General Model Setup")
 
-                            if remove_param:
-                                deleted_orig_indices.add(orig_idx)
-                            else:
-                                edited_rows.append(_mi_row(
-                                    scenario_i, scope_i, cat, item_type_i, item_name_i,
-                                    parameter, value=value, unit=unit, required=required,
-                                    source_type=source_type, source_ref=source_ref,
-                                    reference=reference, min_check=min_check, max_check=max_check,
-                                    notes=notes,
-                                ))
-                            st.markdown("---")
+                        # Object-level expander inside the category expander keeps long input registers navigable.
+                        # Streamlit still executes/render widgets inside collapsed expanders, so unchanged rows are preserved on update.
+                        with st.expander(_object_label, expanded=_object_expanded):
+                            item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, cat, item_type_i, item_name_i)
+                            delete_item = st.checkbox("Remove this complete object", key=item_delete_key)
+                            if delete_item:
+                                deleted_item_keys.add(item_key_tuple)
+
+                            for _, row in rows_item.iterrows():
+                                orig_idx = int(row.get("_orig_index", -1))
+                                key_prefix = _safe_model_input_key("mi", _editor_key_token, orig_idx, scenario_i, cat, item_type_i, item_name_i, row.get("Parameter", ""))
+                                if str(row.get("Source Type", "")) == "Assumption":
+                                    st.markdown("<div style='background-color:#fff3cd;padding:4px 8px;border-radius:4px;margin-top:6px;'><b>Assumption-tagged input</b></div>", unsafe_allow_html=True)
+                                c1, c2, c3, c4, c5 = st.columns([2.2, 2.0, 0.9, 0.8, 0.8])
+                                with c1:
+                                    parameter = st.text_input("Parameter", value=str(row.get("Parameter", "")), key=f"{key_prefix}_param")
+                                with c2:
+                                    value = _value_widget(row, key_prefix)
+                                with c3:
+                                    unit = st.text_input("Unit", value=str(row.get("Unit", "")), key=f"{key_prefix}_unit")
+                                with c4:
+                                    required = st.checkbox("Required", value=bool(row.get("Required", False)), key=f"{key_prefix}_required")
+                                with c5:
+                                    remove_param = st.checkbox("Remove", value=False, key=f"{key_prefix}_remove")
+
+                                c6, c7, c8, c9, c10, c11 = st.columns([1.3, 2.1, 2.0, 0.9, 0.9, 2.2])
+                                with c6:
+                                    current_source = str(row.get("Source Type", "Assumption"))
+                                    if current_source not in MODEL_INPUT_SOURCE_TYPES:
+                                        current_source = "Other"
+                                    source_type = st.selectbox("Source Type", MODEL_INPUT_SOURCE_TYPES, index=MODEL_INPUT_SOURCE_TYPES.index(current_source), key=f"{key_prefix}_source")
+                                with c7:
+                                    source_ref = st.text_input("Source document / reference", value=str(row.get("Source Document / Reference", "")), key=f"{key_prefix}_source_ref")
+                                with c8:
+                                    reference = st.text_input("Reference / target", value=str(row.get("Reference / Target", "")), key=f"{key_prefix}_reference")
+                                with c9:
+                                    min_default = "" if pd.isna(row.get("Min Check", np.nan)) else str(row.get("Min Check"))
+                                    min_check_txt = st.text_input("Min", value=min_default, key=f"{key_prefix}_min")
+                                with c10:
+                                    max_default = "" if pd.isna(row.get("Max Check", np.nan)) else str(row.get("Max Check"))
+                                    max_check_txt = st.text_input("Max", value=max_default, key=f"{key_prefix}_max")
+                                with c11:
+                                    notes = st.text_input("Notes", value=str(row.get("Notes", "")), key=f"{key_prefix}_notes")
+
+                                try:
+                                    min_check = float(str(min_check_txt).replace(",", ".")) if str(min_check_txt).strip() != "" else np.nan
+                                except Exception:
+                                    min_check = np.nan
+                                try:
+                                    max_check = float(str(max_check_txt).replace(",", ".")) if str(max_check_txt).strip() != "" else np.nan
+                                except Exception:
+                                    max_check = np.nan
+
+                                if remove_param:
+                                    deleted_orig_indices.add(orig_idx)
+                                else:
+                                    edited_rows.append(_mi_row(
+                                        scenario_i, scope_i, cat, item_type_i, item_name_i,
+                                        parameter, value=value, unit=unit, required=required,
+                                        source_type=source_type, source_ref=source_ref,
+                                        reference=reference, min_check=min_check, max_check=max_check,
+                                        notes=notes,
+                                    ))
+                                st.markdown("---")
 
             c_upd, c_reset = st.columns([1, 1])
             with c_upd:
