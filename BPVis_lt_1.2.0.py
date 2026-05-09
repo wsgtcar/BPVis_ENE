@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.3",
+    page_title="WSGT_BPVis_ENE 2.2.4",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.3")
+st.sidebar.write("Version 2.2.4")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.3"
+REPORT_VERSION = "2.2.4"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3153,6 +3153,8 @@ def room_type_template(item_name: str, scenario: str) -> list:
         _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Equipment power density", unit="W/m²", required=True, source_type="Design Document", source_ref="Equipment schedule / design brief", min_check=0, max_check=150),
         _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "People sensible gain", unit="W/person", required=False, source_type="Assumption", reference="Document activity/metabolic assumption", min_check=0, max_check=200),
         _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "People latent gain", unit="W/person", required=False, source_type="Assumption", reference="Document activity/metabolic assumption", min_check=0, max_check=200),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Heating delivery", value="", unit="-", required=False, source_type="Design Document", source_ref="HVAC concept / room data sheet", reference="Radiant Ceiling / Fan Coil / Floor Heating / Radiator / Air System / custom"),
+        _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Cooling delivery", value="", unit="-", required=False, source_type="Design Document", source_ref="HVAC concept / room data sheet", reference="Radiant Ceiling / Fan Coil / Floor Cooling / Fan Coil / Air System / custom"),
         _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Heating setpoint", unit="°C", required=True, source_type="Design Document", source_ref="Owner requirements / room data sheet", min_check=10, max_check=26),
         _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Cooling setpoint", unit="°C", required=True, source_type="Design Document", source_ref="Owner requirements / room data sheet", min_check=18, max_check=35),
         _mi_row(scenario, "Scenario", "Room Types", "Room Type", item_name, "Night setback / setup", unit="°C or rule", required=False, source_type="Assumption", reference="Document unoccupied temperature control logic"),
@@ -3362,6 +3364,62 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         out = out[MODEL_INPUT_QA_COLUMNS].copy()
         for col in ["Min Check", "Max Check"]:
             out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    # Backwards compatibility for v2.2.4: ensure existing Room Type objects also receive
+    # the standard heating/cooling delivery parameters introduced after earlier projects
+    # may already have created room types.
+    try:
+        room_items = out.loc[
+            out["Category"].astype(str).eq("Room Types")
+            & out["Item Type"].astype(str).eq("Room Type"),
+            ["Scenario", "Scope", "Item Name"]
+        ].drop_duplicates()
+        room_delivery_defaults = {
+            "Heating delivery": {
+                "source_ref": "HVAC concept / room data sheet",
+                "reference": "Radiant Ceiling / Fan Coil / Floor Heating / Radiator / Air System / custom",
+            },
+            "Cooling delivery": {
+                "source_ref": "HVAC concept / room data sheet",
+                "reference": "Radiant Ceiling / Fan Coil / Floor Cooling / Fan Coil / Air System / custom",
+            },
+        }
+        delivery_rows = []
+        for _, item in room_items.iterrows():
+            sc = str(item.get("Scenario", "Base"))
+            scope = str(item.get("Scope", "Scenario")) or "Scenario"
+            nm = str(item.get("Item Name", "Room Type"))
+            existing_params = set(out.loc[
+                out["Scenario"].astype(str).eq(sc)
+                & out["Category"].astype(str).eq("Room Types")
+                & out["Item Type"].astype(str).eq("Room Type")
+                & out["Item Name"].astype(str).eq(nm),
+                "Parameter"
+            ].astype(str))
+            for param, meta in room_delivery_defaults.items():
+                if param not in existing_params:
+                    delivery_rows.append(_mi_row(
+                        sc,
+                        scope if scope in ["Global", "Scenario"] else "Scenario",
+                        "Room Types",
+                        "Room Type",
+                        nm,
+                        param,
+                        value="",
+                        unit="-",
+                        required=False,
+                        source_type="Design Document",
+                        source_ref=meta["source_ref"],
+                        reference=meta["reference"],
+                    ))
+        if delivery_rows:
+            out = pd.concat([out, pd.DataFrame(delivery_rows)], ignore_index=True)
+            out = out[MODEL_INPUT_QA_COLUMNS].copy()
+            for col in ["Min Check", "Max Check"]:
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+    except Exception:
+        pass
+
     return out.reset_index(drop=True)
 
 
@@ -5287,57 +5345,69 @@ with tab_model_qa:
         st.write("### Add model input objects")
         st.caption(
             "Use the controls below to add room types, envelope constructions/components, HVAC/DHW systems and custom parameters. "
-            "All non-general inputs are stored for the active scenario only."
+            "All non-general inputs are stored for the active scenario only. The controls are inside a form, so typing or changing dropdowns does not rerun the page."
         )
 
-        add_col1, add_col2, add_col3 = st.columns(3)
-        with add_col1:
-            with st.expander("Add room type", expanded=True):
-                new_room_type_name = st.text_input("Room type name", value="Office", key="mi_new_room_type_name")
-                if st.button("Add Room Type", key="mi_add_room_type", use_container_width=True):
-                    add_model_room_type(new_room_type_name, active_selected)
-                    st.session_state["_model_inputs_qa_flash"] = "updated"
-                    st.rerun()
-        with add_col2:
-            with st.expander("Add envelope component", expanded=True):
-                new_env_type = st.selectbox("Construction/component type", MODEL_INPUT_ENVELOPE_COMPONENT_TYPES, key="mi_new_envelope_type")
-                new_env_name = st.text_input("Component name", value="New component", key="mi_new_envelope_name")
-                if st.button("Add Envelope Component", key="mi_add_envelope", use_container_width=True):
-                    add_model_envelope_component(new_env_type, new_env_name, active_selected)
-                    st.session_state["_model_inputs_qa_flash"] = "updated"
-                    st.rerun()
-        with add_col3:
-            with st.expander("Add system", expanded=True):
-                new_system_type = st.selectbox("System type", MODEL_INPUT_SYSTEM_TYPES, key="mi_new_system_type")
-                new_system_name = st.text_input("System name", value="New system", key="mi_new_system_name")
-                if st.button("Add System", key="mi_add_system", use_container_width=True):
-                    add_model_system(new_system_type, new_system_name, active_selected)
-                    st.session_state["_model_inputs_qa_flash"] = "updated"
-                    st.rerun()
+        df_for_custom = model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_selected)
+        item_options = []
+        for _, r in df_for_custom[["Scenario", "Scope", "Category", "Item Type", "Item Name"]].drop_duplicates().iterrows():
+            sc_label = "Global" if str(r["Scope"]) == "Global" else f"Scenario: {active_selected}"
+            label = f"{sc_label} | {r['Category']} | {r['Item Type']} | {r['Item Name']}"
+            item_options.append(label)
+        item_options = sorted(set(item_options))
 
-        with st.expander("Add custom parameter", expanded=False):
-            df_for_custom = model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_selected)
-            item_options = []
-            for _, r in df_for_custom[["Scenario", "Scope", "Category", "Item Type", "Item Name"]].drop_duplicates().iterrows():
-                sc_label = "Global" if str(r["Scope"]) == "Global" else f"Scenario: {active_selected}"
-                label = f"{sc_label} | {r['Category']} | {r['Item Type']} | {r['Item Name']}"
-                item_options.append(label)
-            item_options = sorted(set(item_options))
-            custom_target = st.selectbox("Target item", item_options if item_options else ["Global | General Model Setup | General | Simulation Model"], key="mi_custom_target")
-            custom_param = st.text_input("Custom parameter name", value="Custom parameter", key="mi_custom_parameter_name")
-            if st.button("Add Custom Parameter", key="mi_add_custom_parameter", use_container_width=False):
-                try:
-                    parts = [x.strip() for x in str(custom_target).split("|")]
-                    scope_label = parts[0]
-                    category = parts[1]
-                    item_type = parts[2]
-                    item_name = parts[3]
-                    scope = "Global" if scope_label == "Global" else "Scenario"
-                except Exception:
-                    scope, category, item_type, item_name = "Global", "General Model Setup", "General", "Simulation Model"
-                add_model_custom_parameter(active_selected, scope, category, item_type, item_name, custom_param)
-                st.session_state["_model_inputs_qa_flash"] = "updated"
-                st.rerun()
+        add_room_submit = False
+        add_env_submit = False
+        add_system_submit = False
+        add_custom_submit = False
+
+        with st.form("model_inputs_qa_add_object_form", clear_on_submit=False):
+            add_col1, add_col2, add_col3 = st.columns(3)
+            with add_col1:
+                with st.expander("Add room type", expanded=True):
+                    new_room_type_name = st.text_input("Room type name", value="Office", key="mi_new_room_type_name")
+                    add_room_submit = st.form_submit_button("Add Room Type", use_container_width=True)
+            with add_col2:
+                with st.expander("Add envelope component", expanded=True):
+                    new_env_type = st.selectbox("Construction/component type", MODEL_INPUT_ENVELOPE_COMPONENT_TYPES, key="mi_new_envelope_type")
+                    new_env_name = st.text_input("Component name", value="New component", key="mi_new_envelope_name")
+                    add_env_submit = st.form_submit_button("Add Envelope Component", use_container_width=True)
+            with add_col3:
+                with st.expander("Add system", expanded=True):
+                    new_system_type = st.selectbox("System type", MODEL_INPUT_SYSTEM_TYPES, key="mi_new_system_type")
+                    new_system_name = st.text_input("System name", value="New system", key="mi_new_system_name")
+                    add_system_submit = st.form_submit_button("Add System", use_container_width=True)
+
+            with st.expander("Add custom parameter", expanded=False):
+                custom_target = st.selectbox("Target item", item_options if item_options else ["Global | General Model Setup | General | Simulation Model"], key="mi_custom_target")
+                custom_param = st.text_input("Custom parameter name", value="Custom parameter", key="mi_custom_parameter_name")
+                add_custom_submit = st.form_submit_button("Add Custom Parameter", use_container_width=False)
+
+        if add_room_submit:
+            add_model_room_type(new_room_type_name, active_selected)
+            st.session_state["_model_inputs_qa_flash"] = "updated"
+            st.rerun()
+        if add_env_submit:
+            add_model_envelope_component(new_env_type, new_env_name, active_selected)
+            st.session_state["_model_inputs_qa_flash"] = "updated"
+            st.rerun()
+        if add_system_submit:
+            add_model_system(new_system_type, new_system_name, active_selected)
+            st.session_state["_model_inputs_qa_flash"] = "updated"
+            st.rerun()
+        if add_custom_submit:
+            try:
+                parts = [x.strip() for x in str(custom_target).split("|")]
+                scope_label = parts[0]
+                category = parts[1]
+                item_type = parts[2]
+                item_name = parts[3]
+                scope = "Global" if scope_label == "Global" else "Scenario"
+            except Exception:
+                scope, category, item_type, item_name = "Global", "General Model Setup", "General", "Simulation Model"
+            add_model_custom_parameter(active_selected, scope, category, item_type, item_name, custom_param)
+            st.session_state["_model_inputs_qa_flash"] = "updated"
+            st.rerun()
 
         st.markdown("---")
         st.write("### Structured input editor")
@@ -5363,6 +5433,38 @@ with tab_model_qa:
             value = str(row.get("Value", ""))
             p_low = param.lower()
             u_low = unit.lower()
+            if p_low in ["heating delivery", "cooling delivery"]:
+                delivery_options = [
+                    "",
+                    "Radiant Ceiling",
+                    "Fan Coil",
+                    "Floor Heating",
+                    "Floor Cooling",
+                    "Radiator",
+                    "Chilled Beam",
+                    "Air Handling Unit / Air System",
+                    "VAV / CAV Air System",
+                    "VRF Indoor Unit",
+                    "Other / Custom",
+                ]
+                current_value = value.strip()
+                selected_default = current_value if current_value in delivery_options else ("Other / Custom" if current_value else "")
+                selected = st.selectbox(
+                    "Value",
+                    delivery_options,
+                    index=delivery_options.index(selected_default),
+                    key=f"{key_prefix}_value_delivery_select",
+                    help="Choose a typical delivery system or type a custom value below. The custom value is used when filled.",
+                )
+                custom_default = "" if current_value in delivery_options else current_value
+                custom_value = st.text_input(
+                    "Custom delivery type",
+                    value=custom_default,
+                    key=f"{key_prefix}_value_delivery_custom",
+                    help="Optional. Use this when the delivery type is not covered by the dropdown.",
+                )
+                custom_value = str(custom_value or "").strip()
+                return custom_value if custom_value else selected
             if "energy source" in p_low:
                 opts = [""] + ENERGY_SOURCE_ORDER + ["Other"]
                 val = value if value in opts else ""
