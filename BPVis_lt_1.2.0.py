@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.9",
+    page_title="WSGT_BPVis_ENE 2.2.10",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.9")
+st.sidebar.write("Version 2.2.10")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.9"
+REPORT_VERSION = "2.2.10"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3082,6 +3082,171 @@ MODEL_INPUT_DHW_DEMAND_UNITS = [
     "Other",
 ]
 
+
+MODEL_INPUT_COMMON_UNITS = [
+    "-", "m²", "m³", "L", "m", "cm", "mm", "°", "°C", "K",
+    "W", "kW", "MW", "W/m²", "W/person", "W/K", "W/mK", "W/m²K",
+    "kWh", "kWh/a", "MWh/a", "%", "1/h", "m³/h", "m³/s", "L/s",
+    "L/s.person", "m³/h.person", "L/s.m²", "m³/h.m²", "W/(L/s)",
+    "kW/(m³/s)", "W/(m³/h)", "m²/person", "person/m²", "person/room",
+    "min", "h", "h/day", "h/week", "full-load hours/a", "months", "years",
+    "schedule name", "rule", "yes/no", "Other / Custom",
+]
+
+
+def _norm_model_input_text(s: str) -> str:
+    """Normalize labels for robust parameter/unit lookup."""
+    try:
+        s = str(s or "").strip().lower()
+        s = s.replace("²", "2").replace("³", "3")
+        s = s.replace("·", ".")
+        s = re.sub(r"\s+", " ", s)
+        return s
+    except Exception:
+        return str(s or "").strip().lower()
+
+
+def _unique_preserve_order(values) -> list:
+    out = []
+    seen = set()
+    for v in values or []:
+        vs = str(v or "").strip()
+        if vs == "":
+            continue
+        if vs not in seen:
+            out.append(vs)
+            seen.add(vs)
+    return out
+
+
+def _split_model_input_multi_value(value: str) -> list:
+    """Parse comma/semicolon/pipe separated values from saved text fields."""
+    if value is None:
+        return []
+    parts = re.split(r"[,;|]", str(value))
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _model_input_unit_options(category: str, item_type: str, parameter: str, current_unit: str = "") -> list:
+    """Return metric unit dropdown options appropriate for each standard Model Inputs QA parameter.
+
+    The options are intentionally practical, not exhaustive. They cover common metric units
+    used in building-energy simulation model documentation. Custom parameters and unusual
+    project-specific inputs can still use 'Other / Custom'.
+    """
+    cat = _norm_model_input_text(category)
+    it = _norm_model_input_text(item_type)
+    par = _norm_model_input_text(parameter)
+    cur = str(current_unit or "").strip()
+
+    # Exact/specific parameters first.
+    exact = {
+        "simulation timestep": ["min", "h"],
+        "annual simulation period": ["months", "years", "days"],
+        "modelled floor area": ["m²"],
+        "area": ["m²"],
+        "area / quantity": ["m²", "m", "piece", "unit"],
+        "main performance value": ["-", "W/m²K", "W/m²", "kW", "kWh/a", "%"],
+        "occupancy density": ["m²/person", "person/m²", "person/room"],
+        "lighting power density": ["W/m²", "W/person", "W/room"],
+        "equipment power density": ["W/m²", "W/person", "W/room"],
+        "people sensible gain": ["W/person"],
+        "people latent gain": ["W/person"],
+        "heating delivery": ["-"],
+        "cooling delivery": ["-"],
+        "heating setpoint": ["°C"],
+        "cooling setpoint": ["°C"],
+        "night setback / setup": ["°C", "K", "rule"],
+        "occupancy schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
+        "lighting schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
+        "equipment schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
+        "outdoor air per person": ["L/s.person", "m³/h.person"],
+        "outdoor air per area": ["L/s.m²", "m³/h.m²"],
+        "demand controlled ventilation permitted": ["yes/no"],
+        "demand controlled ventilation": ["yes/no"],
+        "natural ventilation permitted": ["yes/no"],
+        "demand controlled ventilation rule": ["rule", "-"],
+        "natural ventilation rule": ["rule", "-"],
+        "u-value": ["W/m²K"],
+        "thermal bridge allowance": ["%", "W/K", "W/mK", "W/m²K"],
+        "solar absorptance": ["-", "%"],
+        "orientation / exposure": ["-", "°"],
+        "orientation": ["-", "°"],
+        "shgc / g-value": ["-", "%"],
+        "visible transmittance": ["-", "%"],
+        "frame fraction": ["%", "-"],
+        "associated shading device": ["-"],
+        "shading device / control": ["-", "rule"],
+        "shading type": ["-"],
+        "geometry / projection": ["m", "cm", "mm", "°", "rule"],
+        "control rule": ["rule", "-"],
+        "free cooling rule": ["rule", "-"],
+        "free cooling / economizer rule": ["rule", "-"],
+        "reduction factor": ["-", "%"],
+        "infiltration rate": ["1/h", "L/s.m²", "m³/h.m²"],
+        "infiltration schedule / rule": ["rule", "schedule name", "-"],
+        "airtightness test value": ["n50", "q50", "m³/(h·m²)"],
+        "served room types": ["room types"],
+        "served room types / zones": ["room types"],
+        "supply airflow": ["m³/h", "L/s", "m³/s"],
+        "outdoor airflow": ["m³/h", "L/s", "m³/s"],
+        "exhaust airflow": ["m³/h", "L/s", "m³/s"],
+        "heat recovery type": ["-"],
+        "heat recovery efficiency": ["%", "-"],
+        "specific fan power": ["W/(L/s)", "kW/(m³/s)", "W/(m³/h)"],
+        "supply air temperature": ["°C"],
+        "ahu operation schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
+        "humidification / dehumidification": ["yes/no", "rule", "-"],
+        "system type": ["-"],
+        "system description": ["-"],
+        "energy source": ["-"],
+        "overall efficiency / seasonal cop": ["-", "%", "COP", "SCOP", "EER", "SEER"],
+        "generator efficiency / cop": ["-", "%", "COP", "SCOP"],
+        "efficiency / control assumption": ["-", "%", "COP", "SCOP", "EER", "SEER", "rule"],
+        "supply temperature": ["°C"],
+        "return temperature": ["°C"],
+        "design heating load": ["kW", "W", "MW"],
+        "design cooling load": ["kW", "W", "MW"],
+        "heating operation schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
+        "cooling operation schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
+        "distribution / storage losses": ["%", "kWh/a", "MWh/a", "W", "kW"],
+        "hot water demand": MODEL_INPUT_DHW_DEMAND_UNITS,
+        "dhw demand calculation method": ["-", "rule"],
+        "storage volume": ["L", "m³"],
+        "storage losses": ["kWh/a", "MWh/a", "W", "kW", "%"],
+        "circulation losses": ["kWh/a", "MWh/a", "%", "W", "kW"],
+        "dhw operation schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
+        "operation schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
+        "green roof / cool roof assumption": ["yes/no", "rule", "-"],
+        "ground temperature / boundary condition": ["°C", "rule", "-"],
+        "modelling rule": ["rule", "-"],
+    }
+    if par in exact:
+        opts = list(exact[par])
+    elif "schedule" in par:
+        opts = ["schedule name", "h/day", "h/week", "full-load hours/a", "-"]
+    elif "temperature" in par or "setpoint" in par:
+        opts = ["°C", "K", "rule"]
+    elif "airflow" in par or "flow" in par:
+        opts = ["m³/h", "L/s", "m³/s"]
+    elif "efficiency" in par or "cop" in par or "eer" in par:
+        opts = ["-", "%", "COP", "SCOP", "EER", "SEER"]
+    elif "loss" in par:
+        opts = ["%", "kWh/a", "MWh/a", "W", "kW"]
+    elif "area" in par:
+        opts = ["m²"]
+    elif "rule" in par:
+        opts = ["rule", "-"]
+    elif "permitted" in par or par.startswith("is "):
+        opts = ["yes/no"]
+    else:
+        opts = ["-", "Other / Custom"]
+
+    # Keep legacy/stored units available so older projects do not silently lose information.
+    opts = _unique_preserve_order(([cur] if cur and cur not in opts else []) + opts + ["Other / Custom"])
+    return opts
+
+
 MODEL_INPUT_OBJECT_SCOPE_OPTIONS = ["Global", "Active scenario only"]
 
 MODEL_INPUT_QA_COLUMNS = [
@@ -3266,7 +3431,7 @@ def system_template(system_type: str, item_name: str, scenario: str, scope: str 
     stype = str(system_type)
     if stype == "AHU / Ventilation":
         params = [
-            ("Served room types / zones", "-", True, "Design Document", "MEP concept / zone list", "", None, None),
+            ("Served Room Types", "room types", True, "Design Document", "MEP concept / zone list", "Select one or more existing Room Type objects served by this AHU", None, None),
             ("Supply airflow", "m³/h", True, "Design Document", "Air balance / AHU schedule", "", 0, None),
             ("Outdoor airflow", "m³/h", True, "Design Document", "Air balance / ventilation calculation", "", 0, None),
             ("Exhaust airflow", "m³/h", False, "Design Document", "Air balance", "", 0, None),
@@ -3589,6 +3754,9 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     out.loc[_item_type_empty, "Item Type"] = out.loc[_item_type_empty, "Category"].astype(str)
     out["Item Name"] = out["Item Name"].replace("", "General")
     out["Source Type"] = out["Source Type"].replace("", "Assumption")
+    # Backwards compatibility: v2.2.9 used a free-text AHU parameter name.
+    out.loc[out["Parameter"].astype(str).eq("Served room types / zones"), "Parameter"] = "Served Room Types"
+    out.loc[out["Parameter"].astype(str).eq("Served Room Types") & out["Unit"].astype(str).str.strip().eq(""), "Unit"] = "room types"
 
     def _to_bool(x):
         if isinstance(x, bool):
@@ -5873,6 +6041,21 @@ with tab_model_qa:
             value = str(row.get("Value", ""))
             p_low = param.lower()
             u_low = unit.lower()
+            if p_low in ["served room types", "served room types / zones"]:
+                opts = [str(x).strip() for x in room_type_options if str(x).strip()]
+                current_values = _split_model_input_multi_value(value)
+                for _v in current_values:
+                    if _v and _v not in opts:
+                        opts.append(_v)
+                if not opts:
+                    st.caption("No Room Type objects are defined yet. Add Room Types in General Model Setup first.")
+                return ", ".join(st.multiselect(
+                    "Value",
+                    options=opts,
+                    default=[v for v in current_values if v in opts],
+                    key=f"{key_prefix}_value_rooms",
+                    help="Select all Room Type objects served by this AHU.",
+                ))
             if p_low in ["heating delivery", "cooling delivery"]:
                 delivery_options = [
                     "",
@@ -5925,6 +6108,17 @@ with tab_model_qa:
         custom_rows_to_add = []
 
         try:
+            room_type_options = sorted(set(
+                mi_edit.loc[
+                    mi_edit["Category"].astype(str).eq("Room Types")
+                    & mi_edit["Item Type"].astype(str).eq("Room Type"),
+                    "Item Name"
+                ].dropna().astype(str).tolist()
+            ))
+        except Exception:
+            room_type_options = []
+
+        try:
             shading_device_options = sorted(set(
                 mi_edit.loc[
                     mi_edit["Category"].astype(str).eq("Thermal Envelope")
@@ -5962,7 +6156,16 @@ with tab_model_qa:
                 with st.expander("Add custom parameter", expanded=False):
                     custom_key_prefix = _safe_model_input_key("mi", _editor_key_token, "custom", scenario_i, category_i, item_type_i, item_name_i)
                     custom_param_name = st.text_input("Custom parameter name", value="", key=f"{custom_key_prefix}_name")
-                    custom_param_unit = st.text_input("Unit", value="-", key=f"{custom_key_prefix}_unit")
+                    custom_param_unit_choice = st.selectbox(
+                        "Unit",
+                        MODEL_INPUT_COMMON_UNITS,
+                        index=MODEL_INPUT_COMMON_UNITS.index("-") if "-" in MODEL_INPUT_COMMON_UNITS else 0,
+                        key=f"{custom_key_prefix}_unit_select",
+                    )
+                    if custom_param_unit_choice == "Other / Custom":
+                        custom_param_unit = st.text_input("Custom unit", value="", key=f"{custom_key_prefix}_unit_custom").strip() or "Other / Custom"
+                    else:
+                        custom_param_unit = custom_param_unit_choice
                     custom_param_required = st.checkbox("Required", value=False, key=f"{custom_key_prefix}_required")
                     custom_param_source = st.selectbox(
                         "Source Type",
@@ -5998,19 +6201,24 @@ with tab_model_qa:
                     with c2:
                         value = _value_widget(row, key_prefix)
                     with c3:
-                        if parameter.strip().lower() == "hot water demand":
-                            _unit_current = str(row.get("Unit", "L/person·day"))
-                            _unit_options = MODEL_INPUT_DHW_DEMAND_UNITS
-                            if _unit_current not in _unit_options:
-                                _unit_options = [_unit_current] + _unit_options
-                            unit = st.selectbox(
-                                "Unit",
-                                _unit_options,
-                                index=_unit_options.index(_unit_current) if _unit_current in _unit_options else 0,
-                                key=f"{key_prefix}_unit",
-                            )
+                        _unit_current = str(row.get("Unit", ""))
+                        _unit_options = _model_input_unit_options(category_i, item_type_i, parameter, _unit_current)
+                        _unit_default = _unit_current if _unit_current in _unit_options else (_unit_options[0] if _unit_options else "-")
+                        _unit_selected = st.selectbox(
+                            "Unit",
+                            _unit_options,
+                            index=_unit_options.index(_unit_default) if _unit_default in _unit_options else 0,
+                            key=f"{key_prefix}_unit_select",
+                            help="Metric unit options are filtered according to the component/system type and parameter.",
+                        )
+                        if _unit_selected == "Other / Custom":
+                            unit = st.text_input(
+                                "Custom unit",
+                                value="" if _unit_current in _unit_options else _unit_current,
+                                key=f"{key_prefix}_unit_custom",
+                            ).strip() or "Other / Custom"
                         else:
-                            unit = st.text_input("Unit", value=str(row.get("Unit", "")), key=f"{key_prefix}_unit")
+                            unit = _unit_selected
                     with c4:
                         required = st.checkbox("Required", value=bool(row.get("Required", False)), key=f"{key_prefix}_required")
                     with c5:
