@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.5",
+    page_title="WSGT_BPVis_ENE 2.2.7",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.5")
+st.sidebar.write("Version 2.2.7")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.5"
+REPORT_VERSION = "2.2.7"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2699,7 +2699,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
             ("Required inputs", f"{mi_summary['required']}"),
             ("Missing required", f"{mi_summary['missing']}"),
             ("Assumption-tagged inputs", f"{mi_summary['assumptions']}"),
-            ("Sanity-check review", f"{mi_summary['review']}"),
+            ("QA review flags", f"{mi_summary['review']}"),
         ])
         story.append(Paragraph("The report includes global model setup inputs and scenario-specific model inputs for the active scenario only. Assumption-tagged inputs should be reviewed and replaced with documented project references where possible.", styles["BodyText"]))
         story.append(Spacer(1, 0.25 * cm))
@@ -2710,7 +2710,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
             story.append(Paragraph(cat, styles["Heading3"]))
             for (scope_i, item_type_i, item_name_i), sub in sub_cat.groupby(["Scope", "Item Type", "Item Name"], dropna=False):
                 story.append(Paragraph(f"{scope_i} — {item_type_i}: {item_name_i}", styles["BodyText"]))
-                rows_mi = [["Parameter", "Value", "Unit", "Source", "QA"]]
+                rows_mi = [["Parameter", "Value", "Unit", "Source", "QA", "Justification"]]
                 for _, r in sub.iterrows():
                     rows_mi.append([
                         str(r.get("Parameter", "")),
@@ -2718,8 +2718,9 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                         str(r.get("Unit", "")),
                         str(r.get("Source Type", "")),
                         str(r.get("QA Status", "")),
+                        str(r.get("Range Justification", "")),
                     ])
-                story.append(_report_table_flowable(rows_mi, col_widths=[4.3 * cm, 3.0 * cm, 2.0 * cm, 3.3 * cm, 2.6 * cm], font_size=6.0))
+                story.append(_report_table_flowable(rows_mi, col_widths=[3.5 * cm, 2.5 * cm, 1.5 * cm, 2.6 * cm, 2.2 * cm, 3.2 * cm], font_size=5.5))
                 story.append(Spacer(1, 0.15 * cm))
     except Exception:
         story.append(Paragraph("Model Inputs QA data could not be loaded for this report.", styles["BodyText"]))
@@ -3097,6 +3098,9 @@ MODEL_INPUT_QA_COLUMNS = [
     "Reference / Target",
     "Min Check",
     "Max Check",
+    "Usual Min",
+    "Usual Max",
+    "Range Justification",
     "Notes",
 ]
 
@@ -3120,6 +3124,9 @@ def _mi_row(
         reference: str = "",
         min_check=None,
         max_check=None,
+        usual_min=None,
+        usual_max=None,
+        range_justification: str = "",
         notes: str = "",
 ) -> dict:
     return {
@@ -3137,6 +3144,9 @@ def _mi_row(
         "Reference / Target": "" if reference is None else str(reference),
         "Min Check": min_check,
         "Max Check": max_check,
+        "Usual Min": usual_min,
+        "Usual Max": usual_max,
+        "Range Justification": "" if range_justification is None else str(range_justification),
         "Notes": "" if notes is None else str(notes),
     }
 
@@ -3225,6 +3235,7 @@ def envelope_component_template(component_type: str, item_name: str, scenario: s
             ("Visible transmittance", "-", False, "Design Document", "Glazing specification", "", 0.05, 0.9),
             ("Frame fraction", "%", False, "Design Document", "Façade schedule", "", 0, 80),
             ("Orientation", "-", False, "Design Document", "Model geometry", "", None, None),
+            ("Associated shading device", "-", False, "Design Document", "Shading concept / façade schedule", "Select an existing Shading Device object where applicable", None, None),
             ("Shading device / control", "-", False, "Design Document", "Shading concept / controls", "Internal/external, fixed/dynamic, schedule/rule", None, None),
         ]
     elif ct == "Shading Devices":
@@ -3314,6 +3325,218 @@ def system_template(system_type: str, item_name: str, scenario: str, scope: str 
     return [_mi_row(sc, scope_value, stype if stype in MODEL_INPUT_CATEGORIES else "Other / Custom Inputs", stype, item_name, p, unit=u, required=req, source_type=src, source_ref=ref, reference=tgt, min_check=mn, max_check=mx) for p, u, req, src, ref, tgt, mn, mx in params]
 
 
+def _model_input_usual_range(category: str, item_type: str, parameter: str, unit: str = "") -> Tuple[float, float]:
+    """Return informative usual-value bounds for standard Model Inputs QA parameters.
+
+    These ranges are pragmatic QA plausibility ranges for common building energy simulation inputs.
+    They are not code-compliance limits and should be overridden by project standards where needed.
+    Custom/user-defined parameters intentionally return NaN/NaN.
+    """
+    cat = str(category or "").strip().lower()
+    it = str(item_type or "").strip().lower()
+    p = str(parameter or "").strip().lower()
+    u = str(unit or "").strip().lower()
+
+    # Unit-sensitive DHW demand ranges.
+    if p == "hot water demand":
+        if "person" in u and "day" in u:
+            return 5.0, 80.0
+        if "person" in u and "h" in u:
+            return 0.1, 10.0
+        if "m²" in u and "day" in u or "m2" in u and "day" in u:
+            return 0.01, 10.0
+        if "m²" in u and "h" in u or "m2" in u and "h" in u:
+            return 0.001, 2.0
+        if "m³/year" in u or "m3/year" in u:
+            return 0.1, 100000.0
+        if "m³/day" in u or "m3/day" in u:
+            return 0.01, 500.0
+        if "l/day" in u:
+            return 1.0, 500000.0
+        if "kwh/year" in u:
+            return 1.0, 1000000.0
+        return 0.0, np.nan
+
+    # General setup.
+    if cat == "general model setup":
+        general_ranges = {
+            "simulation timestep": (5.0, 60.0),
+            "annual simulation period": (12.0, 12.0),
+            "modelled floor area": (10.0, 10000000.0),
+        }
+        return general_ranges.get(p, (np.nan, np.nan))
+
+    # Room types.
+    if it == "room type" or cat == "room types":
+        room_ranges = {
+            "area": (1.0, 100000.0),
+            "occupancy density": (3.0, 50.0),
+            "lighting power density": (2.0, 25.0),
+            "equipment power density": (1.0, 80.0),
+            "people sensible gain": (40.0, 120.0),
+            "people latent gain": (20.0, 100.0),
+            "heating setpoint": (18.0, 23.0),
+            "cooling setpoint": (22.0, 28.0),
+            "outdoor air per person": (3.0, 20.0),
+            "outdoor air per area": (0.05, 5.0),
+        }
+        return room_ranges.get(p, (np.nan, np.nan))
+
+    # Envelope components.
+    if cat == "thermal envelope":
+        if it == "external walls":
+            ranges = {
+                "area": (1.0, 500000.0),
+                "u-value": (0.15, 0.25),
+                "thermal bridge allowance": (0.0, 20.0),
+                "solar absorptance": (0.20, 0.90),
+            }
+            return ranges.get(p, (np.nan, np.nan))
+        if it == "roofs":
+            ranges = {
+                "area": (1.0, 500000.0),
+                "u-value": (0.08, 0.25),
+                "solar absorptance": (0.20, 0.90),
+            }
+            return ranges.get(p, (np.nan, np.nan))
+        if it == "floors / slabs":
+            ranges = {
+                "area": (1.0, 500000.0),
+                "u-value": (0.10, 0.35),
+            }
+            return ranges.get(p, (np.nan, np.nan))
+        if it == "glazings":
+            ranges = {
+                "area": (1.0, 300000.0),
+                "u-value": (0.70, 1.80),
+                "shgc / g-value": (0.20, 0.60),
+                "visible transmittance": (0.35, 0.75),
+                "frame fraction": (10.0, 45.0),
+            }
+            return ranges.get(p, (np.nan, np.nan))
+        if it == "external doors":
+            ranges = {
+                "area": (0.5, 10000.0),
+                "u-value": (0.80, 2.50),
+            }
+            return ranges.get(p, (np.nan, np.nan))
+        if it == "shading devices":
+            ranges = {
+                "reduction factor": (0.10, 0.90),
+            }
+            return ranges.get(p, (np.nan, np.nan))
+        if it == "thermal bridges":
+            ranges = {
+                "thermal bridge allowance": (0.0, 20.0),
+                "main performance value": (0.0, 1.0),
+            }
+            return ranges.get(p, (np.nan, np.nan))
+        if it == "infiltration / airtightness":
+            ranges = {
+                "infiltration rate": (0.05, 1.00),
+                "airtightness test value": (0.30, 5.00),
+            }
+            return ranges.get(p, (np.nan, np.nan))
+
+    # Systems.
+    if it == "ahu / ventilation":
+        ranges = {
+            "supply airflow": (50.0, 250000.0),
+            "outdoor airflow": (10.0, 250000.0),
+            "exhaust airflow": (0.0, 250000.0),
+            "heat recovery efficiency": (50.0, 85.0),
+            "specific fan power": (0.50, 3.00),
+            "supply air temperature": (14.0, 22.0),
+        }
+        return ranges.get(p, (np.nan, np.nan))
+    if it == "heating":
+        ranges = {
+            "overall efficiency / seasonal cop": (0.70, 5.50),
+            "supply temperature": (28.0, 65.0),
+            "return temperature": (22.0, 55.0),
+            "design heating load": (0.1, 10000.0),
+            "distribution / storage losses": (0.0, 25.0),
+        }
+        return ranges.get(p, (np.nan, np.nan))
+    if it == "cooling":
+        ranges = {
+            "overall efficiency / seasonal cop": (2.0, 8.0),
+            "supply temperature": (6.0, 18.0),
+            "return temperature": (10.0, 24.0),
+            "design cooling load": (0.1, 10000.0),
+            "distribution / storage losses": (0.0, 25.0),
+        }
+        return ranges.get(p, (np.nan, np.nan))
+    if it == "domestic hot water":
+        ranges = {
+            "generator efficiency / cop": (0.70, 5.00),
+            "storage volume": (5.0, 50000.0),
+            "storage losses": (0.0, 100000.0),
+            "circulation losses": (0.0, 100000.0),
+        }
+        return ranges.get(p, (np.nan, np.nan))
+
+    return np.nan, np.nan
+
+
+def _apply_model_input_usual_ranges(df: pd.DataFrame) -> pd.DataFrame:
+    """Populate usual-value bounds for standard parameters while preserving custom rows."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    if "Usual Min" not in out.columns:
+        out["Usual Min"] = np.nan
+    if "Usual Max" not in out.columns:
+        out["Usual Max"] = np.nan
+    for idx, row in out.iterrows():
+        mn, mx = _model_input_usual_range(
+            row.get("Category", ""), row.get("Item Type", ""), row.get("Parameter", ""), row.get("Unit", "")
+        )
+        if pd.notna(mn):
+            out.at[idx, "Usual Min"] = float(mn)
+        if pd.notna(mx):
+            out.at[idx, "Usual Max"] = float(mx)
+    return out
+
+
+def _is_model_input_out_of_usual_range(value, usual_min, usual_max) -> bool:
+    num = _extract_first_number(value)
+    if num is None:
+        return False
+    try:
+        if pd.notna(usual_min) and float(num) < float(usual_min):
+            return True
+    except Exception:
+        pass
+    try:
+        if pd.notna(usual_max) and float(num) > float(usual_max):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _format_usual_range(usual_min, usual_max, unit: str = "") -> str:
+    unit_s = str(unit or "").strip()
+    try:
+        has_min = pd.notna(usual_min)
+    except Exception:
+        has_min = False
+    try:
+        has_max = pd.notna(usual_max)
+    except Exception:
+        has_max = False
+    if has_min and has_max:
+        core = f"{float(usual_min):g} – {float(usual_max):g}"
+    elif has_min:
+        core = f">= {float(usual_min):g}"
+    elif has_max:
+        core = f"<= {float(usual_max):g}"
+    else:
+        return ""
+    return f"{core} {unit_s}".strip()
+
+
 def default_model_inputs_qa_df() -> pd.DataFrame:
     """Return the default global register. Scenario-specific objects are added by the user."""
     return sanitize_model_inputs_qa_df(pd.DataFrame(default_model_inputs_global_rows()))
@@ -3341,7 +3564,7 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         if col not in out.columns:
             if col == "Required":
                 out[col] = False
-            elif col in ["Min Check", "Max Check"]:
+            elif col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
                 out[col] = np.nan
             elif col == "Scenario":
                 out[col] = MODEL_INPUT_GLOBAL_SCENARIO
@@ -3351,7 +3574,7 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
                 out[col] = ""
 
     out = out[MODEL_INPUT_QA_COLUMNS].copy()
-    for col in ["Scenario", "Scope", "Category", "Item Type", "Item Name", "Parameter", "Value", "Unit", "Source Type", "Source Document / Reference", "Reference / Target", "Notes"]:
+    for col in ["Scenario", "Scope", "Category", "Item Type", "Item Name", "Parameter", "Value", "Unit", "Source Type", "Source Document / Reference", "Reference / Target", "Range Justification", "Notes"]:
         out[col] = out[col].fillna("").astype(str)
 
     out["Scenario"] = out["Scenario"].replace("", MODEL_INPUT_GLOBAL_SCENARIO)
@@ -3373,7 +3596,7 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         return s in {"1", "true", "yes", "y", "x", "required"}
 
     out["Required"] = out["Required"].apply(_to_bool)
-    for col in ["Min Check", "Max Check"]:
+    for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
     # Drop fully empty parameter rows.
@@ -3441,7 +3664,7 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         if delivery_rows:
             out = pd.concat([out, pd.DataFrame(delivery_rows)], ignore_index=True)
             out = out[MODEL_INPUT_QA_COLUMNS].copy()
-            for col in ["Min Check", "Max Check"]:
+            for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
                 out[col] = pd.to_numeric(out[col], errors="coerce")
     except Exception:
         pass
@@ -3486,11 +3709,57 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         if dhw_rows:
             out = pd.concat([out, pd.DataFrame(dhw_rows)], ignore_index=True)
             out = out[MODEL_INPUT_QA_COLUMNS].copy()
-            for col in ["Min Check", "Max Check"]:
+            for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
                 out[col] = pd.to_numeric(out[col], errors="coerce")
     except Exception:
         pass
 
+
+    # Backwards compatibility for v2.2.6: ensure existing Glazing objects include
+    # a standard link to an existing Shading Device object.
+    try:
+        glazing_items = out.loc[
+            out["Category"].astype(str).eq("Thermal Envelope")
+            & out["Item Type"].astype(str).eq("Glazings"),
+            ["Scenario", "Scope", "Item Name"]
+        ].drop_duplicates()
+        glazing_rows = []
+        for _, item in glazing_items.iterrows():
+            sc = str(item.get("Scenario", "Base"))
+            scope = str(item.get("Scope", "Scenario")) or "Scenario"
+            nm = str(item.get("Item Name", "Glazing"))
+            existing_params = set(out.loc[
+                out["Scenario"].astype(str).eq(sc)
+                & out["Category"].astype(str).eq("Thermal Envelope")
+                & out["Item Type"].astype(str).eq("Glazings")
+                & out["Item Name"].astype(str).eq(nm),
+                "Parameter"
+            ].astype(str))
+            if "Associated shading device" not in existing_params:
+                glazing_rows.append(_mi_row(
+                    sc,
+                    scope if scope in ["Global", "Scenario"] else "Scenario",
+                    "Thermal Envelope",
+                    "Glazings",
+                    nm,
+                    "Associated shading device",
+                    value="",
+                    unit="-",
+                    required=False,
+                    source_type="Design Document",
+                    source_ref="Shading concept / façade schedule",
+                    reference="Select an existing Shading Device object where applicable",
+                ))
+        if glazing_rows:
+            out = pd.concat([out, pd.DataFrame(glazing_rows)], ignore_index=True)
+            out = out[MODEL_INPUT_QA_COLUMNS].copy()
+            for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+    except Exception:
+        pass
+    out = _apply_model_input_usual_ranges(out)
+    for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
     return out.reset_index(drop=True)
 
 
@@ -3522,7 +3791,7 @@ def model_inputs_df_for_scenario(df: Optional[pd.DataFrame], scenario_name: Opti
 
 
 def evaluate_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """Add QA status columns for completeness, assumption tagging and simple sanity ranges."""
+    """Add QA status columns for completeness, assumption tagging, sanity ranges and usual-value bounds."""
     out = sanitize_model_inputs_qa_df(df)
     statuses = []
     messages = []
@@ -3533,6 +3802,9 @@ def evaluate_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         required = bool(row.get("Required", False))
         min_v = row.get("Min Check", np.nan)
         max_v = row.get("Max Check", np.nan)
+        usual_min = row.get("Usual Min", np.nan)
+        usual_max = row.get("Usual Max", np.nan)
+        justification = str(row.get("Range Justification", "")).strip()
         num = _extract_first_number(val_raw)
         numeric_values.append(num)
         msg_parts = []
@@ -3557,13 +3829,17 @@ def evaluate_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
                     msg_parts.append(f"above sanity maximum ({float(max_v):g})")
             except Exception:
                 pass
+            if status != "Missing" and _is_model_input_out_of_usual_range(val_raw, usual_min, usual_max):
+                status = "Out of usual range"
+                msg_parts.append(f"outside usual range ({_format_usual_range(usual_min, usual_max, row.get('Unit', ''))})")
+                if not justification:
+                    msg_parts.append("justification missing")
         statuses.append(status)
-        messages.append("; ".join(msg_parts) if msg_parts else "")
+        messages.append("; ".join([m for m in msg_parts if m]) if msg_parts else "")
     out["Numeric Value"] = numeric_values
     out["QA Status"] = statuses
     out["QA Message"] = messages
     return out
-
 
 def model_inputs_qa_summary(df: Optional[pd.DataFrame]) -> Dict[str, int]:
     qa = evaluate_model_inputs_qa_df(df)
@@ -3571,7 +3847,7 @@ def model_inputs_qa_summary(df: Optional[pd.DataFrame]) -> Dict[str, int]:
     required = int(qa["Required"].sum()) if not qa.empty else 0
     missing = int((qa["QA Status"] == "Missing").sum()) if not qa.empty else 0
     assumptions = int((qa["Source Type"].astype(str) == "Assumption").sum()) if not qa.empty else 0
-    review = int((qa["QA Status"] == "Review").sum()) if not qa.empty else 0
+    review = int(qa["QA Status"].isin(["Review", "Out of usual range"]).sum()) if not qa.empty else 0
     complete_required = max(0, required - missing)
     completeness = int(round((complete_required / required) * 100)) if required > 0 else 100
     return {
@@ -3590,6 +3866,8 @@ def _style_model_inputs_qa(row):
     source = str(row.get("Source Type", ""))
     if status == "Missing":
         color = "background-color: #f8d7da"
+    elif status == "Out of usual range":
+        color = "background-color: #f5b7b1"
     elif status == "Review":
         color = "background-color: #ffe5b4"
     elif source == "Assumption" or status == "Assumption":
@@ -4402,9 +4680,9 @@ st.title(st.session_state["project_name"])
 # =========================
 # Tabs
 # =========================
-tab1, tab1_factors, tab2, tab3, tab4, tab5, tab_model_qa, tab6, tab_lcc, tab7, tab8 = st.tabs(
+tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab_lcc, tab7, tab_model_qa, tab8 = st.tabs(
     ["Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)", "Energy Cost (with Factors)", "Loads Analysis", "Benchmark",
-     "Model Inputs QA", "CRREM-Analysis", "LCC-Analysis", "Scenarios", "Raw Data"])
+     "CRREM-Analysis", "LCC-Analysis", "Scenarios", "Model Inputs QA", "Raw Data"])
 
 # =========================
 # Tab 1 — Energy Balance (Energy Balance Tab)
@@ -5114,7 +5392,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_2_0.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_2_7.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -5123,7 +5401,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_2_0.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_2_7.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -5406,7 +5684,7 @@ with tab_model_qa:
         with m4:
             st.metric("Assumption-tagged", f"{summary['assumptions']}")
         with m5:
-            st.metric("Sanity-check review", f"{summary['review']}")
+            st.metric("QA review flags", f"{summary['review']}")
 
         if summary["missing"] > 0:
             st.warning("Some required inputs for the active scenario are still missing.")
@@ -5419,23 +5697,14 @@ with tab_model_qa:
             "Each new object can be stored as a global object or as an active-scenario-specific object. Room types are global by default. The controls are inside a form, so typing or changing dropdowns does not rerun the page."
         )
 
-        df_for_custom = model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_selected)
-        item_options = []
-        for _, r in df_for_custom[["Scenario", "Scope", "Category", "Item Type", "Item Name"]].drop_duplicates().iterrows():
-            sc_label = "Global" if str(r["Scope"]) == "Global" else f"Scenario: {active_selected}"
-            label = f"{sc_label} | {r['Category']} | {r['Item Type']} | {r['Item Name']}"
-            item_options.append(label)
-        item_options = sorted(set(item_options))
-
         add_room_submit = False
         add_env_submit = False
         add_system_submit = False
-        add_custom_submit = False
 
         with st.form("model_inputs_qa_add_object_form", clear_on_submit=False):
             add_col1, add_col2, add_col3 = st.columns(3)
             with add_col1:
-                with st.expander("Add room type", expanded=True):
+                with st.expander("Add room type", expanded=False):
                     new_room_type_name = st.text_input("Room type name", value="Office", key="mi_new_room_type_name")
                     new_room_scope_label = st.selectbox(
                         "Scope",
@@ -5446,22 +5715,17 @@ with tab_model_qa:
                     )
                     add_room_submit = st.form_submit_button("Add Room Type", use_container_width=True)
             with add_col2:
-                with st.expander("Add envelope component", expanded=True):
+                with st.expander("Add envelope component", expanded=False):
                     new_env_type = st.selectbox("Construction/component type", MODEL_INPUT_ENVELOPE_COMPONENT_TYPES, key="mi_new_envelope_type")
                     new_env_name = st.text_input("Component name", value="New component", key="mi_new_envelope_name")
                     new_env_scope_label = st.selectbox("Scope", MODEL_INPUT_OBJECT_SCOPE_OPTIONS, index=1, key="mi_new_envelope_scope")
                     add_env_submit = st.form_submit_button("Add Envelope Component", use_container_width=True)
             with add_col3:
-                with st.expander("Add system", expanded=True):
+                with st.expander("Add system", expanded=False):
                     new_system_type = st.selectbox("System type", MODEL_INPUT_SYSTEM_TYPES, key="mi_new_system_type")
                     new_system_name = st.text_input("System name", value="New system", key="mi_new_system_name")
                     new_system_scope_label = st.selectbox("Scope", MODEL_INPUT_OBJECT_SCOPE_OPTIONS, index=1, key="mi_new_system_scope")
                     add_system_submit = st.form_submit_button("Add System", use_container_width=True)
-
-            with st.expander("Add custom parameter", expanded=False):
-                custom_target = st.selectbox("Target item", item_options if item_options else ["Global | General Model Setup | General | Simulation Model"], key="mi_custom_target")
-                custom_param = st.text_input("Custom parameter name", value="Custom parameter", key="mi_custom_parameter_name")
-                add_custom_submit = st.form_submit_button("Add Custom Parameter", use_container_width=False)
 
         if add_room_submit:
             add_model_room_type(new_room_type_name, active_selected, scope="Global" if new_room_scope_label == "Global" else "Scenario")
@@ -5473,19 +5737,6 @@ with tab_model_qa:
             st.rerun()
         if add_system_submit:
             add_model_system(new_system_type, new_system_name, active_selected, scope="Global" if new_system_scope_label == "Global" else "Scenario")
-            st.session_state["_model_inputs_qa_flash"] = "updated"
-            st.rerun()
-        if add_custom_submit:
-            try:
-                parts = [x.strip() for x in str(custom_target).split("|")]
-                scope_label = parts[0]
-                category = parts[1]
-                item_type = parts[2]
-                item_name = parts[3]
-                scope = "Global" if scope_label == "Global" else "Scenario"
-            except Exception:
-                scope, category, item_type, item_name = "Global", "General Model Setup", "General", "Simulation Model"
-            add_model_custom_parameter(active_selected, scope, category, item_type, item_name, custom_param)
             st.session_state["_model_inputs_qa_flash"] = "updated"
             st.rerun()
 
@@ -5545,6 +5796,13 @@ with tab_model_qa:
                 )
                 custom_value = str(custom_value or "").strip()
                 return custom_value if custom_value else selected
+            if p_low == "associated shading device":
+                opts = ["", "None"] + [x for x in shading_device_options if str(x).strip()]
+                opts = list(dict.fromkeys(opts))
+                if value and value not in opts:
+                    opts = [value] + opts
+                val = value if value in opts else ""
+                return st.selectbox("Value", opts, index=opts.index(val), key=f"{key_prefix}_value")
             if "energy source" in p_low:
                 opts = [""] + ENERGY_SOURCE_ORDER + ["Other"]
                 val = value if value in opts else ""
@@ -5555,9 +5813,165 @@ with tab_model_qa:
                 return st.selectbox("Value", opts, index=opts.index(val), key=f"{key_prefix}_value")
             return st.text_input("Value", value=value, key=f"{key_prefix}_value")
 
+        custom_rows_to_add = []
+
+        try:
+            shading_device_options = sorted(set(
+                mi_edit.loc[
+                    mi_edit["Category"].astype(str).eq("Thermal Envelope")
+                    & mi_edit["Item Type"].astype(str).eq("Shading Devices"),
+                    "Item Name"
+                ].dropna().astype(str).tolist()
+            ))
+        except Exception:
+            shading_device_options = []
+
+        def _render_model_input_item(item, source_df):
+            scenario_i = str(item.get("Scenario", MODEL_INPUT_GLOBAL_SCENARIO))
+            scope_i = str(item.get("Scope", "Scenario"))
+            category_i = str(item.get("Category", "Other / Custom Inputs"))
+            item_type_i = str(item.get("Item Type", category_i))
+            item_name_i = str(item.get("Item Name", "General"))
+            item_key_tuple = (scenario_i, category_i, item_type_i, item_name_i)
+            scope_label_short = "Global" if scope_i == "Global" or scenario_i == MODEL_INPUT_GLOBAL_SCENARIO else "Scenario-Specific"
+            _object_label = f"{item_type_i} | {item_name_i} | {scope_label_short}"
+
+            rows_item = source_df.loc[
+                source_df["Scenario"].astype(str).eq(scenario_i)
+                & source_df["Scope"].astype(str).eq(scope_i)
+                & source_df["Category"].astype(str).eq(category_i)
+                & source_df["Item Type"].astype(str).eq(item_type_i)
+                & source_df["Item Name"].astype(str).eq(item_name_i)
+            ].copy()
+
+            with st.expander(_object_label, expanded=False):
+                item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, category_i, item_type_i, item_name_i)
+                delete_item = st.checkbox("Remove this complete object", key=item_delete_key)
+                if delete_item:
+                    deleted_item_keys.add(item_key_tuple)
+
+                with st.expander("Add custom parameter", expanded=False):
+                    custom_key_prefix = _safe_model_input_key("mi", _editor_key_token, "custom", scenario_i, category_i, item_type_i, item_name_i)
+                    custom_param_name = st.text_input("Custom parameter name", value="", key=f"{custom_key_prefix}_name")
+                    custom_param_unit = st.text_input("Unit", value="-", key=f"{custom_key_prefix}_unit")
+                    custom_param_required = st.checkbox("Required", value=False, key=f"{custom_key_prefix}_required")
+                    custom_param_source = st.selectbox(
+                        "Source Type",
+                        MODEL_INPUT_SOURCE_TYPES,
+                        index=MODEL_INPUT_SOURCE_TYPES.index("Assumption"),
+                        key=f"{custom_key_prefix}_source",
+                    )
+                    custom_param_ref = st.text_input("Source document / reference", value="", key=f"{custom_key_prefix}_source_ref")
+                    add_custom_on_update = st.checkbox(
+                        "Add this custom parameter on update",
+                        value=False,
+                        key=f"{custom_key_prefix}_add",
+                    )
+                    if add_custom_on_update and str(custom_param_name).strip():
+                        custom_rows_to_add.append(_mi_row(
+                            scenario_i, scope_i, category_i, item_type_i, item_name_i,
+                            str(custom_param_name).strip(),
+                            value="", unit=custom_param_unit, required=custom_param_required,
+                            source_type=custom_param_source, source_ref=custom_param_ref,
+                            reference="Custom user-defined parameter", min_check=np.nan, max_check=np.nan,
+                            notes="User-defined parameter",
+                        ))
+
+                for _, row in rows_item.iterrows():
+                    orig_idx = int(row.get("_orig_index", -1))
+                    parameter = str(row.get("Parameter", ""))
+                    key_prefix = _safe_model_input_key("mi", _editor_key_token, orig_idx, scenario_i, category_i, item_type_i, item_name_i, parameter)
+                    if str(row.get("Source Type", "")) == "Assumption":
+                        st.markdown("<div style='background-color:#fff3cd;padding:4px 8px;border-radius:4px;margin-top:6px;'><b>Assumption-tagged input</b></div>", unsafe_allow_html=True)
+                    c1, c2, c3, c4, c5 = st.columns([2.2, 2.0, 0.9, 0.8, 0.8])
+                    with c1:
+                        st.markdown(f"**{parameter}**")
+                    with c2:
+                        value = _value_widget(row, key_prefix)
+                    with c3:
+                        if parameter.strip().lower() == "hot water demand":
+                            _unit_current = str(row.get("Unit", "L/person·day"))
+                            _unit_options = MODEL_INPUT_DHW_DEMAND_UNITS
+                            if _unit_current not in _unit_options:
+                                _unit_options = [_unit_current] + _unit_options
+                            unit = st.selectbox(
+                                "Unit",
+                                _unit_options,
+                                index=_unit_options.index(_unit_current) if _unit_current in _unit_options else 0,
+                                key=f"{key_prefix}_unit",
+                            )
+                        else:
+                            unit = st.text_input("Unit", value=str(row.get("Unit", "")), key=f"{key_prefix}_unit")
+                    with c4:
+                        required = st.checkbox("Required", value=bool(row.get("Required", False)), key=f"{key_prefix}_required")
+                    with c5:
+                        remove_param = st.checkbox("Remove", value=False, key=f"{key_prefix}_remove")
+
+                    c6, c7, c8, c9, c10, c11 = st.columns([1.3, 2.1, 2.0, 0.9, 0.9, 2.2])
+                    with c6:
+                        current_source = str(row.get("Source Type", "Assumption"))
+                        if current_source not in MODEL_INPUT_SOURCE_TYPES:
+                            current_source = "Other"
+                        source_type = st.selectbox("Source Type", MODEL_INPUT_SOURCE_TYPES, index=MODEL_INPUT_SOURCE_TYPES.index(current_source), key=f"{key_prefix}_source")
+                    with c7:
+                        source_ref = st.text_input("Source document / reference", value=str(row.get("Source Document / Reference", "")), key=f"{key_prefix}_source_ref")
+                    with c8:
+                        reference = st.text_input("Reference / target", value=str(row.get("Reference / Target", "")), key=f"{key_prefix}_reference")
+                    with c9:
+                        min_default = "" if pd.isna(row.get("Min Check", np.nan)) else str(row.get("Min Check"))
+                        min_check_txt = st.text_input("Min", value=min_default, key=f"{key_prefix}_min")
+                    with c10:
+                        max_default = "" if pd.isna(row.get("Max Check", np.nan)) else str(row.get("Max Check"))
+                        max_check_txt = st.text_input("Max", value=max_default, key=f"{key_prefix}_max")
+                    with c11:
+                        notes = st.text_input("Notes", value=str(row.get("Notes", "")), key=f"{key_prefix}_notes")
+
+                    try:
+                        min_check = float(str(min_check_txt).replace(",", ".")) if str(min_check_txt).strip() != "" else np.nan
+                    except Exception:
+                        min_check = np.nan
+                    try:
+                        max_check = float(str(max_check_txt).replace(",", ".")) if str(max_check_txt).strip() != "" else np.nan
+                    except Exception:
+                        max_check = np.nan
+
+                    usual_min, usual_max = _model_input_usual_range(category_i, item_type_i, parameter, unit)
+                    if pd.isna(usual_min):
+                        usual_min = row.get("Usual Min", np.nan)
+                    if pd.isna(usual_max):
+                        usual_max = row.get("Usual Max", np.nan)
+                    usual_range_label = _format_usual_range(usual_min, usual_max, unit)
+                    if usual_range_label:
+                        st.caption(f"Usual range for QA: {usual_range_label}")
+                    range_justification = str(row.get("Range Justification", ""))
+                    if _is_model_input_out_of_usual_range(value, usual_min, usual_max):
+                        st.markdown(
+                            "<div style='background-color:#f5b7b1;color:#6b0000;padding:6px 10px;border-radius:4px;margin-top:6px;'>"
+                            "🚩 <b>Value out of usual range.</b> Please review and document why this value is applicable for the project."
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                        range_justification = st.text_input(
+                            "Value out of usual range. Please justify",
+                            value=str(row.get("Range Justification", "")),
+                            key=f"{key_prefix}_range_justification",
+                        )
+
+                    if remove_param:
+                        deleted_orig_indices.add(orig_idx)
+                    else:
+                        edited_rows.append(_mi_row(
+                            scenario_i, scope_i, category_i, item_type_i, item_name_i,
+                            parameter, value=value, unit=unit, required=required,
+                            source_type=source_type, source_ref=source_ref,
+                            reference=reference, min_check=min_check, max_check=max_check,
+                            usual_min=usual_min, usual_max=usual_max, range_justification=range_justification,
+                            notes=notes,
+                        ))
+                    st.markdown("---")
+
         with st.form("model_inputs_qa_structured_form", clear_on_submit=False):
             for cat in MODEL_INPUT_CATEGORIES:
-                # Room Types are rendered inside the General Model Setup expander for easier navigation.
                 if cat == "Room Types":
                     continue
                 if cat == "General Model Setup":
@@ -5566,125 +5980,22 @@ with tab_model_qa:
                     cat_df = mi_edit.loc[mi_edit["Category"].astype(str) == cat].copy()
                 if cat_df.empty:
                     continue
-                with st.expander(cat, expanded=(cat in ["General Model Setup", "Thermal Envelope"])):
-                    if cat == "General Model Setup" and (cat_df["Category"].astype(str) == "Room Types").any():
+                with st.expander(cat, expanded=False):
+                    if cat == "General Model Setup":
                         st.caption("This section contains global simulation setup inputs and room-type definitions. Room types are global by default, but can also be created for the active scenario only.")
                     item_df_keys = cat_df[["Scenario", "Scope", "Category", "Item Type", "Item Name"]].drop_duplicates().reset_index(drop=True)
-                    for _, item in item_df_keys.iterrows():
-                        scenario_i = str(item.get("Scenario", MODEL_INPUT_GLOBAL_SCENARIO))
-                        scope_i = str(item.get("Scope", "Scenario"))
-                        category_i = str(item.get("Category", cat))
-                        item_type_i = str(item.get("Item Type", category_i))
-                        item_name_i = str(item.get("Item Name", "General"))
-                        item_key_tuple = (scenario_i, category_i, item_type_i, item_name_i)
-                        item_title = str(item_name_i) if category_i == "General Model Setup" else f"{category_i} | {item_type_i}: {item_name_i}"
-                        badge = "GLOBAL" if scope_i == "Global" or scenario_i == MODEL_INPUT_GLOBAL_SCENARIO else f"Scenario-specific: {active_selected}"
-
-                        rows_item = cat_df.loc[
-                            cat_df["Scenario"].astype(str).eq(scenario_i)
-                            & cat_df["Scope"].astype(str).eq(scope_i)
-                            & cat_df["Category"].astype(str).eq(category_i)
-                            & cat_df["Item Type"].astype(str).eq(item_type_i)
-                            & cat_df["Item Name"].astype(str).eq(item_name_i)
-                        ].copy()
-
-                        _item_has_assumption = False
-                        try:
-                            _item_has_assumption = rows_item["Source Type"].astype(str).eq("Assumption").any()
-                        except Exception:
-                            _item_has_assumption = False
-                        _item_missing_required = False
-                        try:
-                            _tmp_eval = evaluate_model_inputs_qa_df(rows_item.drop(columns=["_orig_index"], errors="ignore"))
-                            _item_missing_required = _tmp_eval["QA Status"].astype(str).isin(["Missing", "Review"]).any()
-                        except Exception:
-                            _item_missing_required = False
-
-                        _status_suffix = []
-                        if _item_missing_required:
-                            _status_suffix.append("needs review")
-                        if _item_has_assumption:
-                            _status_suffix.append("assumption")
-                        _status_txt = f" — {', '.join(_status_suffix)}" if _status_suffix else ""
-                        _object_label = f"{item_title} | {badge}{_status_txt}"
-                        _object_expanded = bool(category_i == "General Model Setup")
-
-                        # Object-level expander inside the category expander keeps long input registers navigable.
-                        # Streamlit still executes/render widgets inside collapsed expanders, so unchanged rows are preserved on update.
-                        with st.expander(_object_label, expanded=_object_expanded):
-                            item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, category_i, item_type_i, item_name_i)
-                            delete_item = st.checkbox("Remove this complete object", key=item_delete_key)
-                            if delete_item:
-                                deleted_item_keys.add(item_key_tuple)
-
-                            for _, row in rows_item.iterrows():
-                                orig_idx = int(row.get("_orig_index", -1))
-                                key_prefix = _safe_model_input_key("mi", _editor_key_token, orig_idx, scenario_i, category_i, item_type_i, item_name_i, row.get("Parameter", ""))
-                                if str(row.get("Source Type", "")) == "Assumption":
-                                    st.markdown("<div style='background-color:#fff3cd;padding:4px 8px;border-radius:4px;margin-top:6px;'><b>Assumption-tagged input</b></div>", unsafe_allow_html=True)
-                                c1, c2, c3, c4, c5 = st.columns([2.2, 2.0, 0.9, 0.8, 0.8])
-                                with c1:
-                                    parameter = st.text_input("Parameter", value=str(row.get("Parameter", "")), key=f"{key_prefix}_param")
-                                with c2:
-                                    value = _value_widget(row, key_prefix)
-                                with c3:
-                                    if str(parameter).strip().lower() == "hot water demand":
-                                        _unit_current = str(row.get("Unit", "L/person·day"))
-                                        _unit_options = MODEL_INPUT_DHW_DEMAND_UNITS
-                                        if _unit_current not in _unit_options:
-                                            _unit_options = [_unit_current] + _unit_options
-                                        unit = st.selectbox(
-                                            "Unit",
-                                            _unit_options,
-                                            index=_unit_options.index(_unit_current) if _unit_current in _unit_options else 0,
-                                            key=f"{key_prefix}_unit",
-                                        )
-                                    else:
-                                        unit = st.text_input("Unit", value=str(row.get("Unit", "")), key=f"{key_prefix}_unit")
-                                with c4:
-                                    required = st.checkbox("Required", value=bool(row.get("Required", False)), key=f"{key_prefix}_required")
-                                with c5:
-                                    remove_param = st.checkbox("Remove", value=False, key=f"{key_prefix}_remove")
-
-                                c6, c7, c8, c9, c10, c11 = st.columns([1.3, 2.1, 2.0, 0.9, 0.9, 2.2])
-                                with c6:
-                                    current_source = str(row.get("Source Type", "Assumption"))
-                                    if current_source not in MODEL_INPUT_SOURCE_TYPES:
-                                        current_source = "Other"
-                                    source_type = st.selectbox("Source Type", MODEL_INPUT_SOURCE_TYPES, index=MODEL_INPUT_SOURCE_TYPES.index(current_source), key=f"{key_prefix}_source")
-                                with c7:
-                                    source_ref = st.text_input("Source document / reference", value=str(row.get("Source Document / Reference", "")), key=f"{key_prefix}_source_ref")
-                                with c8:
-                                    reference = st.text_input("Reference / target", value=str(row.get("Reference / Target", "")), key=f"{key_prefix}_reference")
-                                with c9:
-                                    min_default = "" if pd.isna(row.get("Min Check", np.nan)) else str(row.get("Min Check"))
-                                    min_check_txt = st.text_input("Min", value=min_default, key=f"{key_prefix}_min")
-                                with c10:
-                                    max_default = "" if pd.isna(row.get("Max Check", np.nan)) else str(row.get("Max Check"))
-                                    max_check_txt = st.text_input("Max", value=max_default, key=f"{key_prefix}_max")
-                                with c11:
-                                    notes = st.text_input("Notes", value=str(row.get("Notes", "")), key=f"{key_prefix}_notes")
-
-                                try:
-                                    min_check = float(str(min_check_txt).replace(",", ".")) if str(min_check_txt).strip() != "" else np.nan
-                                except Exception:
-                                    min_check = np.nan
-                                try:
-                                    max_check = float(str(max_check_txt).replace(",", ".")) if str(max_check_txt).strip() != "" else np.nan
-                                except Exception:
-                                    max_check = np.nan
-
-                                if remove_param:
-                                    deleted_orig_indices.add(orig_idx)
-                                else:
-                                    edited_rows.append(_mi_row(
-                                        scenario_i, scope_i, category_i, item_type_i, item_name_i,
-                                        parameter, value=value, unit=unit, required=required,
-                                        source_type=source_type, source_ref=source_ref,
-                                        reference=reference, min_check=min_check, max_check=max_check,
-                                        notes=notes,
-                                    ))
-                                st.markdown("---")
+                    if cat == "General Model Setup":
+                        general_item_keys = item_df_keys.loc[item_df_keys["Category"].astype(str).eq("General Model Setup")]
+                        room_item_keys = item_df_keys.loc[item_df_keys["Category"].astype(str).eq("Room Types")]
+                        for _, item in general_item_keys.iterrows():
+                            _render_model_input_item(item, cat_df)
+                        if not room_item_keys.empty:
+                            with st.expander("Room Types", expanded=False):
+                                for _, item in room_item_keys.iterrows():
+                                    _render_model_input_item(item, cat_df)
+                    else:
+                        for _, item in item_df_keys.iterrows():
+                            _render_model_input_item(item, cat_df)
 
             c_upd, c_reset = st.columns([1, 1])
             with c_upd:
@@ -5701,12 +6012,18 @@ with tab_model_qa:
             st.rerun()
 
         if update_model_inputs:
-            # Remove full objects selected for deletion.
+            # Remove full objects selected for deletion and append object-level custom parameters.
             rows_filtered = []
-            for rec in edited_rows:
+            seen_param_keys = set()
+            for rec in list(edited_rows) + list(custom_rows_to_add):
                 item_key = (str(rec.get("Scenario")), str(rec.get("Category")), str(rec.get("Item Type")), str(rec.get("Item Name")))
-                if item_key not in deleted_item_keys:
-                    rows_filtered.append(rec)
+                param_key = item_key + (str(rec.get("Parameter")),)
+                if item_key in deleted_item_keys:
+                    continue
+                if param_key in seen_param_keys:
+                    continue
+                seen_param_keys.add(param_key)
+                rows_filtered.append(rec)
             combined = pd.concat([mi_keep_other, pd.DataFrame(rows_filtered)], ignore_index=True)
             combined = sanitize_model_inputs_qa_df(combined)
             st.session_state["model_inputs_qa_df"] = combined
@@ -5714,21 +6031,6 @@ with tab_model_qa:
             st.rerun()
 
         st.markdown("---")
-        st.write("### QA review table")
-        qa_eval = evaluate_model_inputs_qa_df(model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_selected))
-        qa_cols = [
-            "Scope", "Category", "Item Type", "Item Name", "Parameter", "Value", "Unit", "Required", "Source Type",
-            "Source Document / Reference", "Reference / Target", "QA Status", "QA Message", "Notes"
-        ]
-        try:
-            st.dataframe(
-                qa_eval[qa_cols].style.apply(_style_model_inputs_qa, axis=1),
-                use_container_width=True,
-                height=560,
-            )
-        except Exception:
-            st.dataframe(qa_eval[qa_cols], use_container_width=True, height=560)
-
         with st.expander("QA interpretation", expanded=False):
             st.markdown(
                 """
@@ -5736,11 +6038,26 @@ with tab_model_qa:
 **Missing** means a required input has no value.  
 **Assumption** means the value is explicitly tagged as an assumption and should be reviewed.  
 **Review** means a numeric value is outside the configured sanity range.  
+**Out of usual range** means a numeric value is outside the defined usual QA range and should be justified.  
 **OK** means the field is filled and has no current sanity-check warning.
 
 The QA is intended as traceability and model-quality control. It does not replace formal ASHRAE 90.1, LEED, local-code, or certification documentation.
                 """
             )
+            st.write("### QA review table")
+            qa_eval = evaluate_model_inputs_qa_df(model_inputs_df_for_scenario(st.session_state.get("model_inputs_qa_df"), active_selected))
+            qa_cols = [
+                "Scope", "Category", "Item Type", "Item Name", "Parameter", "Value", "Unit", "Required", "Source Type",
+                "Source Document / Reference", "Reference / Target", "Usual Min", "Usual Max", "Range Justification", "QA Status", "QA Message", "Notes"
+            ]
+            try:
+                st.dataframe(
+                    qa_eval[qa_cols].style.apply(_style_model_inputs_qa, axis=1),
+                    use_container_width=True,
+                    height=560,
+                )
+            except Exception:
+                st.dataframe(qa_eval[qa_cols], use_container_width=True, height=560)
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
