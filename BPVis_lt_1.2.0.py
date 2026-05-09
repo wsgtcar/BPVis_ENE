@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.1",
+    page_title="WSGT_BPVis_ENE 2.2.2",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.1")
+st.sidebar.write("Version 2.2.2")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.1"
+REPORT_VERSION = "2.2.2"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3331,7 +3331,10 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     out.loc[out["Scenario"].astype(str).eq(MODEL_INPUT_GLOBAL_SCENARIO), "Scope"] = "Global"
     out.loc[out["Scope"].astype(str).str.lower().eq("global"), "Scenario"] = MODEL_INPUT_GLOBAL_SCENARIO
     out["Category"] = out["Category"].replace("", "Other / Custom Inputs")
-    out["Item Type"] = out["Item Type"].replace("", out["Category"])
+    # Do not use Series as the replacement value in Series.replace(); pandas raises
+    # ValueError for scalar-to-Series replacement. Fill row-wise with masks instead.
+    _item_type_empty = out["Item Type"].astype(str).str.strip().eq("")
+    out.loc[_item_type_empty, "Item Type"] = out.loc[_item_type_empty, "Category"].astype(str)
     out["Item Name"] = out["Item Name"].replace("", "General")
     out["Source Type"] = out["Source Type"].replace("", "Assumption")
 
