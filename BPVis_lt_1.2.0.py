@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.12",
+    page_title="WSGT_BPVis_ENE 2.2.13",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.12")
+st.sidebar.write("Version 2.2.13")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.12"
+REPORT_VERSION = "2.2.13"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -6035,6 +6035,7 @@ with tab_model_qa:
         deleted_orig_indices = set()
         deleted_item_keys = set()
         duplicate_item_requests = []
+        remove_item_requests = []
 
         def _value_widget(row, key_prefix):
             param = str(row.get("Parameter", ""))
@@ -6149,32 +6150,41 @@ with tab_model_qa:
             ].copy()
 
             with st.expander(_object_label, expanded=False):
+                st.markdown(f"### **{item_name_i}**")
+
                 item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, category_i, item_type_i, item_name_i)
                 item_duplicate_key = _safe_model_input_key("mi", _editor_key_token, "duplicate_item", scenario_i, category_i, item_type_i, item_name_i)
                 item_duplicate_name_key = _safe_model_input_key("mi", _editor_key_token, "duplicate_item_name", scenario_i, category_i, item_type_i, item_name_i)
-                dcol1, dcol2 = st.columns([1, 1])
-                with dcol1:
-                    delete_item = st.checkbox("Remove this complete object", key=item_delete_key)
+
                 duplicate_item = False
+                remove_item = False
                 duplicate_item_name = f"{item_name_i} Copy"
-                with dcol2:
-                    if category_i != "General Model Setup":
-                        duplicate_item_name = st.text_input(
-                            "Name for duplicate",
-                            value=f"{item_name_i} Copy",
-                            key=item_duplicate_name_key,
-                            help="Optional. Edit this name before clicking Duplicate. If the name already exists, the app adds a numeric suffix automatically.",
-                        )
-                        duplicate_item = st.form_submit_button(
-                            "Duplicate this complete object",
-                            key=item_duplicate_key,
-                            use_container_width=True,
-                            help="Creates a copy of this object using the current form values. The copied object receives the name above and keeps the same Global / Scenario-Specific scope.",
-                        )
-                    else:
-                        st.caption("General setup is a single global object and is not duplicated.")
-                if delete_item:
+
+                if category_i != "General Model Setup":
+                    duplicate_item_name = st.text_input(
+                        "Name for duplicate",
+                        value=f"{item_name_i} Copy",
+                        key=item_duplicate_name_key,
+                        help="Optional. Edit this name before clicking Duplicate. If the name already exists, the app adds a numeric suffix automatically.",
+                    )
+                    duplicate_item = st.form_submit_button(
+                        "Duplicate this complete object",
+                        key=item_duplicate_key,
+                        use_container_width=True,
+                        help="Creates a copy of this object using the current form values. The copied object receives the name above and keeps the same Global / Scenario-Specific scope.",
+                    )
+                    remove_item = st.form_submit_button(
+                        "Remove this complete object",
+                        key=item_delete_key,
+                        use_container_width=True,
+                        help="Removes this complete object after the form is submitted.",
+                    )
+                else:
+                    st.caption("General setup is a single global object and is not duplicated or removed.")
+
+                if remove_item:
                     deleted_item_keys.add(item_key_tuple)
+                    remove_item_requests.append(item_key_tuple)
                 if duplicate_item:
                     duplicate_item_requests.append((item_key_tuple, str(duplicate_item_name or "").strip()))
 
@@ -6404,6 +6414,16 @@ with tab_model_qa:
             while f"{alt_base} {n}" in existing_names:
                 n += 1
             return f"{alt_base} {n}"
+
+        if remove_item_requests:
+            # A remove button is a form submit action. Commit the current form values first,
+            # excluding the selected object, so unrelated unsaved edits are not lost.
+            rows_filtered = _model_input_filtered_rows_current_form()
+            combined = pd.concat([mi_keep_other, pd.DataFrame(rows_filtered)], ignore_index=True)
+            combined = sanitize_model_inputs_qa_df(combined)
+            st.session_state["model_inputs_qa_df"] = combined
+            st.session_state["_model_inputs_qa_flash"] = "updated"
+            st.rerun()
 
         if duplicate_item_requests:
             # A duplicate button is a form submit action. Commit the current form values first,
