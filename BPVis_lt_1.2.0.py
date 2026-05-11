@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.16",
+    page_title="WSGT_BPVis_ENE 2.2.17",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.16")
+st.sidebar.write("Version 2.2.17")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.16"
+REPORT_VERSION = "2.2.17"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3144,8 +3144,7 @@ def _model_input_unit_options(category: str, item_type: str, parameter: str, cur
         "simulation timestep": ["min", "h"],
         "annual simulation period": ["months", "years", "days"],
         "modelled floor area": ["m²"],
-        "area": ["m²"],
-        "area / quantity": ["m²", "m", "piece", "unit"],
+        "area / quantity": ["m²", "m", "piece", "unit", "location / area", "-"],
         "main performance value": ["-", "W/m²K", "W/m²", "kW", "kWh/a", "%"],
         "occupancy density": ["m²/person", "person/m²", "person/room"],
         "lighting power density": ["W/m²", "W/person", "W/room"],
@@ -3223,7 +3222,12 @@ def _model_input_unit_options(category: str, item_type: str, parameter: str, cur
         "ground temperature / boundary condition": ["°C", "rule", "-"],
         "modelling rule": ["rule", "-"],
     }
-    if par in exact:
+    if par == "area":
+        if cat == "thermal envelope":
+            opts = ["m²", "location / area", "zone / location", "-", "Other / Custom"]
+        else:
+            opts = ["m²"]
+    elif par in exact:
         opts = list(exact[par])
     elif "schedule" in par:
         opts = ["schedule name", "h/day", "h/week", "full-load hours/a", "-"]
@@ -3377,31 +3381,33 @@ def envelope_component_template(component_type: str, item_name: str, scenario: s
     ct = str(component_type)
     if ct == "External Walls":
         params = [
-            ("Area", "m²", True, "Design Document", "Envelope schedule / model geometry", "", 0, None),
+            ("Area", "m²", False, "Design Document", "Envelope schedule / model geometry; or enter a location/use descriptor such as Underground", "Optional: numeric area or generic location where this construction is used", 0, None),
             ("U-value", "W/m²K", True, "Design Document", "U-value calculation / envelope specification", "Compare with code/baseline", 0.05, 2.5),
-            ("Thermal Mass", "-", False, "Design Document", "Construction build-up / material layer schedule", "Very low / low / medium / high / very high, or enter thermal capacity as custom value", None, None),
             ("Thermal bridge allowance", "% or W/K", False, "Calculation", "Envelope calculation", "Document method", 0, 50),
+            ("Thermal Mass", "-", False, "Design Document", "Construction build-up / material layer schedule", "Very low / low / medium / high / very high, or enter thermal capacity as custom value", None, None),
             ("Solar absorptance", "-", False, "Assumption", "Material specification", "", 0, 1),
             ("Orientation / exposure", "-", False, "Design Document", "Model geometry", "", None, None),
         ]
     elif ct == "Roofs":
         params = [
-            ("Area", "m²", True, "Design Document", "Envelope schedule / model geometry", "", 0, None),
+            ("Area", "m²", False, "Design Document", "Envelope schedule / model geometry; or enter a location/use descriptor such as Typical roof / podium roof", "Optional: numeric area or generic location where this construction is used", 0, None),
             ("U-value", "W/m²K", True, "Design Document", "U-value calculation / envelope specification", "Compare with code/baseline", 0.04, 1.5),
+            ("Thermal bridge allowance", "% or W/K", False, "Calculation", "Envelope calculation", "Document method", 0, 50),
             ("Thermal Mass", "-", False, "Design Document", "Construction build-up / material layer schedule", "Very low / low / medium / high / very high, or enter thermal capacity as custom value", None, None),
             ("Solar absorptance", "-", False, "Assumption", "Roof finish specification", "", 0, 1),
             ("Green roof / cool roof assumption", "yes/no/rule", False, "Design Document", "Roof concept", "", None, None),
         ]
     elif ct == "Floors / Slabs":
         params = [
-            ("Area", "m²", True, "Design Document", "Envelope schedule / model geometry", "", 0, None),
+            ("Area", "m²", False, "Design Document", "Envelope schedule / model geometry; or enter a location/use descriptor such as Underground / against ground", "Optional: numeric area or generic location where this construction is used", 0, None),
             ("U-value", "W/m²K", True, "Design Document", "U-value calculation / envelope specification", "Compare with code/baseline", 0.04, 2.0),
+            ("Thermal bridge allowance", "% or W/K", False, "Calculation", "Envelope calculation", "Document method", 0, 50),
             ("Thermal Mass", "-", False, "Design Document", "Construction build-up / material layer schedule", "Very low / low / medium / high / very high, or enter thermal capacity as custom value", None, None),
             ("Ground temperature / boundary condition", "-", False, "Simulation Model", "Model input", "", None, None),
         ]
     elif ct == "Glazings":
         params = [
-            ("Area", "m²", True, "Design Document", "Façade schedule / model geometry", "", 0, None),
+            ("Area", "m²", False, "Design Document", "Façade schedule / model geometry; or enter a location/use descriptor such as North façade / Atrium", "Optional: numeric area or generic location where this glazing type is used", 0, None),
             ("U-value", "W/m²K", True, "Design Document", "Glazing specification", "Compare with code/baseline", 0.5, 6.0),
             ("SHGC / g-value", "-", True, "Design Document", "Glazing specification", "", 0.05, 0.9),
             ("Visible transmittance", "-", False, "Design Document", "Glazing specification", "", 0.05, 0.9),
@@ -3556,9 +3562,12 @@ def _model_input_usual_range(category: str, item_type: str, parameter: str, unit
 
     # Envelope components.
     if cat == "thermal envelope":
+        # Area can also be a generic location/use descriptor (e.g. Underground).
+        # Only apply numeric area plausibility ranges when the selected unit is m².
+        area_range = (1.0, 500000.0) if ("m²" in u or "m2" in u) else (np.nan, np.nan)
         if it == "external walls":
             ranges = {
-                "area": (1.0, 500000.0),
+                "area": area_range,
                 "u-value": (0.15, 0.25),
                 "thermal bridge allowance": (0.0, 20.0),
                 "solar absorptance": (0.20, 0.90),
@@ -3566,20 +3575,22 @@ def _model_input_usual_range(category: str, item_type: str, parameter: str, unit
             return ranges.get(p, (np.nan, np.nan))
         if it == "roofs":
             ranges = {
-                "area": (1.0, 500000.0),
+                "area": area_range,
                 "u-value": (0.08, 0.25),
+                "thermal bridge allowance": (0.0, 20.0),
                 "solar absorptance": (0.20, 0.90),
             }
             return ranges.get(p, (np.nan, np.nan))
         if it == "floors / slabs":
             ranges = {
-                "area": (1.0, 500000.0),
+                "area": area_range,
                 "u-value": (0.10, 0.35),
+                "thermal bridge allowance": (0.0, 20.0),
             }
             return ranges.get(p, (np.nan, np.nan))
         if it == "glazings":
             ranges = {
-                "area": (1.0, 300000.0),
+                "area": (1.0, 300000.0) if ("m²" in u or "m2" in u) else (np.nan, np.nan),
                 "u-value": (0.70, 1.80),
                 "shgc / g-value": (0.20, 0.60),
                 "visible transmittance": (0.35, 0.75),
@@ -3588,7 +3599,7 @@ def _model_input_usual_range(category: str, item_type: str, parameter: str, unit
             return ranges.get(p, (np.nan, np.nan))
         if it == "external doors":
             ranges = {
-                "area": (0.5, 10000.0),
+                "area": (0.5, 10000.0) if ("m²" in u or "m2" in u) else (np.nan, np.nan),
                 "u-value": (0.80, 2.50),
             }
             return ranges.get(p, (np.nan, np.nan))
@@ -3669,6 +3680,52 @@ def _apply_model_input_usual_ranges(df: pd.DataFrame) -> pd.DataFrame:
         if pd.notna(mx):
             out.at[idx, "Usual Max"] = float(mx)
     return out
+
+
+def _order_model_inputs_qa_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep standard Model Inputs QA parameters in a stable, readable order.
+
+    This is especially important for Thermal Envelope objects, where Thermal Mass
+    should be displayed after Thermal bridge allowance. Unknown/custom parameters
+    keep their relative order after the standard parameters.
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy().reset_index(drop=True)
+    out["_mi_order_orig"] = range(len(out))
+
+    preferred = {
+        ("Thermal Envelope", "External Walls"): [
+            "ID", "Area", "U-value", "Thermal bridge allowance", "Thermal Mass",
+            "Solar absorptance", "Orientation / exposure",
+        ],
+        ("Thermal Envelope", "Roofs"): [
+            "ID", "Area", "U-value", "Thermal bridge allowance", "Thermal Mass",
+            "Solar absorptance", "Green roof / cool roof assumption",
+        ],
+        ("Thermal Envelope", "Floors / Slabs"): [
+            "ID", "Area", "U-value", "Thermal bridge allowance", "Thermal Mass",
+            "Ground temperature / boundary condition",
+        ],
+        ("Thermal Envelope", "Glazings"): [
+            "ID", "Area", "U-value", "SHGC / g-value", "Visible transmittance",
+            "Frame fraction", "Orientation", "Associated shading device", "Shading device / control",
+        ],
+    }
+
+    def _rank(row):
+        key = (str(row.get("Category", "")), str(row.get("Item Type", "")))
+        par = str(row.get("Parameter", ""))
+        order = preferred.get(key, ["ID"])
+        try:
+            return order.index(par)
+        except ValueError:
+            return 1000 + int(row.get("_mi_order_orig", 0))
+
+    out["_mi_param_order"] = out.apply(_rank, axis=1)
+    sort_cols = ["Scenario", "Scope", "Category", "Item Type", "Item Name", "_mi_param_order", "_mi_order_orig"]
+    out = out.sort_values(sort_cols, kind="stable").drop(columns=["_mi_param_order", "_mi_order_orig"])
+    return out.reset_index(drop=True)
 
 
 def _is_model_input_out_of_usual_range(value, usual_min, usual_max) -> bool:
@@ -3771,6 +3828,14 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
         return s in {"1", "true", "yes", "y", "x", "required"}
 
     out["Required"] = out["Required"].apply(_to_bool)
+    # Thermal envelope area/location rows are optional: they can hold a numeric area or
+    # a generic location descriptor (e.g. Underground / North façade).
+    try:
+        _env_area_mask = out["Category"].astype(str).eq("Thermal Envelope") & out["Parameter"].astype(str).isin(["Area", "Area / quantity"])
+        out.loc[_env_area_mask, "Required"] = False
+        out.loc[_env_area_mask & out["Reference / Target"].astype(str).str.strip().eq(""), "Reference / Target"] = "Optional: numeric area or generic location where this construction/component is used"
+    except Exception:
+        pass
     for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
@@ -3881,6 +3946,53 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
                 ))
         if daylight_rows:
             out = pd.concat([out, pd.DataFrame(daylight_rows)], ignore_index=True)
+            out = out[MODEL_INPUT_QA_COLUMNS].copy()
+            for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+    except Exception:
+        pass
+
+    # Backwards compatibility for v2.2.17: ensure existing Roof and Floor/Slab
+    # construction objects include thermal bridge allowance before Thermal Mass.
+    try:
+        opaque_tba_types = ["Roofs", "Floors / Slabs"]
+        env_items = out.loc[
+            out["Category"].astype(str).eq("Thermal Envelope")
+            & out["Item Type"].astype(str).isin(opaque_tba_types),
+            ["Scenario", "Scope", "Item Type", "Item Name"]
+        ].drop_duplicates()
+        tba_rows = []
+        for _, item in env_items.iterrows():
+            sc = str(item.get("Scenario", "Base"))
+            scope = str(item.get("Scope", "Scenario")) or "Scenario"
+            it = str(item.get("Item Type", "Roofs"))
+            nm = str(item.get("Item Name", it))
+            existing_params = set(out.loc[
+                out["Scenario"].astype(str).eq(sc)
+                & out["Category"].astype(str).eq("Thermal Envelope")
+                & out["Item Type"].astype(str).eq(it)
+                & out["Item Name"].astype(str).eq(nm),
+                "Parameter"
+            ].astype(str))
+            if "Thermal bridge allowance" not in existing_params:
+                tba_rows.append(_mi_row(
+                    sc,
+                    scope if scope in ["Global", "Scenario"] else "Scenario",
+                    "Thermal Envelope",
+                    it,
+                    nm,
+                    "Thermal bridge allowance",
+                    value="",
+                    unit="% or W/K",
+                    required=False,
+                    source_type="Calculation",
+                    source_ref="Envelope calculation",
+                    reference="Document method",
+                    min_check=0,
+                    max_check=50,
+                ))
+        if tba_rows:
+            out = pd.concat([out, pd.DataFrame(tba_rows)], ignore_index=True)
             out = out[MODEL_INPUT_QA_COLUMNS].copy()
             for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
                 out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -4067,6 +4179,7 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
     out = _apply_model_input_usual_ranges(out)
     for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
+    out = _order_model_inputs_qa_rows(out)
     return out.reset_index(drop=True)
 
 
@@ -6228,6 +6341,13 @@ with tab_model_qa:
             value = str(row.get("Value", ""))
             p_low = param.lower()
             u_low = unit.lower()
+            if p_low == "area" and str(row.get("Category", "")).strip() == "Thermal Envelope":
+                return st.text_input(
+                    "Value",
+                    value=value,
+                    key=f"{key_prefix}_value",
+                    help="Enter the numeric area in m², or select a location/area unit and enter a descriptor such as Underground, North façade, Podium roof, etc.",
+                )
             if p_low in ["served room types", "served room types / zones"]:
                 opts = [str(x).strip() for x in room_type_options if str(x).strip()]
                 current_values = _split_model_input_multi_value(value)
