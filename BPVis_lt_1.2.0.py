@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.15",
+    page_title="WSGT_BPVis_ENE 2.2.16",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.15")
+st.sidebar.write("Version 2.2.16")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.15"
+REPORT_VERSION = "2.2.16"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3159,6 +3159,7 @@ def _model_input_unit_options(category: str, item_type: str, parameter: str, cur
         "night setback / setup": ["°C", "K", "rule"],
         "occupancy schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
         "lighting schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
+        "daylight-controlled dimming": ["yes/no"],
         "equipment schedule": ["schedule name", "h/day", "h/week", "full-load hours/a", "-"],
         "outdoor air per person": ["L/s.person", "m³/h.person"],
         "outdoor air per area": ["L/s.m²", "m³/h.m²"],
@@ -3169,6 +3170,7 @@ def _model_input_unit_options(category: str, item_type: str, parameter: str, cur
         "natural ventilation rule": ["rule", "-"],
         "u-value": ["W/m²K"],
         "thermal bridge allowance": ["%", "W/K", "W/mK", "W/m²K"],
+        "thermal mass": ["-", "kJ/m²K", "Wh/m²K", "kJ/m³K", "MJ/m³K"],
         "solar absorptance": ["-", "%"],
         "orientation / exposure": ["-", "°"],
         "orientation": ["-", "°"],
@@ -3359,6 +3361,7 @@ def room_type_template(item_name: str, scenario: str, scope: str = "Global") -> 
         _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Night setback / setup", unit="°C or rule", required=False, source_type="Assumption", reference="Document unoccupied temperature control logic"),
         _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Occupancy schedule", unit="-", required=True, source_type="Design Document", source_ref="Operation concept / design brief", reference="Weekday/weekend and holiday operation"),
         _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Lighting schedule", unit="-", required=True, source_type="Assumption", source_ref="Operation concept / lighting controls", reference="Equivalent full-load hours or schedule name"),
+        _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Daylight-Controlled dimming", value="No", unit="yes/no", required=False, source_type="Design Document", source_ref="Lighting control concept / room data sheet", reference="Tick yes if daylight sensors or daylight-linked automatic dimming are modelled"),
         _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Equipment schedule", unit="-", required=True, source_type="Assumption", source_ref="Operation concept / equipment load assumptions", reference="Equivalent full-load hours or schedule name"),
         _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Outdoor air per person", unit="L/s.person", required=False, source_type="Standard / Reference", source_ref="ASHRAE 62.1 / EN 16798 / project brief", min_check=0, max_check=50),
         _mi_row(sc, scope_value, "Room Types", "Room Type", item_name, "Outdoor air per area", unit="L/s.m²", required=False, source_type="Standard / Reference", source_ref="ASHRAE 62.1 / EN 16798 / project brief", min_check=0, max_check=10),
@@ -3376,6 +3379,7 @@ def envelope_component_template(component_type: str, item_name: str, scenario: s
         params = [
             ("Area", "m²", True, "Design Document", "Envelope schedule / model geometry", "", 0, None),
             ("U-value", "W/m²K", True, "Design Document", "U-value calculation / envelope specification", "Compare with code/baseline", 0.05, 2.5),
+            ("Thermal Mass", "-", False, "Design Document", "Construction build-up / material layer schedule", "Very low / low / medium / high / very high, or enter thermal capacity as custom value", None, None),
             ("Thermal bridge allowance", "% or W/K", False, "Calculation", "Envelope calculation", "Document method", 0, 50),
             ("Solar absorptance", "-", False, "Assumption", "Material specification", "", 0, 1),
             ("Orientation / exposure", "-", False, "Design Document", "Model geometry", "", None, None),
@@ -3384,6 +3388,7 @@ def envelope_component_template(component_type: str, item_name: str, scenario: s
         params = [
             ("Area", "m²", True, "Design Document", "Envelope schedule / model geometry", "", 0, None),
             ("U-value", "W/m²K", True, "Design Document", "U-value calculation / envelope specification", "Compare with code/baseline", 0.04, 1.5),
+            ("Thermal Mass", "-", False, "Design Document", "Construction build-up / material layer schedule", "Very low / low / medium / high / very high, or enter thermal capacity as custom value", None, None),
             ("Solar absorptance", "-", False, "Assumption", "Roof finish specification", "", 0, 1),
             ("Green roof / cool roof assumption", "yes/no/rule", False, "Design Document", "Roof concept", "", None, None),
         ]
@@ -3391,6 +3396,7 @@ def envelope_component_template(component_type: str, item_name: str, scenario: s
         params = [
             ("Area", "m²", True, "Design Document", "Envelope schedule / model geometry", "", 0, None),
             ("U-value", "W/m²K", True, "Design Document", "U-value calculation / envelope specification", "Compare with code/baseline", 0.04, 2.0),
+            ("Thermal Mass", "-", False, "Design Document", "Construction build-up / material layer schedule", "Very low / low / medium / high / very high, or enter thermal capacity as custom value", None, None),
             ("Ground temperature / boundary condition", "-", False, "Simulation Model", "Model input", "", None, None),
         ]
     elif ct == "Glazings":
@@ -3832,6 +3838,94 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
                     ))
         if delivery_rows:
             out = pd.concat([out, pd.DataFrame(delivery_rows)], ignore_index=True)
+            out = out[MODEL_INPUT_QA_COLUMNS].copy()
+            for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+    except Exception:
+        pass
+
+    # Backwards compatibility for v2.2.16: ensure existing Room Type objects
+    # include the standard daylight-controlled dimming parameter.
+    try:
+        room_items = out.loc[
+            out["Category"].astype(str).eq("Room Types")
+            & out["Item Type"].astype(str).eq("Room Type"),
+            ["Scenario", "Scope", "Item Name"]
+        ].drop_duplicates()
+        daylight_rows = []
+        for _, item in room_items.iterrows():
+            sc = str(item.get("Scenario", "Base"))
+            scope = str(item.get("Scope", "Scenario")) or "Scenario"
+            nm = str(item.get("Item Name", "Room Type"))
+            existing_params = set(out.loc[
+                out["Scenario"].astype(str).eq(sc)
+                & out["Category"].astype(str).eq("Room Types")
+                & out["Item Type"].astype(str).eq("Room Type")
+                & out["Item Name"].astype(str).eq(nm),
+                "Parameter"
+            ].astype(str))
+            if "Daylight-Controlled dimming" not in existing_params:
+                daylight_rows.append(_mi_row(
+                    sc,
+                    scope if scope in ["Global", "Scenario"] else "Scenario",
+                    "Room Types",
+                    "Room Type",
+                    nm,
+                    "Daylight-Controlled dimming",
+                    value="No",
+                    unit="yes/no",
+                    required=False,
+                    source_type="Design Document",
+                    source_ref="Lighting control concept / room data sheet",
+                    reference="Tick yes if daylight sensors or daylight-linked automatic dimming are modelled",
+                ))
+        if daylight_rows:
+            out = pd.concat([out, pd.DataFrame(daylight_rows)], ignore_index=True)
+            out = out[MODEL_INPUT_QA_COLUMNS].copy()
+            for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+    except Exception:
+        pass
+
+    # Backwards compatibility for v2.2.16: ensure existing opaque envelope
+    # construction objects include the standard Thermal Mass parameter.
+    try:
+        thermal_mass_types = ["External Walls", "Roofs", "Floors / Slabs"]
+        env_items = out.loc[
+            out["Category"].astype(str).eq("Thermal Envelope")
+            & out["Item Type"].astype(str).isin(thermal_mass_types),
+            ["Scenario", "Scope", "Item Type", "Item Name"]
+        ].drop_duplicates()
+        tm_rows = []
+        for _, item in env_items.iterrows():
+            sc = str(item.get("Scenario", "Base"))
+            scope = str(item.get("Scope", "Scenario")) or "Scenario"
+            it = str(item.get("Item Type", "External Walls"))
+            nm = str(item.get("Item Name", it))
+            existing_params = set(out.loc[
+                out["Scenario"].astype(str).eq(sc)
+                & out["Category"].astype(str).eq("Thermal Envelope")
+                & out["Item Type"].astype(str).eq(it)
+                & out["Item Name"].astype(str).eq(nm),
+                "Parameter"
+            ].astype(str))
+            if "Thermal Mass" not in existing_params:
+                tm_rows.append(_mi_row(
+                    sc,
+                    scope if scope in ["Global", "Scenario"] else "Scenario",
+                    "Thermal Envelope",
+                    it,
+                    nm,
+                    "Thermal Mass",
+                    value="",
+                    unit="-",
+                    required=False,
+                    source_type="Design Document",
+                    source_ref="Construction build-up / material layer schedule",
+                    reference="Very low / low / medium / high / very high, or enter thermal capacity as custom value",
+                ))
+        if tm_rows:
+            out = pd.concat([out, pd.DataFrame(tm_rows)], ignore_index=True)
             out = out[MODEL_INPUT_QA_COLUMNS].copy()
             for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
                 out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -6149,6 +6243,44 @@ with tab_model_qa:
                     key=f"{key_prefix}_value_rooms",
                     help="Select all Room Type objects served by this AHU.",
                 ))
+            if p_low == "daylight-controlled dimming":
+                checked = str(value).strip().lower() in {"yes", "true", "1", "x"}
+                return "Yes" if st.checkbox(
+                    "Value",
+                    value=checked,
+                    key=f"{key_prefix}_value_daylight_dimming",
+                    help="Tick if automatic daylight-linked dimming is included in the simulation for this room type.",
+                ) else "No"
+            if p_low == "thermal mass":
+                mass_options = [
+                    "",
+                    "Very Low",
+                    "Low",
+                    "Medium",
+                    "High",
+                    "Very High",
+                    "Other / Custom thermal capacity",
+                ]
+                current_value = value.strip()
+                current_l = current_value.lower()
+                option_lookup = {opt.lower(): opt for opt in mass_options}
+                selected_default = option_lookup.get(current_l, "Other / Custom thermal capacity" if current_value else "")
+                selected = st.selectbox(
+                    "Value",
+                    mass_options,
+                    index=mass_options.index(selected_default),
+                    key=f"{key_prefix}_value_thermal_mass_select",
+                    help="Choose a qualitative thermal-mass class or enter a numeric thermal-capacity value below.",
+                )
+                custom_default = "" if current_l in option_lookup else current_value
+                custom_value = st.text_input(
+                    "Custom thermal capacity value",
+                    value=custom_default,
+                    key=f"{key_prefix}_value_thermal_mass_custom",
+                    help="Optional numeric value, e.g. 165. Use the Unit field to select kJ/m²K, Wh/m²K, kJ/m³K, etc.",
+                )
+                custom_value = str(custom_value or "").strip()
+                return custom_value if custom_value else selected
             if p_low in ["heating delivery", "cooling delivery"]:
                 delivery_options = [
                     "",
