@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.10",
+    page_title="WSGT_BPVis_ENE 2.2.12",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.10")
+st.sidebar.write("Version 2.2.12")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.10"
+REPORT_VERSION = "2.2.12"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -6034,6 +6034,7 @@ with tab_model_qa:
         edited_rows = []
         deleted_orig_indices = set()
         deleted_item_keys = set()
+        duplicate_item_requests = []
 
         def _value_widget(row, key_prefix):
             param = str(row.get("Parameter", ""))
@@ -6149,9 +6150,33 @@ with tab_model_qa:
 
             with st.expander(_object_label, expanded=False):
                 item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, category_i, item_type_i, item_name_i)
-                delete_item = st.checkbox("Remove this complete object", key=item_delete_key)
+                item_duplicate_key = _safe_model_input_key("mi", _editor_key_token, "duplicate_item", scenario_i, category_i, item_type_i, item_name_i)
+                item_duplicate_name_key = _safe_model_input_key("mi", _editor_key_token, "duplicate_item_name", scenario_i, category_i, item_type_i, item_name_i)
+                dcol1, dcol2 = st.columns([1, 1])
+                with dcol1:
+                    delete_item = st.checkbox("Remove this complete object", key=item_delete_key)
+                duplicate_item = False
+                duplicate_item_name = f"{item_name_i} Copy"
+                with dcol2:
+                    if category_i != "General Model Setup":
+                        duplicate_item_name = st.text_input(
+                            "Name for duplicate",
+                            value=f"{item_name_i} Copy",
+                            key=item_duplicate_name_key,
+                            help="Optional. Edit this name before clicking Duplicate. If the name already exists, the app adds a numeric suffix automatically.",
+                        )
+                        duplicate_item = st.form_submit_button(
+                            "Duplicate this complete object",
+                            key=item_duplicate_key,
+                            use_container_width=True,
+                            help="Creates a copy of this object using the current form values. The copied object receives the name above and keeps the same Global / Scenario-Specific scope.",
+                        )
+                    else:
+                        st.caption("General setup is a single global object and is not duplicated.")
                 if delete_item:
                     deleted_item_keys.add(item_key_tuple)
+                if duplicate_item:
+                    duplicate_item_requests.append((item_key_tuple, str(duplicate_item_name or "").strip()))
 
                 with st.expander("Add custom parameter", expanded=False):
                     custom_key_prefix = _safe_model_input_key("mi", _editor_key_token, "custom", scenario_i, category_i, item_type_i, item_name_i)
@@ -6343,19 +6368,73 @@ with tab_model_qa:
             st.session_state["_model_inputs_qa_flash"] = "updated"
             st.rerun()
 
-        if update_model_inputs:
-            # Remove full objects selected for deletion and append object-level custom parameters.
-            rows_filtered = []
-            seen_param_keys = set()
+        def _model_input_filtered_rows_current_form():
+            """Return edited/custom rows from the current form, excluding removed objects and duplicate parameters."""
+            rows_filtered_local = []
+            seen_param_keys_local = set()
             for rec in list(edited_rows) + list(custom_rows_to_add):
                 item_key = (str(rec.get("Scenario")), str(rec.get("Category")), str(rec.get("Item Type")), str(rec.get("Item Name")))
                 param_key = item_key + (str(rec.get("Parameter")),)
                 if item_key in deleted_item_keys:
                     continue
-                if param_key in seen_param_keys:
+                if param_key in seen_param_keys_local:
                     continue
-                seen_param_keys.add(param_key)
-                rows_filtered.append(rec)
+                seen_param_keys_local.add(param_key)
+                rows_filtered_local.append(rec)
+            return rows_filtered_local
+
+        def _model_input_next_copy_name(existing_rows: list, item_key: tuple, requested_name: str = "") -> str:
+            """Create a stable unique object name for a duplicated Model Inputs QA object."""
+            scenario_i, category_i, item_type_i, item_name_i = [str(x) for x in item_key]
+            existing_names = {
+                str(r.get("Item Name", ""))
+                for r in existing_rows
+                if str(r.get("Scenario", "")) == scenario_i
+                and str(r.get("Category", "")) == category_i
+                and str(r.get("Item Type", "")) == item_type_i
+            }
+            requested = str(requested_name or "").strip()
+            base = requested if requested else f"{item_name_i} Copy"
+            if base not in existing_names:
+                return base
+            alt_base = f"{base} Copy"
+            if alt_base not in existing_names:
+                return alt_base
+            n = 2
+            while f"{alt_base} {n}" in existing_names:
+                n += 1
+            return f"{alt_base} {n}"
+
+        if duplicate_item_requests:
+            # A duplicate button is a form submit action. Commit the current form values first,
+            # then add a copy of the requested object so unsaved edits are not lost.
+            rows_filtered = _model_input_filtered_rows_current_form()
+            duplicate_rows = []
+            for dup_key, requested_name in duplicate_item_requests:
+                dup_key = tuple(str(x) for x in dup_key)
+                if dup_key in deleted_item_keys:
+                    continue
+                new_item_name = _model_input_next_copy_name(list(rows_filtered) + list(duplicate_rows), dup_key, requested_name)
+                for rec in rows_filtered:
+                    rec_key = (str(rec.get("Scenario")), str(rec.get("Category")), str(rec.get("Item Type")), str(rec.get("Item Name")))
+                    if rec_key != dup_key:
+                        continue
+                    new_rec = dict(rec)
+                    new_rec["Item Name"] = new_item_name
+                    # Keep traceability without changing the original source document/reference.
+                    prev_notes = str(new_rec.get("Notes", "")).strip()
+                    copy_note = f"Duplicated from {dup_key[3]}"
+                    new_rec["Notes"] = copy_note if not prev_notes else f"{prev_notes}; {copy_note}"
+                    duplicate_rows.append(new_rec)
+            combined = pd.concat([mi_keep_other, pd.DataFrame(rows_filtered + duplicate_rows)], ignore_index=True)
+            combined = sanitize_model_inputs_qa_df(combined)
+            st.session_state["model_inputs_qa_df"] = combined
+            st.session_state["_model_inputs_qa_flash"] = "updated"
+            st.rerun()
+
+        if update_model_inputs:
+            # Remove full objects selected for deletion and append object-level custom parameters.
+            rows_filtered = _model_input_filtered_rows_current_form()
             combined = pd.concat([mi_keep_other, pd.DataFrame(rows_filtered)], ignore_index=True)
             combined = sanitize_model_inputs_qa_df(combined)
             st.session_state["model_inputs_qa_df"] = combined
