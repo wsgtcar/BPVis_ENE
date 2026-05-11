@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.14",
+    page_title="WSGT_BPVis_ENE 2.2.15",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.14")
+st.sidebar.write("Version 2.2.15")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.14"
+REPORT_VERSION = "2.2.15"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -6126,6 +6126,7 @@ with tab_model_qa:
         duplicate_item_requests = []
         rename_item_requests = []
         remove_item_requests = []
+        custom_param_add_requests = []
 
         def _value_widget(row, key_prefix):
             param = str(row.get("Parameter", ""))
@@ -6354,20 +6355,24 @@ with tab_model_qa:
                         key=f"{custom_key_prefix}_source",
                     )
                     custom_param_ref = st.text_input("Source document / reference", value="", key=f"{custom_key_prefix}_source_ref")
-                    add_custom_on_update = st.checkbox(
-                        "Add this custom parameter on update",
-                        value=False,
-                        key=f"{custom_key_prefix}_add",
+                    custom_param_submit = st.form_submit_button(
+                        "Add custom parameter to this object",
+                        key=f"{custom_key_prefix}_submit",
+                        use_container_width=True,
+                        help="Adds this parameter immediately to the current object. Current form edits are committed at the same time so no changes are lost.",
                     )
-                    if add_custom_on_update and str(custom_param_name).strip():
-                        custom_rows_to_add.append(_mi_row(
-                            scenario_i, scope_i, category_i, item_type_i, item_name_i,
-                            str(custom_param_name).strip(),
-                            value="", unit=custom_param_unit, required=custom_param_required,
-                            source_type=custom_param_source, source_ref=custom_param_ref,
-                            reference="Custom user-defined parameter", min_check=np.nan, max_check=np.nan,
-                            notes="User-defined parameter",
-                        ))
+                    if custom_param_submit:
+                        if str(custom_param_name).strip():
+                            custom_param_add_requests.append(_mi_row(
+                                scenario_i, scope_i, category_i, item_type_i, item_name_i,
+                                str(custom_param_name).strip(),
+                                value="", unit=custom_param_unit, required=custom_param_required,
+                                source_type=custom_param_source, source_ref=custom_param_ref,
+                                reference="Custom user-defined parameter", min_check=np.nan, max_check=np.nan,
+                                notes="User-defined parameter",
+                            ))
+                        else:
+                            st.warning("Enter a custom parameter name before adding it.")
 
                 for _, row in rows_item.iterrows():
                     orig_idx = int(row.get("_orig_index", -1))
@@ -6611,6 +6616,34 @@ with tab_model_qa:
                 else:
                     renamed_rows.append(rec)
             combined = pd.concat([mi_keep_other, pd.DataFrame(renamed_rows)], ignore_index=True)
+            combined = sanitize_model_inputs_qa_df(combined)
+            st.session_state["model_inputs_qa_df"] = combined
+            st.session_state["_model_inputs_qa_flash"] = "updated"
+            st.rerun()
+
+        if custom_param_add_requests:
+            # A custom-parameter button is a form submit action. Commit the current form
+            # values first, then append the requested parameter(s), so the user does not
+            # need to scroll to the bottom Update button and unsaved edits are preserved.
+            rows_filtered = _model_input_filtered_rows_current_form()
+            seen_param_keys = set()
+            rows_with_custom = []
+            for rec in rows_filtered:
+                param_key = (
+                    str(rec.get("Scenario")), str(rec.get("Category")), str(rec.get("Item Type")),
+                    str(rec.get("Item Name")), str(rec.get("Parameter"))
+                )
+                seen_param_keys.add(param_key)
+                rows_with_custom.append(rec)
+            for rec in custom_param_add_requests:
+                param_key = (
+                    str(rec.get("Scenario")), str(rec.get("Category")), str(rec.get("Item Type")),
+                    str(rec.get("Item Name")), str(rec.get("Parameter"))
+                )
+                if param_key not in seen_param_keys:
+                    seen_param_keys.add(param_key)
+                    rows_with_custom.append(rec)
+            combined = pd.concat([mi_keep_other, pd.DataFrame(rows_with_custom)], ignore_index=True)
             combined = sanitize_model_inputs_qa_df(combined)
             st.session_state["model_inputs_qa_df"] = combined
             st.session_state["_model_inputs_qa_flash"] = "updated"
