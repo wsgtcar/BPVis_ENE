@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.13",
+    page_title="WSGT_BPVis_ENE 2.2.14",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.13")
+st.sidebar.write("Version 2.2.14")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.13"
+REPORT_VERSION = "2.2.14"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3926,6 +3926,50 @@ def sanitize_model_inputs_qa_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
                 out[col] = pd.to_numeric(out[col], errors="coerce")
     except Exception:
         pass
+
+    # Ensure every structured object has a standard ID parameter for traceability.
+    # This is stored like any other parameter, so it survives project export/reload.
+    try:
+        object_keys = out[["Scenario", "Scope", "Category", "Item Type", "Item Name"]].drop_duplicates()
+        id_rows = []
+        for _, item in object_keys.iterrows():
+            sc = str(item.get("Scenario", MODEL_INPUT_GLOBAL_SCENARIO))
+            scope = str(item.get("Scope", "Global" if sc == MODEL_INPUT_GLOBAL_SCENARIO else "Scenario"))
+            cat = str(item.get("Category", "Other / Custom Inputs"))
+            it = str(item.get("Item Type", cat))
+            nm = str(item.get("Item Name", "General"))
+            has_id = out.loc[
+                out["Scenario"].astype(str).eq(sc)
+                & out["Scope"].astype(str).eq(scope)
+                & out["Category"].astype(str).eq(cat)
+                & out["Item Type"].astype(str).eq(it)
+                & out["Item Name"].astype(str).eq(nm)
+                & out["Parameter"].astype(str).eq("ID")
+            ].shape[0] > 0
+            if not has_id:
+                id_rows.append(_mi_row(
+                    sc,
+                    scope if scope in ["Global", "Scenario"] else ("Global" if sc == MODEL_INPUT_GLOBAL_SCENARIO else "Scenario"),
+                    cat,
+                    it,
+                    nm,
+                    "ID",
+                    value=_model_input_object_id(cat, it, nm, sc),
+                    unit="-",
+                    required=True,
+                    source_type="Other",
+                    source_ref="Model Inputs QA",
+                    reference="Unique object identifier for traceability",
+                    notes="Automatically added object ID",
+                ))
+        if id_rows:
+            out = pd.concat([out, pd.DataFrame(id_rows)], ignore_index=True)
+            out = out[MODEL_INPUT_QA_COLUMNS].copy()
+            for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
+                out[col] = pd.to_numeric(out[col], errors="coerce")
+    except Exception:
+        pass
+
     out = _apply_model_input_usual_ranges(out)
     for col in ["Min Check", "Max Check", "Usual Min", "Usual Max"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -4158,6 +4202,51 @@ def _safe_model_input_key(*parts) -> str:
     raw = "_".join([str(x) for x in parts])
     safe = re.sub(r"[^0-9A-Za-z_]+", "_", raw).strip("_")
     return safe[:120]
+
+
+def _model_input_object_id(category: str, item_type: str, item_name: str, scenario: str = "") -> str:
+    """Create a stable, readable default ID for Model Inputs QA objects."""
+    try:
+        prefix_map = {
+            "General Model Setup": "GEN",
+            "Room Types": "ROOM",
+            "Thermal Envelope": "ENV",
+            "AHU / Ventilation": "AHU",
+            "Heating": "HEAT",
+            "Cooling": "COOL",
+            "Domestic Hot Water": "DHW",
+            "Pumps / Auxiliaries": "PUMP",
+            "Controls": "CTRL",
+            "Other / Custom Inputs": "CUSTOM",
+        }
+        prefix = prefix_map.get(str(category), str(item_type or category or "OBJ"))
+        base = f"{prefix}_{item_type}_{item_name}"
+        safe = re.sub(r"[^0-9A-Za-z]+", "_", str(base)).strip("_").upper()
+        safe = re.sub(r"_+", "_", safe)
+        return safe[:80] or "MODEL_INPUT_OBJECT"
+    except Exception:
+        return "MODEL_INPUT_OBJECT"
+
+
+def _model_input_ensure_unique_name(existing_rows: list, item_key: tuple, requested_name: str = "", allow_current: bool = False) -> str:
+    """Return a unique Item Name within the same Scenario/Category/Item Type namespace."""
+    scenario_i, category_i, item_type_i, item_name_i = [str(x) for x in item_key]
+    existing_names = {
+        str(r.get("Item Name", ""))
+        for r in existing_rows
+        if str(r.get("Scenario", "")) == scenario_i
+        and str(r.get("Category", "")) == category_i
+        and str(r.get("Item Type", "")) == item_type_i
+        and (allow_current is False or str(r.get("Item Name", "")) != item_name_i)
+    }
+    requested = str(requested_name or "").strip()
+    base = requested if requested else item_name_i
+    if base not in existing_names:
+        return base
+    n = 2
+    while f"{base} {n}" in existing_names:
+        n += 1
+    return f"{base} {n}"
 
 
 def add_model_input_rows(rows: list) -> None:
@@ -6035,6 +6124,7 @@ with tab_model_qa:
         deleted_orig_indices = set()
         deleted_item_keys = set()
         duplicate_item_requests = []
+        rename_item_requests = []
         remove_item_requests = []
 
         def _value_widget(row, key_prefix):
@@ -6152,41 +6242,96 @@ with tab_model_qa:
             with st.expander(_object_label, expanded=False):
                 st.markdown(f"### **{item_name_i}**")
 
-                item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, category_i, item_type_i, item_name_i)
-                item_duplicate_key = _safe_model_input_key("mi", _editor_key_token, "duplicate_item", scenario_i, category_i, item_type_i, item_name_i)
-                item_duplicate_name_key = _safe_model_input_key("mi", _editor_key_token, "duplicate_item_name", scenario_i, category_i, item_type_i, item_name_i)
+                # Keep the ID/action controls together so object management is easy to find.
+                id_rows_item = rows_item.loc[rows_item["Parameter"].astype(str).eq("ID")].copy()
+                rows_item = rows_item.loc[~rows_item["Parameter"].astype(str).eq("ID")].copy()
 
-                duplicate_item = False
-                remove_item = False
-                duplicate_item_name = f"{item_name_i} Copy"
+                with st.expander("Object ID", expanded=False):
+                    item_delete_key = _safe_model_input_key("mi", _editor_key_token, "delete_item", scenario_i, category_i, item_type_i, item_name_i)
+                    item_duplicate_key = _safe_model_input_key("mi", _editor_key_token, "duplicate_item", scenario_i, category_i, item_type_i, item_name_i)
+                    item_rename_key = _safe_model_input_key("mi", _editor_key_token, "rename_item", scenario_i, category_i, item_type_i, item_name_i)
+                    item_duplicate_name_key = _safe_model_input_key("mi", _editor_key_token, "duplicate_item_name", scenario_i, category_i, item_type_i, item_name_i)
+                    item_rename_name_key = _safe_model_input_key("mi", _editor_key_token, "rename_item_name", scenario_i, category_i, item_type_i, item_name_i)
 
-                if category_i != "General Model Setup":
-                    duplicate_item_name = st.text_input(
-                        "Name for duplicate",
-                        value=f"{item_name_i} Copy",
-                        key=item_duplicate_name_key,
-                        help="Optional. Edit this name before clicking Duplicate. If the name already exists, the app adds a numeric suffix automatically.",
-                    )
-                    duplicate_item = st.form_submit_button(
-                        "Duplicate this complete object",
-                        key=item_duplicate_key,
-                        use_container_width=True,
-                        help="Creates a copy of this object using the current form values. The copied object receives the name above and keeps the same Global / Scenario-Specific scope.",
-                    )
-                    remove_item = st.form_submit_button(
-                        "Remove this complete object",
-                        key=item_delete_key,
-                        use_container_width=True,
-                        help="Removes this complete object after the form is submitted.",
-                    )
-                else:
-                    st.caption("General setup is a single global object and is not duplicated or removed.")
+                    id_record_to_save = None
+                    if not id_rows_item.empty:
+                        id_row = id_rows_item.iloc[0]
+                        id_orig_idx = int(id_row.get("_orig_index", -1))
+                        id_key_prefix = _safe_model_input_key("mi", _editor_key_token, id_orig_idx, scenario_i, category_i, item_type_i, item_name_i, "ID")
+                        st.caption("Object identifier used for traceability in saved projects and reports.")
+                        id_c1, id_c2, id_c3 = st.columns([1.6, 1.2, 2.4])
+                        with id_c1:
+                            object_id_value = st.text_input("ID", value=str(id_row.get("Value", "")), key=f"{id_key_prefix}_value")
+                        with id_c2:
+                            current_id_source = str(id_row.get("Source Type", "Other"))
+                            if current_id_source not in MODEL_INPUT_SOURCE_TYPES:
+                                current_id_source = "Other"
+                            object_id_source = st.selectbox("Source Type", MODEL_INPUT_SOURCE_TYPES, index=MODEL_INPUT_SOURCE_TYPES.index(current_id_source), key=f"{id_key_prefix}_source")
+                        with id_c3:
+                            object_id_ref = st.text_input("Source document / reference", value=str(id_row.get("Source Document / Reference", "Model Inputs QA")), key=f"{id_key_prefix}_source_ref")
+                        object_id_notes = st.text_input("ID notes", value=str(id_row.get("Notes", "")), key=f"{id_key_prefix}_notes")
+                        id_record_to_save = _mi_row(
+                            scenario_i, scope_i, category_i, item_type_i, item_name_i,
+                            "ID", value=object_id_value, unit="-", required=True,
+                            source_type=object_id_source, source_ref=object_id_ref,
+                            reference="Unique object identifier for traceability",
+                            min_check=np.nan, max_check=np.nan, usual_min=np.nan, usual_max=np.nan,
+                            range_justification=str(id_row.get("Range Justification", "")), notes=object_id_notes,
+                        )
+                    else:
+                        st.caption("No ID row was found for this object. It will be added automatically after update.")
 
-                if remove_item:
-                    deleted_item_keys.add(item_key_tuple)
-                    remove_item_requests.append(item_key_tuple)
-                if duplicate_item:
-                    duplicate_item_requests.append((item_key_tuple, str(duplicate_item_name or "").strip()))
+                    duplicate_item = False
+                    rename_item = False
+                    remove_item = False
+                    duplicate_item_name = f"{item_name_i} Copy"
+                    rename_item_name = item_name_i
+
+                    if category_i != "General Model Setup":
+                        duplicate_item_name = st.text_input(
+                            "Name for duplicate",
+                            value=f"{item_name_i} Copy",
+                            key=item_duplicate_name_key,
+                            help="Edit this name before clicking Duplicate. If the name already exists, the app adds a numeric suffix automatically.",
+                        )
+                        duplicate_item = st.form_submit_button(
+                            "Duplicate this complete object",
+                            key=item_duplicate_key,
+                            use_container_width=True,
+                            help="Creates a copy of this object using the current form values. The copied object receives the name above and keeps the same Global / Scenario-Specific scope.",
+                        )
+
+                        rename_item_name = st.text_input(
+                            "New object name",
+                            value=item_name_i,
+                            key=item_rename_name_key,
+                            help="Edit this name and click Rename. If the name already exists, the app adds a numeric suffix automatically.",
+                        )
+                        rename_item = st.form_submit_button(
+                            "Rename this complete object",
+                            key=item_rename_key,
+                            use_container_width=True,
+                            help="Renames this object and keeps all parameter values, references, assumptions and QA justifications.",
+                        )
+
+                        remove_item = st.form_submit_button(
+                            "Remove this complete object",
+                            key=item_delete_key,
+                            use_container_width=True,
+                            help="Removes this complete object after the form is submitted.",
+                        )
+                    else:
+                        st.caption("General setup is a single global object and is not duplicated, renamed or removed.")
+
+                    if remove_item:
+                        deleted_item_keys.add(item_key_tuple)
+                        remove_item_requests.append(item_key_tuple)
+                    if duplicate_item:
+                        duplicate_item_requests.append((item_key_tuple, str(duplicate_item_name or "").strip()))
+                    if rename_item:
+                        rename_item_requests.append((item_key_tuple, str(rename_item_name or "").strip()))
+                    if id_record_to_save is not None and not remove_item:
+                        edited_rows.append(id_record_to_save)
 
                 with st.expander("Add custom parameter", expanded=False):
                     custom_key_prefix = _safe_model_input_key("mi", _editor_key_token, "custom", scenario_i, category_i, item_type_i, item_name_i)
@@ -6396,24 +6541,14 @@ with tab_model_qa:
         def _model_input_next_copy_name(existing_rows: list, item_key: tuple, requested_name: str = "") -> str:
             """Create a stable unique object name for a duplicated Model Inputs QA object."""
             scenario_i, category_i, item_type_i, item_name_i = [str(x) for x in item_key]
-            existing_names = {
-                str(r.get("Item Name", ""))
-                for r in existing_rows
-                if str(r.get("Scenario", "")) == scenario_i
-                and str(r.get("Category", "")) == category_i
-                and str(r.get("Item Type", "")) == item_type_i
-            }
-            requested = str(requested_name or "").strip()
-            base = requested if requested else f"{item_name_i} Copy"
-            if base not in existing_names:
-                return base
-            alt_base = f"{base} Copy"
-            if alt_base not in existing_names:
-                return alt_base
-            n = 2
-            while f"{alt_base} {n}" in existing_names:
-                n += 1
-            return f"{alt_base} {n}"
+            requested = str(requested_name or "").strip() or f"{item_name_i} Copy"
+            return _model_input_ensure_unique_name(existing_rows, item_key, requested, allow_current=False)
+
+        def _model_input_next_rename_name(existing_rows: list, item_key: tuple, requested_name: str = "") -> str:
+            """Create a stable unique object name when renaming an existing Model Inputs QA object."""
+            scenario_i, category_i, item_type_i, item_name_i = [str(x) for x in item_key]
+            requested = str(requested_name or "").strip() or item_name_i
+            return _model_input_ensure_unique_name(existing_rows, item_key, requested, allow_current=True)
 
         if remove_item_requests:
             # A remove button is a form submit action. Commit the current form values first,
@@ -6441,12 +6576,41 @@ with tab_model_qa:
                         continue
                     new_rec = dict(rec)
                     new_rec["Item Name"] = new_item_name
+                    if str(new_rec.get("Parameter", "")) == "ID":
+                        new_rec["Value"] = _model_input_object_id(str(new_rec.get("Category", "")), str(new_rec.get("Item Type", "")), new_item_name, str(new_rec.get("Scenario", "")))
                     # Keep traceability without changing the original source document/reference.
                     prev_notes = str(new_rec.get("Notes", "")).strip()
                     copy_note = f"Duplicated from {dup_key[3]}"
                     new_rec["Notes"] = copy_note if not prev_notes else f"{prev_notes}; {copy_note}"
                     duplicate_rows.append(new_rec)
             combined = pd.concat([mi_keep_other, pd.DataFrame(rows_filtered + duplicate_rows)], ignore_index=True)
+            combined = sanitize_model_inputs_qa_df(combined)
+            st.session_state["model_inputs_qa_df"] = combined
+            st.session_state["_model_inputs_qa_flash"] = "updated"
+            st.rerun()
+
+        if rename_item_requests:
+            # A rename button is a form submit action. Commit the current form values first,
+            # then rename all rows belonging to the selected object.
+            rows_filtered = _model_input_filtered_rows_current_form()
+            rename_map = {}
+            for rename_key, requested_name in rename_item_requests:
+                rename_key = tuple(str(x) for x in rename_key)
+                if rename_key in deleted_item_keys:
+                    continue
+                new_item_name = _model_input_next_rename_name(rows_filtered, rename_key, requested_name)
+                rename_map[rename_key] = new_item_name
+
+            renamed_rows = []
+            for rec in rows_filtered:
+                rec_key = (str(rec.get("Scenario")), str(rec.get("Category")), str(rec.get("Item Type")), str(rec.get("Item Name")))
+                if rec_key in rename_map:
+                    new_rec = dict(rec)
+                    new_rec["Item Name"] = rename_map[rec_key]
+                    renamed_rows.append(new_rec)
+                else:
+                    renamed_rows.append(rec)
+            combined = pd.concat([mi_keep_other, pd.DataFrame(renamed_rows)], ignore_index=True)
             combined = sanitize_model_inputs_qa_df(combined)
             st.session_state["model_inputs_qa_df"] = combined
             st.session_state["_model_inputs_qa_flash"] = "updated"
