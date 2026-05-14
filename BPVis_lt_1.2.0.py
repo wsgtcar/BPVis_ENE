@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.41",
+    page_title="WSGT_BPVis_ENE 2.2.44",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.41")
+st.sidebar.write("Version 2.2.44")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2223,7 +2223,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.41"
+REPORT_VERSION = "2.2.44"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9314,30 +9314,53 @@ with tab6:
                 st.caption(
                     "Each energy source can either follow the CRREM grid decarbonization ratio or use a custom "
                     "annual reduction rate. Custom rates are percentage reductions compared with the previous year. "
-                    "Example: 3 means the emission factor is multiplied by 0.97 each year."
+                    "Example: 3 means the emission factor is multiplied by 0.97 each year. "
+                    "Changes in this section are applied only after clicking `Update emission factor decarbonization settings`."
                 )
-                _rate_cols = st.columns(3)
-                for _i, _src in enumerate(ENERGY_SOURCE_ORDER):
-                    _sk = _source_state_key(_src)
-                    with _rate_cols[_i % 3]:
-                        st.markdown(f"**{_src}**")
-                        st.checkbox(
-                            "Use custom rate",
-                            key=f"crrem_use_custom_decarb_{_sk}",
-                            help=(
-                                f"If checked, {_src} uses the annual reduction rate below. "
-                                "If unchecked, it follows the CRREM grid decarbonization ratio."
-                            ),
-                        )
-                        numeric_input(
-                            f"{_src} decarbonization (%/a)",
-                            float(st.session_state.get(f"crrem_decarb_rate_{_sk}", 0.0) or 0.0),
-                            key=f"crrem_decarb_rate_{_sk}",
-                            min_value=-100.0,
-                            max_value=100.0,
-                            fmt="{:.3f}",
-                            help="Used only when 'Use custom rate' is checked for this energy source."
-                        )
+
+                # Keep all CRREM EF settings in a form so changing individual rates/checkboxes does not
+                # rerun/recalculate the full page until the user explicitly submits the form.
+                with st.form("crrem_ef_decarbonization_settings_form", clear_on_submit=False):
+                    _rate_cols = st.columns(3)
+                    for _i, _src in enumerate(ENERGY_SOURCE_ORDER):
+                        _sk = _source_state_key(_src)
+                        with _rate_cols[_i % 3]:
+                            st.markdown(f"**{_src}**")
+                            st.checkbox(
+                                "Use custom rate",
+                                key=f"crrem_use_custom_decarb_{_sk}",
+                                help=(
+                                    f"If checked, {_src} uses the annual reduction rate below. "
+                                    "If unchecked, it follows the CRREM grid decarbonization ratio."
+                                ),
+                            )
+                            numeric_input(
+                                f"{_src} decarbonization (%/a)",
+                                float(st.session_state.get(f"crrem_decarb_rate_{_sk}", 0.0) or 0.0),
+                                key=f"crrem_decarb_rate_{_sk}",
+                                min_value=-100.0,
+                                max_value=100.0,
+                                fmt="{:.3f}",
+                                help="Used only when 'Use custom rate' is checked for this energy source."
+                            )
+
+                    _crrem_ef_submit = st.form_submit_button(
+                        "Update emission factor decarbonization settings",
+                        use_container_width=False,
+                    )
+
+                if _crrem_ef_submit:
+                    # Persist immediately into the active scenario payload so Save Project / report generation
+                    # use the submitted settings even if the user never visits the Energy Balance tab again.
+                    try:
+                        _sc = st.session_state.get("scenarios", {})
+                        _act = st.session_state.get("active_scenario")
+                        if isinstance(_sc, dict) and _act in _sc:
+                            _sc[_act]["crrem_ef"] = _crrem_ef_payload_from_session()
+                            st.session_state["scenarios"] = _sc
+                        st.success("Emission factor decarbonization settings updated.")
+                    except Exception:
+                        st.warning("Emission factor decarbonization settings were updated for the current session, but could not be written to the scenario payload.")
 
             pt_df = crrem["property_types"].copy()
             use_options = pt_df["app_use"].dropna().astype(str).tolist()
@@ -10453,6 +10476,136 @@ with tab6:
                             if stranding_eui_meas is not None:
                                 fige.add_vline(x=stranding_eui_meas, line_width=3, line_dash="dash", line_color="black")
                             st_plotly_chart(fige, use_container_width=True, key="crrem_eui_measures_chart")
+
+                        # --- Emission savings from decarbonization measures
+                        # Savings are calculated as baseline/no-measures minus with-measures.
+                        # Positive values mean the measures reduce emissions; negative values mean the measures increase emissions.
+                        savings_col1, savings_col2 = st.columns(2)
+                        try:
+                            annual_emission_savings_t = (
+                                (carbon_asset.reindex(years_avail).astype(float) - carbon_meas_s.reindex(years_avail).astype(float))
+                                * float(project_area_val)
+                                / 1000.0
+                            )
+                            cumulative_emission_savings_t = annual_emission_savings_t.cumsum()
+
+                            with savings_col1:
+                                st.write("#### Annual emission savings")
+                                fig_sav_ann = go.Figure()
+                                fig_sav_ann.add_trace(go.Scatter(
+                                    x=years_avail,
+                                    y=annual_emission_savings_t.values,
+                                    mode="lines+markers",
+                                    name="Annual savings",
+                                    line=dict(color=CRREM_COLOR_MEASURES, width=3),
+                                    marker=dict(color=CRREM_COLOR_MEASURES, size=8),
+                                    hovertemplate="Year: %{x}<br>Savings: %{y:,.2f} tCO₂e/a<extra></extra>",
+                                ))
+                                fig_sav_ann.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
+                                fig_sav_ann.update_layout(
+                                    height=420,
+                                    yaxis_title="tCO₂e/a",
+                                    legend_title="",
+                                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                    margin=dict(l=40, r=20, t=50, b=85),
+                                )
+                                st_plotly_chart(fig_sav_ann, use_container_width=True, key="crrem_annual_emission_savings")
+
+                            with savings_col2:
+                                st.write("#### Cumulative emission savings")
+                                fig_sav_cum = go.Figure()
+                                fig_sav_cum.add_trace(go.Scatter(
+                                    x=years_avail,
+                                    y=cumulative_emission_savings_t.values,
+                                    mode="lines+markers",
+                                    name="Cumulative savings",
+                                    line=dict(color=CRREM_COLOR_MEASURES, width=3),
+                                    marker=dict(color=CRREM_COLOR_MEASURES, size=8),
+                                    fill="tozeroy",
+                                    fillcolor=_plotly_rgba_from_color(CRREM_COLOR_MEASURES, 0.12),
+                                    hovertemplate="Year: %{x}<br>Cumulative savings: %{y:,.2f} tCO₂e<extra></extra>",
+                                ))
+                                fig_sav_cum.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
+                                fig_sav_cum.update_layout(
+                                    height=420,
+                                    yaxis_title="tCO₂e",
+                                    legend_title="",
+                                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                    margin=dict(l=40, r=20, t=50, b=85),
+                                )
+                                st_plotly_chart(fig_sav_cum, use_container_width=True, key="crrem_cumulative_emission_savings")
+
+                            st.caption(
+                                "Emission savings are calculated as baseline/no-measures emissions minus with-measures emissions. "
+                                "Positive values indicate avoided emissions; negative values indicate an increase compared with the baseline path."
+                            )
+                        except Exception as _e:
+                            st.warning("Emission savings charts could not be generated for the current measures setup.")
+
+                        # --- End energy savings from decarbonization measures
+                        # Savings are calculated as baseline/no-measures end energy minus with-measures end energy.
+                        # Positive values mean the measures reduce end energy demand; negative values mean the measures increase it.
+                        energy_savings_col1, energy_savings_col2 = st.columns(2)
+                        try:
+                            annual_end_energy_savings_mwh = (
+                                (eui_asset_series.reindex(years_avail).astype(float) - eui_meas_s.reindex(years_avail).astype(float))
+                                * float(project_area_val)
+                                / 1000.0
+                            )
+                            cumulative_end_energy_savings_mwh = annual_end_energy_savings_mwh.cumsum()
+
+                            with energy_savings_col1:
+                                st.write("#### Annual End Energy Savings")
+                                fig_energy_sav_ann = go.Figure()
+                                fig_energy_sav_ann.add_trace(go.Scatter(
+                                    x=years_avail,
+                                    y=annual_end_energy_savings_mwh.values,
+                                    mode="lines+markers",
+                                    name="Annual end energy savings",
+                                    line=dict(color=CRREM_COLOR_MEASURES, width=3),
+                                    marker=dict(color=CRREM_COLOR_MEASURES, size=8),
+                                    hovertemplate="Year: %{x}<br>Savings: %{y:,.2f} MWh/a<extra></extra>",
+                                ))
+                                fig_energy_sav_ann.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
+                                fig_energy_sav_ann.update_layout(
+                                    height=420,
+                                    yaxis_title="MWh/a",
+                                    legend_title="",
+                                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                    margin=dict(l=40, r=20, t=50, b=85),
+                                )
+                                st_plotly_chart(fig_energy_sav_ann, use_container_width=True, key="crrem_annual_end_energy_savings")
+
+                            with energy_savings_col2:
+                                st.write("#### Cumulative End Energy Savings")
+                                fig_energy_sav_cum = go.Figure()
+                                fig_energy_sav_cum.add_trace(go.Scatter(
+                                    x=years_avail,
+                                    y=cumulative_end_energy_savings_mwh.values,
+                                    mode="lines+markers",
+                                    name="Cumulative end energy savings",
+                                    line=dict(color=CRREM_COLOR_MEASURES, width=3),
+                                    marker=dict(color=CRREM_COLOR_MEASURES, size=8),
+                                    fill="tozeroy",
+                                    fillcolor=_plotly_rgba_from_color(CRREM_COLOR_MEASURES, 0.12),
+                                    hovertemplate="Year: %{x}<br>Cumulative savings: %{y:,.2f} MWh<extra></extra>",
+                                ))
+                                fig_energy_sav_cum.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
+                                fig_energy_sav_cum.update_layout(
+                                    height=420,
+                                    yaxis_title="MWh",
+                                    legend_title="",
+                                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                    margin=dict(l=40, r=20, t=50, b=85),
+                                )
+                                st_plotly_chart(fig_energy_sav_cum, use_container_width=True, key="crrem_cumulative_end_energy_savings")
+
+                            st.caption(
+                                "End energy savings are calculated as baseline/no-measures end energy minus with-measures end energy. "
+                                "Positive values indicate reduced end energy demand; negative values indicate an increase compared with the baseline path."
+                            )
+                        except Exception as _e:
+                            st.warning("End energy savings charts could not be generated for the current measures setup.")
 
                         with st.expander("Additional CRREM diagrams — With measures", expanded=False):
                             st.caption(
