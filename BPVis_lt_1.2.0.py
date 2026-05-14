@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.28",
+    page_title="WSGT_BPVis_ENE 2.2.29",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.28")
+st.sidebar.write("Version 2.2.29")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.28"
+REPORT_VERSION = "2.2.29"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9739,11 +9739,27 @@ with tab7:
                 st.subheader("Scenario Performance Radar")
 
                 _scenario_order_str = [str(s) for s in scenario_order]
-                _radar_ref_default = str(st.session_state.get("scenario_radar_reference_scenario", active_selected) or active_selected)
+                # Keep the relative-radar reference independent from the active scenario.
+                # The selectbox has its own widget key; the committed value used by charts/report
+                # is stored in scenario_radar_reference_scenario and is only changed by this dropdown
+                # or when the previously selected reference scenario no longer exists.
+                _radar_ref_key = "scenario_radar_reference_scenario"
+                _radar_ref_widget_key = "scenario_radar_reference_scenario_select"
+                _radar_ref_default = str(st.session_state.get(_radar_ref_key, "") or "")
+
+                # Prefer the previous dropdown value over the active scenario whenever possible.
+                _radar_ref_widget_prev = str(st.session_state.get(_radar_ref_widget_key, "") or "")
+                if _radar_ref_default not in _scenario_order_str and _radar_ref_widget_prev in _scenario_order_str:
+                    _radar_ref_default = _radar_ref_widget_prev
                 if _radar_ref_default not in _scenario_order_str:
-                    _radar_ref_default = _scenario_order_str[0] if _scenario_order_str else ""
-                    if _radar_ref_default:
-                        st.session_state["scenario_radar_reference_scenario"] = _radar_ref_default
+                    _radar_ref_default = str(active_selected) if str(active_selected) in _scenario_order_str else (
+                        _scenario_order_str[0] if _scenario_order_str else ""
+                    )
+                if _radar_ref_default:
+                    st.session_state[_radar_ref_key] = _radar_ref_default
+                    # Safe here because this runs before the selectbox is instantiated in this rerun.
+                    if st.session_state.get(_radar_ref_widget_key) not in _scenario_order_str:
+                        st.session_state[_radar_ref_widget_key] = _radar_ref_default
 
                 _ctrl_col, _spacer_col = st.columns([1.15, 2.85])
                 with _ctrl_col:
@@ -9751,9 +9767,11 @@ with tab7:
                         "Relative radar reference scenario",
                         options=_scenario_order_str,
                         index=_scenario_order_str.index(_radar_ref_default) if _radar_ref_default in _scenario_order_str else 0,
-                        key="scenario_radar_reference_scenario",
+                        key=_radar_ref_widget_key,
                         help="The selected scenario is used as the 0% reference and is filtered out from the relative improvement radar.",
                     )
+                if _radar_ref_scenario in _scenario_order_str:
+                    st.session_state[_radar_ref_key] = _radar_ref_scenario
 
                 _radar_improvement_df, _radar_absolute_df, _radar_axis_df = _prepare_scenario_radar_plot_dfs(
                     _radar_raw_df,
