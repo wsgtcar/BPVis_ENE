@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.44",
+    page_title="WSGT_BPVis_ENE 2.2.45",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.44")
+st.sidebar.write("Version 2.2.45")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2223,7 +2223,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.44"
+REPORT_VERSION = "2.2.45"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -4266,6 +4266,40 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         total_em_limit_t = carbon_limit * project_area_r / 1000.0 if not carbon_limit.empty else pd.Series(dtype=float)
         _report_add_chart(story, styles, "Total annual emissions", _report_line_chart({"Project": total_em_t, "CRREM limit": total_em_limit_t}, "Total Annual Emissions", "tCO₂e/a", {"Project": scenario_color, "CRREM limit": CRREM_COLOR_LIMIT}, dashed={"CRREM limit"}), "Annual emissions are converted from intensity to total emissions using project area.")
         _report_add_chart(story, styles, "Cumulative emissions", _report_line_chart({"Project cumulative": total_em_t.cumsum(), "CRREM cumulative limit": total_em_limit_t.cumsum()}, "Cumulative Emissions", "tCO₂e", {"Project cumulative": scenario_color, "CRREM cumulative limit": CRREM_COLOR_LIMIT}, dashed={"CRREM cumulative limit"}), "Cumulative emissions are the running sum of annual decarbonized emissions.")
+        try:
+            payload_without_measures = deepcopy(payload)
+            payload_without_measures["crrem_measures"] = []
+            annual_em_without_t = compute_crrem_like_scenario_emissions_series(df_energy, payload_without_measures, crrem, project_year_r, years_crrem).reindex(years_crrem).fillna(0.0)
+            annual_em_with_t = compute_crrem_like_scenario_emissions_series(df_energy, payload, crrem, project_year_r, years_crrem).reindex(years_crrem).fillna(0.0)
+            annual_em_savings_t = annual_em_without_t - annual_em_with_t
+            cumulative_em_savings_t = annual_em_savings_t.cumsum()
+            eui_without = compute_crrem_like_scenario_eui_series(df_energy, payload_without_measures, project_year_r, years_crrem, project_area_r).reindex(years_crrem).fillna(0.0)
+            eui_with = compute_crrem_like_scenario_eui_series(df_energy, payload, project_year_r, years_crrem, project_area_r).reindex(years_crrem).fillna(0.0)
+            annual_energy_savings_mwh = (eui_without - eui_with) * float(project_area_r) / 1000.0
+            cumulative_energy_savings_mwh = annual_energy_savings_mwh.cumsum()
+
+            _report_add_chart(
+                story, styles, "Annual emission savings",
+                _report_line_chart({"Annual emission savings": annual_em_savings_t}, "Annual Emission Savings", "tCO₂e/a", {"Annual emission savings": CRREM_COLOR_MEASURES}),
+                "Calculated as no-measures annual emissions minus with-measures annual emissions. Positive values indicate avoided emissions."
+            )
+            _report_add_chart(
+                story, styles, "Cumulative emission savings",
+                _report_line_chart({"Cumulative emission savings": cumulative_em_savings_t}, "Cumulative Emission Savings", "tCO₂e", {"Cumulative emission savings": CRREM_COLOR_MEASURES}),
+                "Cumulative sum of annual emission savings. Positive values indicate cumulative avoided emissions."
+            )
+            _report_add_chart(
+                story, styles, "Annual End Energy Savings",
+                _report_line_chart({"Annual end energy savings": annual_energy_savings_mwh}, "Annual End Energy Savings", "MWh/a", {"Annual end energy savings": CRREM_COLOR_MEASURES}),
+                "Calculated as no-measures annual end energy minus with-measures annual end energy. Positive values indicate reduced end energy demand."
+            )
+            _report_add_chart(
+                story, styles, "Cumulative End Energy Savings",
+                _report_line_chart({"Cumulative end energy savings": cumulative_energy_savings_mwh}, "Cumulative End Energy Savings", "MWh", {"Cumulative end energy savings": CRREM_COLOR_MEASURES}),
+                "Cumulative sum of annual end-energy savings. Positive values indicate cumulative reduced end energy demand."
+            )
+        except Exception:
+            story.append(Paragraph("CRREM savings diagrams could not be generated for the active scenario.", styles["BodyText"]))
     add_input_table("Relevant inputs", [("Country", project_country_r), ("Project year", project_year_r), ("Emission factors", ", ".join([f"{k}: {v:.4f}" for k, v in factor_map.items()])), ("CRREM target", str(st.session_state.get("crrem_target_select", "1.5°C")))])
 
     # LCC Analysis
@@ -7259,6 +7293,106 @@ def compute_crrem_like_scenario_emissions_series(
             emis_kg_y += float(kwhv) * float(_ef_at_year(str(src), int(y)))
         out[int(y)] = float(emis_kg_y) / 1000.0
 
+    return pd.Series(out, dtype=float)
+
+
+def compute_crrem_like_scenario_eui_series(
+        df_energy: pd.DataFrame,
+        payload: dict,
+        project_year: int,
+        years: list,
+        project_area: float,
+) -> pd.Series:
+    """Return annual end-energy intensity (kWh/m²·a) with CRREM efficiency measures applied.
+
+    This mirrors the EUI side of the CRREM Decarbonization Path Analysis:
+    - baseline efficiency factors are applied first;
+    - efficiency-factor measures become active from their specified year onward;
+    - on-site generation is excluded from end-energy demand;
+    - source, tariff and emission-factor measures do not change end-energy demand.
+    """
+    years_i = [int(y) for y in (years or [])]
+    if not years_i:
+        return pd.Series(dtype=float)
+    if not project_area or float(project_area) <= 0:
+        return pd.Series({int(y): 0.0 for y in years_i}, dtype=float)
+
+    payload = payload or {}
+    try:
+        df_base = sanitize_energy_balance_df(df_energy)
+    except Exception:
+        df_base = df_energy.copy() if isinstance(df_energy, pd.DataFrame) else pd.DataFrame()
+
+    if df_base is None or df_base.empty or "Month" not in df_base.columns:
+        return pd.Series({int(y): 0.0 for y in years_i}, dtype=float)
+
+    df_m = df_base.melt(id_vars="Month", var_name="End_Use", value_name="kWh").copy()
+    df_m["End_Use"] = df_m["End_Use"].apply(lambda x: _canon_enduse_name(str(x)))
+    df_m["kWh"] = pd.to_numeric(df_m["kWh"], errors="coerce").fillna(0.0)
+
+    annual_by_enduse = df_m.groupby("End_Use", as_index=True)["kWh"].sum()
+    end_uses_all = [str(u) for u in annual_by_enduse.index.tolist()]
+    onsite_enduses = set(get_onsite_generation_enduses(end_uses_all))
+    eff_base = {u: _to_float_lcc((payload.get("efficiency", {}) or {}).get(u, 1.0), 1.0) for u in end_uses_all}
+
+    # Parse only efficiency measures; these are the only CRREM measures that affect EUI.
+    raw_measures = payload.get("crrem_measures", [])
+    try:
+        measures_records = _measures_df_to_records(raw_measures)
+    except Exception:
+        measures_records = raw_measures if isinstance(raw_measures, list) else []
+
+    def _year_or_none(x):
+        try:
+            if x is None or str(x).strip() == "":
+                return None
+            return int(float(str(x).replace(",", ".")))
+        except Exception:
+            return None
+
+    def _float_or_none(x):
+        try:
+            if x is None or str(x).strip() == "":
+                return None
+            return float(str(x).replace(",", "."))
+        except Exception:
+            return None
+
+    def _after_arrow(label: str) -> str:
+        parts = str(label).split("→", 1)
+        return parts[1].strip() if len(parts) > 1 else str(label).strip()
+
+    eff_measures = []
+    for rec in measures_records or []:
+        if not isinstance(rec, dict):
+            continue
+        p = str(rec.get("Parameter", "")).strip()
+        y = _year_or_none(rec.get("Year"))
+        if not p or y is None or int(y) > max(years_i):
+            continue
+        if str(p).lower().startswith("efficiency factors"):
+            eu = _canon_enduse_name(_after_arrow(p))
+            val = _float_or_none(rec.get("New Value", ""))
+            if eu and val is not None:
+                eff_measures.append((int(y), str(eu), float(val)))
+    eff_measures = sorted(eff_measures, key=lambda t: t[0])
+
+    out = {}
+    for y in years_i:
+        eff_y = dict(eff_base)
+        for ym, eu, val in eff_measures:
+            if int(ym) <= int(y):
+                eff_y[str(eu)] = float(val)
+        consumption_kwh_y = 0.0
+        for eu, kwh in annual_by_enduse.items():
+            eu = str(eu)
+            if eu in onsite_enduses:
+                continue
+            effv = float(eff_y.get(eu, 1.0) or 1.0)
+            if effv == 0:
+                effv = 1.0
+            consumption_kwh_y += max(float(kwh) / effv, 0.0)
+        out[int(y)] = float(consumption_kwh_y) / float(project_area)
     return pd.Series(out, dtype=float)
 
 def find_stranding_year(asset: pd.Series, limit: pd.Series) -> Optional[int]:
@@ -10477,136 +10611,6 @@ with tab6:
                                 fige.add_vline(x=stranding_eui_meas, line_width=3, line_dash="dash", line_color="black")
                             st_plotly_chart(fige, use_container_width=True, key="crrem_eui_measures_chart")
 
-                        # --- Emission savings from decarbonization measures
-                        # Savings are calculated as baseline/no-measures minus with-measures.
-                        # Positive values mean the measures reduce emissions; negative values mean the measures increase emissions.
-                        savings_col1, savings_col2 = st.columns(2)
-                        try:
-                            annual_emission_savings_t = (
-                                (carbon_asset.reindex(years_avail).astype(float) - carbon_meas_s.reindex(years_avail).astype(float))
-                                * float(project_area_val)
-                                / 1000.0
-                            )
-                            cumulative_emission_savings_t = annual_emission_savings_t.cumsum()
-
-                            with savings_col1:
-                                st.write("#### Annual emission savings")
-                                fig_sav_ann = go.Figure()
-                                fig_sav_ann.add_trace(go.Scatter(
-                                    x=years_avail,
-                                    y=annual_emission_savings_t.values,
-                                    mode="lines+markers",
-                                    name="Annual savings",
-                                    line=dict(color=CRREM_COLOR_MEASURES, width=3),
-                                    marker=dict(color=CRREM_COLOR_MEASURES, size=8),
-                                    hovertemplate="Year: %{x}<br>Savings: %{y:,.2f} tCO₂e/a<extra></extra>",
-                                ))
-                                fig_sav_ann.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
-                                fig_sav_ann.update_layout(
-                                    height=420,
-                                    yaxis_title="tCO₂e/a",
-                                    legend_title="",
-                                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                                    margin=dict(l=40, r=20, t=50, b=85),
-                                )
-                                st_plotly_chart(fig_sav_ann, use_container_width=True, key="crrem_annual_emission_savings")
-
-                            with savings_col2:
-                                st.write("#### Cumulative emission savings")
-                                fig_sav_cum = go.Figure()
-                                fig_sav_cum.add_trace(go.Scatter(
-                                    x=years_avail,
-                                    y=cumulative_emission_savings_t.values,
-                                    mode="lines+markers",
-                                    name="Cumulative savings",
-                                    line=dict(color=CRREM_COLOR_MEASURES, width=3),
-                                    marker=dict(color=CRREM_COLOR_MEASURES, size=8),
-                                    fill="tozeroy",
-                                    fillcolor=_plotly_rgba_from_color(CRREM_COLOR_MEASURES, 0.12),
-                                    hovertemplate="Year: %{x}<br>Cumulative savings: %{y:,.2f} tCO₂e<extra></extra>",
-                                ))
-                                fig_sav_cum.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
-                                fig_sav_cum.update_layout(
-                                    height=420,
-                                    yaxis_title="tCO₂e",
-                                    legend_title="",
-                                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                                    margin=dict(l=40, r=20, t=50, b=85),
-                                )
-                                st_plotly_chart(fig_sav_cum, use_container_width=True, key="crrem_cumulative_emission_savings")
-
-                            st.caption(
-                                "Emission savings are calculated as baseline/no-measures emissions minus with-measures emissions. "
-                                "Positive values indicate avoided emissions; negative values indicate an increase compared with the baseline path."
-                            )
-                        except Exception as _e:
-                            st.warning("Emission savings charts could not be generated for the current measures setup.")
-
-                        # --- End energy savings from decarbonization measures
-                        # Savings are calculated as baseline/no-measures end energy minus with-measures end energy.
-                        # Positive values mean the measures reduce end energy demand; negative values mean the measures increase it.
-                        energy_savings_col1, energy_savings_col2 = st.columns(2)
-                        try:
-                            annual_end_energy_savings_mwh = (
-                                (eui_asset_series.reindex(years_avail).astype(float) - eui_meas_s.reindex(years_avail).astype(float))
-                                * float(project_area_val)
-                                / 1000.0
-                            )
-                            cumulative_end_energy_savings_mwh = annual_end_energy_savings_mwh.cumsum()
-
-                            with energy_savings_col1:
-                                st.write("#### Annual End Energy Savings")
-                                fig_energy_sav_ann = go.Figure()
-                                fig_energy_sav_ann.add_trace(go.Scatter(
-                                    x=years_avail,
-                                    y=annual_end_energy_savings_mwh.values,
-                                    mode="lines+markers",
-                                    name="Annual end energy savings",
-                                    line=dict(color=CRREM_COLOR_MEASURES, width=3),
-                                    marker=dict(color=CRREM_COLOR_MEASURES, size=8),
-                                    hovertemplate="Year: %{x}<br>Savings: %{y:,.2f} MWh/a<extra></extra>",
-                                ))
-                                fig_energy_sav_ann.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
-                                fig_energy_sav_ann.update_layout(
-                                    height=420,
-                                    yaxis_title="MWh/a",
-                                    legend_title="",
-                                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                                    margin=dict(l=40, r=20, t=50, b=85),
-                                )
-                                st_plotly_chart(fig_energy_sav_ann, use_container_width=True, key="crrem_annual_end_energy_savings")
-
-                            with energy_savings_col2:
-                                st.write("#### Cumulative End Energy Savings")
-                                fig_energy_sav_cum = go.Figure()
-                                fig_energy_sav_cum.add_trace(go.Scatter(
-                                    x=years_avail,
-                                    y=cumulative_end_energy_savings_mwh.values,
-                                    mode="lines+markers",
-                                    name="Cumulative end energy savings",
-                                    line=dict(color=CRREM_COLOR_MEASURES, width=3),
-                                    marker=dict(color=CRREM_COLOR_MEASURES, size=8),
-                                    fill="tozeroy",
-                                    fillcolor=_plotly_rgba_from_color(CRREM_COLOR_MEASURES, 0.12),
-                                    hovertemplate="Year: %{x}<br>Cumulative savings: %{y:,.2f} MWh<extra></extra>",
-                                ))
-                                fig_energy_sav_cum.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
-                                fig_energy_sav_cum.update_layout(
-                                    height=420,
-                                    yaxis_title="MWh",
-                                    legend_title="",
-                                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                                    margin=dict(l=40, r=20, t=50, b=85),
-                                )
-                                st_plotly_chart(fig_energy_sav_cum, use_container_width=True, key="crrem_cumulative_end_energy_savings")
-
-                            st.caption(
-                                "End energy savings are calculated as baseline/no-measures end energy minus with-measures end energy. "
-                                "Positive values indicate reduced end energy demand; negative values indicate an increase compared with the baseline path."
-                            )
-                        except Exception as _e:
-                            st.warning("End energy savings charts could not be generated for the current measures setup.")
-
                         with st.expander("Additional CRREM diagrams — With measures", expanded=False):
                             st.caption(
                                 "Totals and cumulative charts are computed from the with-measures trajectories shown above.")
@@ -10621,6 +10625,137 @@ with tab6:
                                 project_color=CRREM_COLOR_MEASURES,
                                 overlay_baseline=(carbon_asset, eui_asset_series) if show_overlay else None,
                             )
+
+                            # --- Emission savings from decarbonization measures
+                            # Savings are calculated as baseline/no-measures minus with-measures.
+                            # Positive values mean the measures reduce emissions; negative values mean the measures increase emissions.
+                            savings_col1, savings_col2 = st.columns(2)
+                            try:
+                                annual_emission_savings_t = (
+                                    (carbon_asset.reindex(years_avail).astype(float) - carbon_meas_s.reindex(years_avail).astype(float))
+                                    * float(project_area_val)
+                                    / 1000.0
+                                )
+                                cumulative_emission_savings_t = annual_emission_savings_t.cumsum()
+
+                                with savings_col1:
+                                    st.write("#### Annual emission savings")
+                                    fig_sav_ann = go.Figure()
+                                    fig_sav_ann.add_trace(go.Scatter(
+                                        x=years_avail,
+                                        y=annual_emission_savings_t.values,
+                                        mode="lines+markers",
+                                        name="Annual savings",
+                                        line=dict(color=CRREM_COLOR_MEASURES, width=3),
+                                        marker=dict(color=CRREM_COLOR_MEASURES, size=8),
+                                        hovertemplate="Year: %{x}<br>Savings: %{y:,.2f} tCO₂e/a<extra></extra>",
+                                    ))
+                                    fig_sav_ann.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
+                                    fig_sav_ann.update_layout(
+                                        height=420,
+                                        yaxis_title="tCO₂e/a",
+                                        legend_title="",
+                                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                        margin=dict(l=40, r=20, t=50, b=85),
+                                    )
+                                    st_plotly_chart(fig_sav_ann, use_container_width=True, key="crrem_annual_emission_savings")
+
+                                with savings_col2:
+                                    st.write("#### Cumulative emission savings")
+                                    fig_sav_cum = go.Figure()
+                                    fig_sav_cum.add_trace(go.Scatter(
+                                        x=years_avail,
+                                        y=cumulative_emission_savings_t.values,
+                                        mode="lines+markers",
+                                        name="Cumulative savings",
+                                        line=dict(color=CRREM_COLOR_MEASURES, width=3),
+                                        marker=dict(color=CRREM_COLOR_MEASURES, size=8),
+                                        fill="tozeroy",
+                                        fillcolor=_plotly_rgba_from_color(CRREM_COLOR_MEASURES, 0.12),
+                                        hovertemplate="Year: %{x}<br>Cumulative savings: %{y:,.2f} tCO₂e<extra></extra>",
+                                    ))
+                                    fig_sav_cum.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
+                                    fig_sav_cum.update_layout(
+                                        height=420,
+                                        yaxis_title="tCO₂e",
+                                        legend_title="",
+                                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                        margin=dict(l=40, r=20, t=50, b=85),
+                                    )
+                                    st_plotly_chart(fig_sav_cum, use_container_width=True, key="crrem_cumulative_emission_savings")
+
+                                st.caption(
+                                    "Emission savings are calculated as baseline/no-measures emissions minus with-measures emissions. "
+                                    "Positive values indicate avoided emissions; negative values indicate an increase compared with the baseline path."
+                                )
+                            except Exception as _e:
+                                st.warning("Emission savings charts could not be generated for the current measures setup.")
+
+                            # --- End energy savings from decarbonization measures
+                            # Savings are calculated as baseline/no-measures end energy minus with-measures end energy.
+                            # Positive values mean the measures reduce end energy demand; negative values mean the measures increase it.
+                            energy_savings_col1, energy_savings_col2 = st.columns(2)
+                            try:
+                                annual_end_energy_savings_mwh = (
+                                    (eui_asset_series.reindex(years_avail).astype(float) - eui_meas_s.reindex(years_avail).astype(float))
+                                    * float(project_area_val)
+                                    / 1000.0
+                                )
+                                cumulative_end_energy_savings_mwh = annual_end_energy_savings_mwh.cumsum()
+
+                                with energy_savings_col1:
+                                    st.write("#### Annual End Energy Savings")
+                                    fig_energy_sav_ann = go.Figure()
+                                    fig_energy_sav_ann.add_trace(go.Scatter(
+                                        x=years_avail,
+                                        y=annual_end_energy_savings_mwh.values,
+                                        mode="lines+markers",
+                                        name="Annual end energy savings",
+                                        line=dict(color=CRREM_COLOR_MEASURES, width=3),
+                                        marker=dict(color=CRREM_COLOR_MEASURES, size=8),
+                                        hovertemplate="Year: %{x}<br>Savings: %{y:,.2f} MWh/a<extra></extra>",
+                                    ))
+                                    fig_energy_sav_ann.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
+                                    fig_energy_sav_ann.update_layout(
+                                        height=420,
+                                        yaxis_title="MWh/a",
+                                        legend_title="",
+                                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                        margin=dict(l=40, r=20, t=50, b=85),
+                                    )
+                                    st_plotly_chart(fig_energy_sav_ann, use_container_width=True, key="crrem_annual_end_energy_savings")
+
+                                with energy_savings_col2:
+                                    st.write("#### Cumulative End Energy Savings")
+                                    fig_energy_sav_cum = go.Figure()
+                                    fig_energy_sav_cum.add_trace(go.Scatter(
+                                        x=years_avail,
+                                        y=cumulative_end_energy_savings_mwh.values,
+                                        mode="lines+markers",
+                                        name="Cumulative end energy savings",
+                                        line=dict(color=CRREM_COLOR_MEASURES, width=3),
+                                        marker=dict(color=CRREM_COLOR_MEASURES, size=8),
+                                        fill="tozeroy",
+                                        fillcolor=_plotly_rgba_from_color(CRREM_COLOR_MEASURES, 0.12),
+                                        hovertemplate="Year: %{x}<br>Cumulative savings: %{y:,.2f} MWh<extra></extra>",
+                                    ))
+                                    fig_energy_sav_cum.add_hline(y=0, line_width=2, line_dash="dash", line_color="black")
+                                    fig_energy_sav_cum.update_layout(
+                                        height=420,
+                                        yaxis_title="MWh",
+                                        legend_title="",
+                                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
+                                        margin=dict(l=40, r=20, t=50, b=85),
+                                    )
+                                    st_plotly_chart(fig_energy_sav_cum, use_container_width=True, key="crrem_cumulative_end_energy_savings")
+
+                                st.caption(
+                                    "End energy savings are calculated as baseline/no-measures end energy minus with-measures end energy. "
+                                    "Positive values indicate reduced end energy demand; negative values indicate an increase compared with the baseline path."
+                                )
+                            except Exception as _e:
+                                st.warning("End energy savings charts could not be generated for the current measures setup.")
+
 
                     st.caption(
                         "Notes: Green Electricity and On-site Generation offset are treated with EF=0. On-site Generation offsets Electricity consumption (no export credit).")
