@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.36",
+    page_title="WSGT_BPVis_ENE 2.2.37",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.36")
+st.sidebar.write("Version 2.2.37")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -961,6 +961,10 @@ def _canon_scenario_payload(payload: dict) -> dict:
             lcc_global["selected_operational_end_uses"] = [_canon_enduse_name(str(x)) for x in selected if str(x).strip()]
         payload["lcc_global"] = lcc_global
 
+    if "crrem_ef" not in payload or not isinstance(payload.get("crrem_ef"), dict):
+        payload["crrem_ef"] = _default_crrem_ef_payload()
+    else:
+        payload["crrem_ef"] = _coerce_crrem_ef_payload(payload.get("crrem_ef"))
     return payload
 
 
@@ -2204,7 +2208,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.36"
+REPORT_VERSION = "2.2.37"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -4422,6 +4426,7 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
             {"Use Type": "Office", "Area Share %": 50.0},
             {"Use Type": "Retail, High Street", "Area Share %": 50.0},
         ],
+        "crrem_ef": _default_crrem_ef_payload(),
         "lcc": _default_lcc_payload(end_uses),
         "lcc_global": _default_lcc_global_payload(end_uses),
     }
@@ -4455,6 +4460,7 @@ def capture_scenario_from_widgets(end_uses: list) -> dict:
         "crrem_measures": _measures_df_to_records(st.session_state.get("crrem_measures_df")),
         "crrem_use_type": str(st.session_state.get("crrem_use_type", "Office")),
         "crrem_mixed_use": _mixed_use_df_to_records(st.session_state.get("crrem_mixed_use_df")),
+        "crrem_ef": _crrem_ef_payload_from_session(),
         "lcc": _capture_lcc_from_widgets(end_uses),
         "lcc_global": _get_lcc_global_state_payload(end_uses),
     }
@@ -4497,6 +4503,16 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
 
     _set_num("pv_scale", float(pv.get("scale", 1.0)), "{:.5f}")
     st.session_state["pv_sc_enabled"] = bool(pv.get("enabled", False))
+
+    # CRREM emission-factor settings (scenario-specific)
+    _cef = _coerce_crrem_ef_payload(payload.get("crrem_ef", {}))
+    st.session_state["crrem_use_standard_electricity_ef"] = bool(_cef.get("use_standard_electricity", False))
+    st.session_state["crrem_use_custom_decarb_rates"] = bool(_cef.get("use_custom_decarb_rates", False))
+    for _src, _rate in (_cef.get("custom_decarb_rates_pct", {}) or {}).items():
+        try:
+            _set_num(f"crrem_decarb_rate_{_source_state_key(_src)}", float(_rate), "{:.3f}")
+        except Exception:
+            pass
 
     # CRREM measures (scenario-specific)
     st.session_state["crrem_measures_df"] = _measures_records_to_df(payload.get("crrem_measures", []))
@@ -6520,6 +6536,152 @@ def compute_decarb_multiplier(ef_grid: pd.Series, base_year: int, years: list, r
 
 
 
+def _default_crrem_ef_payload() -> dict:
+    """Default CRREM emission-factor settings stored per scenario."""
+    return {
+        "use_standard_electricity": False,
+        "use_custom_decarb_rates": False,
+        "custom_decarb_rates_pct": {src: 0.0 for src in ENERGY_SOURCE_ORDER},
+    }
+
+
+def _coerce_crrem_ef_payload(settings: Optional[dict]) -> dict:
+    """Return a robust CRREM EF settings dict, backwards-compatible with old scenarios."""
+    out = _default_crrem_ef_payload()
+    if isinstance(settings, dict):
+        out["use_standard_electricity"] = bool(settings.get("use_standard_electricity", out["use_standard_electricity"]))
+        out["use_custom_decarb_rates"] = bool(settings.get("use_custom_decarb_rates", out["use_custom_decarb_rates"]))
+        raw_rates = settings.get("custom_decarb_rates_pct", {})
+        if isinstance(raw_rates, dict):
+            for src in ENERGY_SOURCE_ORDER:
+                try:
+                    out["custom_decarb_rates_pct"][src] = float(str(raw_rates.get(src, out["custom_decarb_rates_pct"].get(src, 0.0))).replace(",", "."))
+                except Exception:
+                    out["custom_decarb_rates_pct"][src] = 0.0
+    return out
+
+
+def _source_state_key(src: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", str(src)).strip("_")
+
+
+def _crrem_grid_factor_for_year(ef_grid: Optional[pd.Series], year: int) -> Optional[float]:
+    try:
+        if not isinstance(ef_grid, pd.Series) or ef_grid.empty:
+            return None
+        y_c = _clamp_year_to_series(int(year), ef_grid)
+        val = float(ef_grid.loc[y_c])
+        if np.isnan(val):
+            return None
+        return val
+    except Exception:
+        return None
+
+
+def _source_decarb_multiplier(
+        src: str,
+        year: int,
+        anchor_year: int,
+        ef_grid: Optional[pd.Series],
+        crrem_ef_settings: Optional[dict],
+) -> float:
+    """Return source EF multiplier from anchor_year to year.
+
+    Default: follow CRREM grid decarbonization ratio.
+    Optional: user-defined annual reduction rate per source (% reduction vs previous year).
+    """
+    if int(year) <= int(anchor_year):
+        return 1.0
+
+    settings = _coerce_crrem_ef_payload(crrem_ef_settings)
+    if bool(settings.get("use_custom_decarb_rates", False)):
+        try:
+            rate_pct = float(settings.get("custom_decarb_rates_pct", {}).get(str(src), 0.0))
+        except Exception:
+            rate_pct = 0.0
+        # 100% means zero EF after one year; values above 100% are clamped to avoid negative EFs.
+        rate_pct = max(-100.0, min(100.0, rate_pct))
+        return max(0.0, (1.0 - rate_pct / 100.0) ** (int(year) - int(anchor_year)))
+
+    try:
+        if isinstance(ef_grid, pd.Series) and not ef_grid.empty:
+            y0_c = _clamp_year_to_series(int(anchor_year), ef_grid)
+            y_c = _clamp_year_to_series(int(year), ef_grid)
+            denom = float(ef_grid.loc[y0_c])
+            if denom != 0:
+                return max(0.0, float(ef_grid.loc[y_c]) / denom)
+    except Exception:
+        pass
+    return 1.0
+
+
+def _initial_source_emission_factor(
+        src: str,
+        factors: dict,
+        project_year: int,
+        ef_grid: Optional[pd.Series],
+        crrem_ef_settings: Optional[dict],
+) -> float:
+    """Return the initial EF at project year for a source.
+
+    Electricity can optionally be taken directly from CRREM country grid EF for the project year.
+    Other sources always use user-entered initial factors.
+    """
+    src = str(src)
+    if src == "Green Electricity":
+        return 0.0
+    settings = _coerce_crrem_ef_payload(crrem_ef_settings)
+    if src == "Electricity" and bool(settings.get("use_standard_electricity", False)):
+        v = _crrem_grid_factor_for_year(ef_grid, int(project_year))
+        if v is not None:
+            return float(v)
+    try:
+        return float(str((factors or {}).get(src, 0.0)).replace(",", "."))
+    except Exception:
+        return 0.0
+
+
+def _source_emission_factor_at_year(
+        src: str,
+        year: int,
+        project_year: int,
+        factors: dict,
+        ef_grid: Optional[pd.Series],
+        crrem_ef_settings: Optional[dict],
+        ef_measures_for_source: Optional[list] = None,
+) -> float:
+    """Return EF for a source and year using CRREM/custom decarbonization and optional EF measures."""
+    src = str(src)
+    if src == "Green Electricity":
+        return 0.0
+
+    anchor_year = int(project_year)
+    base_val = _initial_source_emission_factor(src, factors or {}, int(project_year), ef_grid, crrem_ef_settings)
+
+    # If an emission-factor CRREM measure is defined, it resets the EF anchor from that year onward.
+    try:
+        for ym, vm in sorted(ef_measures_for_source or [], key=lambda t: int(t[0])):
+            if int(ym) <= int(year) and int(ym) >= int(project_year):
+                anchor_year = int(ym)
+                base_val = float(vm)
+    except Exception:
+        pass
+
+    mult = _source_decarb_multiplier(src, int(year), int(anchor_year), ef_grid, crrem_ef_settings)
+    return max(0.0, float(base_val) * float(mult))
+
+
+def _crrem_ef_payload_from_session() -> dict:
+    rates = {}
+    for src in ENERGY_SOURCE_ORDER:
+        rates[src] = float(st.session_state.get(f"crrem_decarb_rate_{_source_state_key(src)}", 0.0) or 0.0)
+    return {
+        "use_standard_electricity": bool(st.session_state.get("crrem_use_standard_electricity_ef", False)),
+        "use_custom_decarb_rates": bool(st.session_state.get("crrem_use_custom_decarb_rates", False)),
+        "custom_decarb_rates_pct": rates,
+    }
+
+
 def compute_crrem_like_scenario_emissions_series(
         df_energy: pd.DataFrame,
         payload: dict,
@@ -6714,18 +6876,18 @@ def compute_crrem_like_scenario_emissions_series(
         if "Electricity" in annual_kwh_by_source.index:
             annual_kwh_by_source.loc["Electricity"] = max(float(annual_kwh_by_source.loc["Electricity"]), 0.0)
 
-        emissions_base_kg = 0.0
-        for src, kwh in annual_kwh_by_source.items():
-            if str(src) == "Green Electricity":
-                continue
-            emissions_base_kg += float(kwh) * float(base_factors.get(str(src), 0.0))
+        crrem_ef_settings = _coerce_crrem_ef_payload(payload.get("crrem_ef", {}))
+        out_no_measures = {}
+        for y in years_i:
+            emis_kg_y = 0.0
+            for src, kwh in annual_kwh_by_source.items():
+                ef_y = _source_emission_factor_at_year(
+                    str(src), int(y), int(project_year), base_factors, ef_grid, crrem_ef_settings, None
+                )
+                emis_kg_y += float(kwh) * float(ef_y)
+            out_no_measures[int(y)] = float(emis_kg_y) / 1000.0
 
-        try:
-            multipliers = compute_decarb_multiplier(ef_grid, int(project_year), years_i) if ef_grid is not None else pd.Series({int(y): 1.0 for y in years_i}, dtype=float)
-        except Exception:
-            multipliers = pd.Series({int(y): 1.0 for y in years_i}, dtype=float)
-
-        return pd.Series({int(y): (float(emissions_base_kg) * float(multipliers.loc[int(y)])) / 1000.0 for y in years_i}, dtype=float)
+        return pd.Series(out_no_measures, dtype=float)
 
     # ------------------------------------------------------------------
     # With-measures path: reproduce CRREM Decarbonization Path Analysis logic.
@@ -6743,30 +6905,12 @@ def compute_crrem_like_scenario_emissions_series(
     pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
     pv_scale_eff = pv_scale if pv_apply_scale else 1.0
 
+    crrem_ef_settings = _coerce_crrem_ef_payload(payload.get("crrem_ef", {}))
+
     def _ef_at_year(src: str, year: int) -> float:
-        # Green Electricity is always zero by project rule.
-        if str(src) == "Green Electricity":
-            return 0.0
-
-        y0 = int(project_year)
-        v0 = float(base_factors.get(str(src), 0.0))
-        for ym, vm in ef_measures.get(str(src), []):
-            if int(ym) <= int(year) and int(ym) >= int(project_year):
-                y0 = int(ym)
-                v0 = float(vm)
-
-        if ef_grid is None:
-            return float(v0)
-
-        try:
-            y0_c = _clamp_year_to_series(int(y0), ef_grid)
-            y_c = _clamp_year_to_series(int(year), ef_grid)
-            denom = float(ef_grid.loc[y0_c])
-            if denom == 0:
-                return float(v0)
-            return float(v0) * float(ef_grid.loc[y_c]) / denom
-        except Exception:
-            return float(v0)
+        return _source_emission_factor_at_year(
+            str(src), int(year), int(project_year), base_factors, ef_grid, crrem_ef_settings, ef_measures.get(str(src), [])
+        )
 
     out = {}
     for y in years_i:
@@ -7401,6 +7545,19 @@ with tab1:
             co2_Emissions_Electricity = numeric_input("CO2 Factor Electricity", float(def_f.get("Electricity", 0.300)),
                                                       key="co2_Emissions_Electricity", min_value=0.0, max_value=1.0,
                                                       fmt="{:.5f}")
+            st.checkbox(
+                "Adopt CRREM Standard Electricity Emission Factors",
+                key="crrem_use_standard_electricity_ef",
+                help="If active, electricity uses the selected country's CRREM grid emission factor for the project year and follows the CRREM grid decarbonization pathway. Other sources still use user-entered initial factors."
+            )
+            try:
+                _crrem_preview = load_crrem_dataset(st.session_state.get("project_country", "Germany"))
+                _ef_grid_preview = (_crrem_preview or {}).get("ef_grid")
+                _crrem_elec_ef_preview = _crrem_grid_factor_for_year(_ef_grid_preview, int(st.session_state.get("project_year", 2025)))
+                if st.session_state.get("crrem_use_standard_electricity_ef", False) and _crrem_elec_ef_preview is not None:
+                    st.caption(f"Using CRREM electricity EF for {st.session_state.get('project_country', 'selected country')} in {int(st.session_state.get('project_year', 2025))}: {_crrem_elec_ef_preview:.5f} kgCO₂e/kWh")
+            except Exception:
+                pass
             co2_Emissions_Green_Electricity = numeric_input("CO2 Factor Green Electricity",
                                                             float(def_f.get("Green Electricity", 0.000)),
                                                             key="co2_Emissions_Green_Electricity", min_value=0.0,
@@ -8796,6 +8953,26 @@ with tab6:
             )
             target_id = "1.5C" if target_label.startswith("1.5") else "2C"
 
+            with st.expander("Emission factor decarbonization settings", expanded=False):
+                st.checkbox(
+                    "Use custom annual decarbonization rates per energy source",
+                    key="crrem_use_custom_decarb_rates",
+                    help="If inactive, all non-green sources follow the CRREM grid decarbonization ratio. If active, each source uses the annual reduction rate entered below."
+                )
+                st.caption("Custom rates are annual percentage reductions compared with the previous year. Example: 3 means the emission factor is multiplied by 0.97 each year.")
+                _rate_cols = st.columns(3)
+                for _i, _src in enumerate(ENERGY_SOURCE_ORDER):
+                    with _rate_cols[_i % 3]:
+                        numeric_input(
+                            f"{_src} decarbonization (%/a)",
+                            float(st.session_state.get(f"crrem_decarb_rate_{_source_state_key(_src)}", 0.0) or 0.0),
+                            key=f"crrem_decarb_rate_{_source_state_key(_src)}",
+                            min_value=-100.0,
+                            max_value=100.0,
+                            fmt="{:.3f}",
+                            help="Used only when custom annual decarbonization rates are active."
+                        )
+
             pt_df = crrem["property_types"].copy()
             use_options = pt_df["app_use"].dropna().astype(str).tolist()
             # keep Mixed Use last (if present)
@@ -8922,16 +9099,20 @@ with tab6:
                 start_year = max(int(project_year_val), min_year)
                 years = list(range(start_year, max_year + 1))
 
-                m = compute_decarb_multiplier(ef_grid, int(project_year_val), years)
+                crrem_ef_settings_active = _crrem_ef_payload_from_session()
 
-                # Net annual emissions (kgCO2e) in the base year, excluding Green Electricity (EF=0)
-                emissions_base = 0.0
-                for src, kwh in annual_kwh_by_source.items():
-                    if str(src) == "Green Electricity":
-                        continue
-                    emissions_base += float(kwh) * float(base_factors.get(str(src), 0.0))
-
-                emissions_series = pd.Series({y: float(emissions_base) * float(m.loc[y]) for y in years})
+                # Net annual emissions (kgCO2e/a), source-specific.
+                # Electricity may use the absolute CRREM country grid EF; all sources follow either CRREM grid ratio
+                # or the user-defined custom annual decarbonization rate.
+                emissions_series = pd.Series({
+                    int(y): sum(
+                        float(kwh) * float(_source_emission_factor_at_year(
+                            str(src), int(y), int(project_year_val), base_factors, ef_grid, crrem_ef_settings_active, None
+                        ))
+                        for src, kwh in annual_kwh_by_source.items()
+                    )
+                    for y in years
+                })
                 carbon_asset = emissions_series / project_area_val  # kgCO2e/m²·yr
                 eui_asset_series = pd.Series({y: float(eui_asset) for y in years})
 
@@ -9665,25 +9846,17 @@ with tab6:
 
 
                         def _ef_at_year(src: str, year: int, inclusive: bool = True) -> float:
-                            # Green Electricity is always zero by project rule
-                            if str(src) == "Green Electricity":
-                                return 0.0
-                            # Find the most recent EF-setting (project baseline year or EF measure)
-                            y0 = int(project_year_val)
-                            v0 = float(base_factors.get(str(src), 0.0))
+                            # For pre-step points, ignore measures that start exactly in the current year.
+                            _ef_list = []
                             for ym, vm in ef_measures.get(str(src), []):
-                                if ((int(ym) <= int(year)) if inclusive else (int(ym) < int(year))) and int(ym) >= int(
-                                        y0):
-                                    y0 = int(ym)
-                                    v0 = float(vm)
-
-                            # Apply electricity-based decarbonization ratio EF_grid(year)/EF_grid(y0)
-                            y0_c = _clamp_year_to_series(int(y0), ef_grid)
-                            y_c = _clamp_year_to_series(int(year), ef_grid)
-                            denom = float(ef_grid.loc[y0_c]) if float(ef_grid.loc[y0_c]) != 0 else None
-                            if denom is None:
-                                return float(v0)
-                            return float(v0) * float(ef_grid.loc[y_c]) / denom
+                                try:
+                                    if ((int(ym) <= int(year)) if inclusive else (int(ym) < int(year))):
+                                        _ef_list.append((int(ym), float(vm)))
+                                except Exception:
+                                    pass
+                            return _source_emission_factor_at_year(
+                                str(src), int(year), int(project_year_val), base_factors, ef_grid, crrem_ef_settings_active, _ef_list
+                            )
 
 
                         # Trajectories
@@ -11882,14 +12055,25 @@ with tab2:
         df_melted["Energy_Source"] = df_melted["End_Use"].map(
             {k: st.session_state.get(f"source_{k}", "Electricity") for k in df_melted["End_Use"].unique()})
 
-        # Factor map from sidebar inputs (declared in Tab 1)
-        factor_map = {
+        # Factor map from sidebar inputs (declared in Tab 1).
+        # If CRREM standard electricity EF is active, use the CRREM project-year electricity EF for the selected country.
+        _crrem_for_static_co2 = load_crrem_dataset(st.session_state.get("project_country", "Germany"))
+        _ef_grid_static_co2 = (_crrem_for_static_co2 or {}).get("ef_grid")
+        _base_factor_map_input = {
             "Electricity": co2_Emissions_Electricity,
             "Green Electricity": co2_Emissions_Green_Electricity,
             "Gas": co2_emissions_gas,
             "District Heating": co2_emissions_dh,
             "District Cooling": co2_emissions_dc,
             "Biomass": co2_emissions_biomass,
+        }
+        _crrem_ef_settings_static_co2 = _crrem_ef_payload_from_session()
+        factor_map = {
+            src: _initial_source_emission_factor(
+                src, _base_factor_map_input, int(st.session_state.get("project_year", 2025)),
+                _ef_grid_static_co2, _crrem_ef_settings_static_co2
+            )
+            for src in ENERGY_SOURCE_ORDER
         }
 
         # Compute emissions per row
