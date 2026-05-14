@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.31",
+    page_title="WSGT_BPVis_ENE 2.2.32",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.31")
+st.sidebar.write("Version 2.2.32")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.31"
+REPORT_VERSION = "2.2.32"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -6151,13 +6151,16 @@ def compute_crrem_like_scenario_emissions_series(
 ) -> pd.Series:
     """Return annual total emissions in tCO₂e/a using the same decarbonization logic as CRREM.
 
-    This mirrors the CRREM tab logic:
-    - apply scenario-specific efficiency factors;
-    - apply scenario-specific source mapping;
-    - apply scenario-specific on-site generation scale only when enabled;
-    - clamp net electricity to zero, so exported on-site generation is not credited;
-    - calculate base-year emissions from scenario emission factors;
-    - multiply the full annual emissions balance by the CRREM grid-electricity decarbonization multiplier.
+    The function is intentionally scenario-payload based so it can be used in the Scenarios tab and
+    in the PDF report without loading a scenario into Streamlit widgets.
+
+    Rules:
+    - If the scenario has no valid CRREM decarbonization-path measures, the baseline/no-measures
+      CRREM logic is used.
+    - If the scenario has valid CRREM measures, the year-by-year trajectory applies those measures
+      exactly as in the CRREM tab: efficiency changes, energy-source reassignment, emission-factor
+      changes and on-site-generation production changes become active from their measure year onward.
+    - Tariff measures are intentionally ignored here because they do not affect emissions.
     """
     years_i = [int(y) for y in (years or [])]
     if not years_i:
@@ -6181,28 +6184,6 @@ def compute_crrem_like_scenario_emissions_series(
     factors = payload.get("factors", {}) or {}
     pv_cfg = payload.get("pv", {}) or {}
 
-    df_m["Efficiency_Factor"] = df_m["End_Use"].map(lambda u: _to_float_lcc(eff.get(u, 1.0), 1.0)).fillna(1.0)
-    df_m["Efficiency_Factor"] = df_m["Efficiency_Factor"].replace(0.0, 1.0)
-    df_m["kWh_adj"] = df_m["kWh"] / df_m["Efficiency_Factor"]
-
-    onsite_enduses = set(get_onsite_generation_enduses(df_m["End_Use"].unique()))
-    pv_mask = df_m["End_Use"].isin(onsite_enduses)
-    if pv_mask.any():
-        pv_apply_scale = bool(pv_cfg.get("enabled", False))
-        pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
-        scale = pv_scale if pv_apply_scale else 1.0
-        df_m.loc[pv_mask, "kWh_adj"] = -df_m.loc[pv_mask, "kWh_adj"].abs() * float(scale)
-
-    df_m.loc[~pv_mask, "kWh_adj"] = df_m.loc[~pv_mask, "kWh_adj"].clip(lower=0.0)
-    df_m["Energy_Source"] = df_m["End_Use"].map(lambda u: str(mapping.get(u, "Electricity"))).fillna("Electricity")
-    df_m.loc[~df_m["Energy_Source"].isin(ENERGY_SOURCE_ORDER), "Energy_Source"] = "Electricity"
-    if pv_mask.any():
-        df_m.loc[pv_mask, "Energy_Source"] = "Electricity"
-
-    annual_kwh_by_source = df_m.groupby("Energy_Source", as_index=True)["kWh_adj"].sum()
-    if "Electricity" in annual_kwh_by_source.index:
-        annual_kwh_by_source.loc["Electricity"] = max(float(annual_kwh_by_source.loc["Electricity"]), 0.0)
-
     base_factors = {
         "Electricity": _to_float_lcc(factors.get("Electricity", 0.0), 0.0),
         "Green Electricity": 0.0,
@@ -6212,23 +6193,252 @@ def compute_crrem_like_scenario_emissions_series(
         "Biomass": _to_float_lcc(factors.get("Biomass", 0.0), 0.0),
     }
 
-    emissions_base_kg = 0.0
-    for src, kwh in annual_kwh_by_source.items():
-        if str(src) == "Green Electricity":
-            continue
-        emissions_base_kg += float(kwh) * float(base_factors.get(str(src), 0.0))
-
-    # Fallback: if CRREM data is unavailable, keep emissions flat instead of failing the chart.
     try:
         ef_grid = (crrem or {}).get("ef_grid")
-        if ef_grid is not None and isinstance(ef_grid, pd.Series) and not ef_grid.empty:
-            multipliers = compute_decarb_multiplier(ef_grid, int(project_year), years_i)
-        else:
-            multipliers = pd.Series({int(y): 1.0 for y in years_i}, dtype=float)
+        if not (isinstance(ef_grid, pd.Series) and not ef_grid.empty):
+            ef_grid = None
     except Exception:
-        multipliers = pd.Series({int(y): 1.0 for y in years_i}, dtype=float)
+        ef_grid = None
 
-    return pd.Series({int(y): (float(emissions_base_kg) * float(multipliers.loc[int(y)])) / 1000.0 for y in years_i}, dtype=float)
+    # ------------------------------------------------------------------
+    # Parse scenario-specific CRREM measures stored in the scenario payload.
+    # ------------------------------------------------------------------
+    raw_measures = payload.get("crrem_measures", [])
+    try:
+        measures_records = _measures_df_to_records(raw_measures)
+    except Exception:
+        measures_records = raw_measures if isinstance(raw_measures, list) else []
+
+    ef_measures = {s: [] for s in ENERGY_SOURCE_ORDER}       # source -> [(year, new_ef)]
+    eff_measures = []                                        # [(year, end_use, new_eff)]
+    src_measures = []                                        # [(year, end_use, new_source)]
+    pv_measures = []                                         # [(year, annual_generation_kwh)]
+
+    def _year_or_none(x):
+        try:
+            if x is None or str(x).strip() == "":
+                return None
+            return int(float(str(x).replace(",", ".")))
+        except Exception:
+            return None
+
+    def _float_or_none(x):
+        try:
+            if x is None or str(x).strip() == "":
+                return None
+            return float(str(x).replace(",", "."))
+        except Exception:
+            return None
+
+    def _norm_src(x):
+        sx = str(x).strip()
+        for opt in ENERGY_SOURCE_ORDER:
+            if sx.lower() == str(opt).lower():
+                return str(opt)
+        return None
+
+    def _after_arrow(label: str) -> str:
+        parts = str(label).split("→", 1)
+        return parts[1].strip() if len(parts) > 1 else str(label).strip()
+
+    for rec in measures_records or []:
+        if not isinstance(rec, dict):
+            continue
+        p = str(rec.get("Parameter", "")).strip()
+        y = _year_or_none(rec.get("Year"))
+        if not p or y is None:
+            continue
+        # Ignore measures that can never affect the requested output period.
+        if int(y) > max(years_i):
+            continue
+        v_raw = rec.get("New Value", "")
+        p_l = p.lower()
+        target = _after_arrow(p)
+
+        # Emission-factor measure labels: "Emission Factors → Electricity".
+        if p_l.startswith("emission factors"):
+            src = _norm_src(target)
+            val = _float_or_none(v_raw)
+            if src is not None and val is not None:
+                ef_measures[src].append((int(y), float(val)))
+            continue
+
+        # Efficiency-factor measure labels: "Efficiency Factors → Heating".
+        if p_l.startswith("efficiency factors"):
+            eu = _canon_enduse_name(target)
+            val = _float_or_none(v_raw)
+            if eu and val is not None:
+                eff_measures.append((int(y), str(eu), float(val)))
+            continue
+
+        # Energy-source assignment labels: "Assign Energy Sources → Heating".
+        if p_l.startswith("assign energy sources"):
+            eu = _canon_enduse_name(target)
+            src = _norm_src(v_raw)
+            if eu and src is not None:
+                src_measures.append((int(y), str(eu), str(src)))
+            continue
+
+        # On-site generation / legacy PV production measure.
+        if (
+                p_l.startswith("on-site_generation")
+                or p_l.startswith("on-site generation")
+                or p_l.startswith("pv_generation")
+                or "annual production" in p_l
+                or "pv annual production" in p_l
+        ):
+            val = _float_or_none(v_raw)
+            if val is not None:
+                pv_measures.append((int(y), float(val)))
+            continue
+
+        # Energy-tariff measures are valid CRREM table entries, but they do not affect emissions.
+
+    for src in list(ef_measures.keys()):
+        ef_measures[src] = sorted(ef_measures[src], key=lambda t: t[0])
+    eff_measures = sorted(eff_measures, key=lambda t: t[0])
+    src_measures = sorted(src_measures, key=lambda t: t[0])
+    pv_measures = sorted(pv_measures, key=lambda t: t[0])
+
+    has_emission_relevant_measures = any([
+        any(ef_measures.values()),
+        bool(eff_measures),
+        bool(src_measures),
+        bool(pv_measures),
+    ])
+
+    # ------------------------------------------------------------------
+    # Baseline/no-measures path: keep the old behavior exactly.
+    # ------------------------------------------------------------------
+    if not has_emission_relevant_measures:
+        df_base_calc = df_m.copy()
+        df_base_calc["Efficiency_Factor"] = df_base_calc["End_Use"].map(
+            lambda u: _to_float_lcc(eff.get(u, 1.0), 1.0)
+        ).fillna(1.0)
+        df_base_calc["Efficiency_Factor"] = df_base_calc["Efficiency_Factor"].replace(0.0, 1.0)
+        df_base_calc["kWh_adj"] = df_base_calc["kWh"] / df_base_calc["Efficiency_Factor"]
+
+        onsite_enduses = set(get_onsite_generation_enduses(df_base_calc["End_Use"].unique()))
+        pv_mask = df_base_calc["End_Use"].isin(onsite_enduses)
+        if pv_mask.any():
+            pv_apply_scale = bool(pv_cfg.get("enabled", False))
+            pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
+            scale = pv_scale if pv_apply_scale else 1.0
+            df_base_calc.loc[pv_mask, "kWh_adj"] = -df_base_calc.loc[pv_mask, "kWh_adj"].abs() * float(scale)
+
+        df_base_calc.loc[~pv_mask, "kWh_adj"] = df_base_calc.loc[~pv_mask, "kWh_adj"].clip(lower=0.0)
+        df_base_calc["Energy_Source"] = df_base_calc["End_Use"].map(lambda u: str(mapping.get(u, "Electricity"))).fillna("Electricity")
+        df_base_calc.loc[~df_base_calc["Energy_Source"].isin(ENERGY_SOURCE_ORDER), "Energy_Source"] = "Electricity"
+        if pv_mask.any():
+            df_base_calc.loc[pv_mask, "Energy_Source"] = "Electricity"
+
+        annual_kwh_by_source = df_base_calc.groupby("Energy_Source", as_index=True)["kWh_adj"].sum()
+        if "Electricity" in annual_kwh_by_source.index:
+            annual_kwh_by_source.loc["Electricity"] = max(float(annual_kwh_by_source.loc["Electricity"]), 0.0)
+
+        emissions_base_kg = 0.0
+        for src, kwh in annual_kwh_by_source.items():
+            if str(src) == "Green Electricity":
+                continue
+            emissions_base_kg += float(kwh) * float(base_factors.get(str(src), 0.0))
+
+        try:
+            multipliers = compute_decarb_multiplier(ef_grid, int(project_year), years_i) if ef_grid is not None else pd.Series({int(y): 1.0 for y in years_i}, dtype=float)
+        except Exception:
+            multipliers = pd.Series({int(y): 1.0 for y in years_i}, dtype=float)
+
+        return pd.Series({int(y): (float(emissions_base_kg) * float(multipliers.loc[int(y)])) / 1000.0 for y in years_i}, dtype=float)
+
+    # ------------------------------------------------------------------
+    # With-measures path: reproduce CRREM Decarbonization Path Analysis logic.
+    # ------------------------------------------------------------------
+    annual_by_enduse = df_m.groupby("End_Use", as_index=True)["kWh"].sum()
+    end_uses_all = [str(u) for u in annual_by_enduse.index.tolist()]
+    onsite_enduses = set(get_onsite_generation_enduses(end_uses_all))
+
+    eff_base = {u: _to_float_lcc(eff.get(u, 1.0), 1.0) for u in end_uses_all}
+    src_base = {u: str(mapping.get(u, "Electricity")) for u in end_uses_all}
+    for u in onsite_enduses:
+        src_base[u] = "Electricity"
+
+    pv_apply_scale = bool(pv_cfg.get("enabled", False))
+    pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
+    pv_scale_eff = pv_scale if pv_apply_scale else 1.0
+
+    def _ef_at_year(src: str, year: int) -> float:
+        # Green Electricity is always zero by project rule.
+        if str(src) == "Green Electricity":
+            return 0.0
+
+        y0 = int(project_year)
+        v0 = float(base_factors.get(str(src), 0.0))
+        for ym, vm in ef_measures.get(str(src), []):
+            if int(ym) <= int(year) and int(ym) >= int(project_year):
+                y0 = int(ym)
+                v0 = float(vm)
+
+        if ef_grid is None:
+            return float(v0)
+
+        try:
+            y0_c = _clamp_year_to_series(int(y0), ef_grid)
+            y_c = _clamp_year_to_series(int(year), ef_grid)
+            denom = float(ef_grid.loc[y0_c])
+            if denom == 0:
+                return float(v0)
+            return float(v0) * float(ef_grid.loc[y_c]) / denom
+        except Exception:
+            return float(v0)
+
+    out = {}
+    for y in years_i:
+        eff_y = dict(eff_base)
+        src_y = dict(src_base)
+        pv_annual_override_y = None
+
+        # Measures are active from their specified year onward.
+        for ym, eu, val in eff_measures:
+            if int(ym) <= int(y):
+                eff_y[str(eu)] = float(val)
+        for ym, eu, src in src_measures:
+            if int(ym) <= int(y):
+                src_y[str(eu)] = str(src)
+        for ym, val in pv_measures:
+            if int(ym) <= int(y):
+                pv_annual_override_y = float(val)
+
+        kwh_by_source_y = {}
+        for eu, kwh in annual_by_enduse.items():
+            eu = str(eu)
+            effv = float(eff_y.get(eu, 1.0) or 1.0)
+            if effv == 0:
+                effv = 1.0
+            kwh_adj = float(kwh) / effv
+
+            if eu in onsite_enduses:
+                if pv_annual_override_y is not None:
+                    kwh_adj = -abs(float(pv_annual_override_y))
+                else:
+                    kwh_adj = -abs(float(kwh_adj)) * float(pv_scale_eff)
+                src = "Electricity"
+            else:
+                kwh_adj = max(float(kwh_adj), 0.0)
+                src = str(src_y.get(eu, "Electricity"))
+                if src not in ENERGY_SOURCE_ORDER:
+                    src = "Electricity"
+
+            kwh_by_source_y[src] = float(kwh_by_source_y.get(src, 0.0)) + float(kwh_adj)
+
+        # Clamp net electricity to >= 0 (no export credit).
+        if "Electricity" in kwh_by_source_y:
+            kwh_by_source_y["Electricity"] = max(float(kwh_by_source_y["Electricity"]), 0.0)
+
+        emis_kg_y = 0.0
+        for src, kwhv in kwh_by_source_y.items():
+            emis_kg_y += float(kwhv) * float(_ef_at_year(str(src), int(y)))
+        out[int(y)] = float(emis_kg_y) / 1000.0
+
+    return pd.Series(out, dtype=float)
 
 def find_stranding_year(asset: pd.Series, limit: pd.Series) -> Optional[int]:
     """First year where asset exceeds limit (strictly >)."""
