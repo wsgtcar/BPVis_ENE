@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.25",
+    page_title="WSGT_BPVis_ENE 2.2.26",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.25")
+st.sidebar.write("Version 2.2.26")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.25"
+REPORT_VERSION = "2.2.26"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9248,6 +9248,19 @@ with tab_lcc:
                 ref_annual_totals["Cumulative Nominal Cost"] = ref_annual_totals["Nominal_Cost"].cumsum()
                 ref_annual_totals["Cumulative Discounted Cost"] = ref_annual_totals["Discounted_Cost"].cumsum()
 
+            # Scenario colors used in LCC diagrams (kept in sync with Color Settings).
+            _lcc_saved_scenario_colors = st.session_state.get("color_map_scenarios", {})
+            if not isinstance(_lcc_saved_scenario_colors, dict):
+                _lcc_saved_scenario_colors = {}
+            _lcc_scenario_order = list(scenarios_lcc.keys()) if scenarios_lcc else [active_selected]
+            _lcc_scenario_colors = {}
+            for _i_sc, _sc_name in enumerate(_lcc_scenario_order):
+                _lcc_scenario_colors[str(_sc_name)] = str(
+                    _lcc_saved_scenario_colors.get(str(_sc_name), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
+                )
+            _lcc_active_color = _lcc_scenario_colors.get(str(active_selected), CRREM_COLOR_BASELINE)
+            _lcc_ref_color = _lcc_scenario_colors.get(str(ref_scenario_lcc), "#9ca3af")
+
             c1, c2 = st.columns([3, 1])
             with c1:
                 st.subheader("Annual LCC Balance")
@@ -9310,17 +9323,17 @@ with tab_lcc:
                     x=annual_totals["Year"],
                     y=annual_totals["Cumulative Nominal Cost"],
                     mode="lines+markers",
-                    name="Cumulative nominal cost",
-                    line=dict(color=CRREM_COLOR_BASELINE),
-                    marker=dict(color=CRREM_COLOR_BASELINE),
+                    name=f"{active_selected} cumulative nominal",
+                    line=dict(color=_lcc_active_color, width=3),
+                    marker=dict(color=_lcc_active_color),
                 ))
                 fig_lcc_cum.add_trace(go.Scatter(
                     x=annual_totals["Year"],
                     y=annual_totals["Cumulative Discounted Cost"],
                     mode="lines+markers",
-                    name="Cumulative discounted cost",
-                    line=dict(color=CRREM_COLOR_MEASURES),
-                    marker=dict(color=CRREM_COLOR_MEASURES),
+                    name=f"{active_selected} cumulative discounted",
+                    line=dict(color=_lcc_active_color, dash="dash", width=3),
+                    marker=dict(color=_lcc_active_color),
                 ))
                 if not ref_annual_totals.empty:
                     fig_lcc_cum.add_trace(go.Scatter(
@@ -9328,16 +9341,16 @@ with tab_lcc:
                         y=ref_annual_totals["Cumulative Nominal Cost"],
                         mode="lines+markers",
                         name=f"{ref_scenario_lcc} cumulative nominal",
-                        line=dict(color="#9ca3af", dash="dash"),
-                        marker=dict(color="#9ca3af"),
+                        line=dict(color=_lcc_ref_color, width=3),
+                        marker=dict(color=_lcc_ref_color),
                     ))
                     fig_lcc_cum.add_trace(go.Scatter(
                         x=ref_annual_totals["Year"],
                         y=ref_annual_totals["Cumulative Discounted Cost"],
                         mode="lines+markers",
                         name=f"{ref_scenario_lcc} cumulative discounted",
-                        line=dict(color="#6b7280", dash="dot"),
-                        marker=dict(color="#6b7280"),
+                        line=dict(color=_lcc_ref_color, dash="dash", width=3),
+                        marker=dict(color=_lcc_ref_color),
                     ))
                 fig_lcc_cum.update_layout(
                     height=620,
