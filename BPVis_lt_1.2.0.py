@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.23",
+    page_title="WSGT_BPVis_ENE 2.2.24",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.23")
+st.sidebar.write("Version 2.2.24")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.23"
+REPORT_VERSION = "2.2.24"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2700,9 +2700,10 @@ def _scenario_kpi_scatter_plotly_figure(
         title: str = "Scenario KPI scatter summary",
         height: int = 620,
 ) -> go.Figure:
-    """Create a faceted scatter plot for Benchmark-style scenario KPIs.
+    """Create one scenario KPI scatter chart with one independent y-axis per KPI.
 
-    Each KPI gets its own y-axis scale because the units and value ranges differ strongly.
+    The x-axis contains the KPIs. Each KPI keeps its own y-axis scale because the
+    KPI units/ranges are not comparable. Scenario colours follow Color Settings.
     """
     if radar_raw_df is None or radar_raw_df.empty:
         return go.Figure()
@@ -2716,47 +2717,127 @@ def _scenario_kpi_scatter_plotly_figure(
     if dfp.empty:
         return go.Figure()
 
-    label_map = {
-        "End Energy /m²": "Energy Density (EUI)<br>kWh/m²·a",
-        "Annual Energy Cost /m²": "Energy Cost<br>currency/m²·a",
-        "LCC 50 years /m²": "LCC 50 years<br>currency/m²",
-        "Annual Emissions /m²": "Carbon Intensity<br>kgCO₂e/m²·a",
-        "Total Emissions 50 years /m²": "LC Emissions 50 years<br>kgCO₂e/m²",
+    kpi_label_map = {
+        "End Energy /m²": "End Energy<br>/m²",
+        "Annual Energy Cost /m²": "Annual Energy<br>Cost /m²",
+        "LCC 50 years /m²": "LCC 50 years<br>/m²",
+        "Annual Emissions /m²": "Annual Emissions<br>/m²",
+        "Total Emissions 50 years /m²": "LC Emissions<br>50 years /m²",
     }
-    dfp["KPI Label"] = dfp["KPI"].map(label_map).fillna(dfp["KPI"])
-    dfp["Unit"] = dfp.get("Unit", "").astype(str)
-    dfp["Formatted Value"] = dfp.get("Formatted Value", "").astype(str)
+    axis_title_map = {
+        "End Energy /m²": "kWh/m²·a",
+        "Annual Energy Cost /m²": "Cost/m²·a",
+        "LCC 50 years /m²": "Cost/m²",
+        "Annual Emissions /m²": "kgCO₂e/m²·a",
+        "Total Emissions 50 years /m²": "kgCO₂e/m²",
+    }
+    kpis = [k for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
+    x_labels = [kpi_label_map.get(k, k) for k in kpis]
+    scenario_order = [str(s) for s in scenario_order_in]
+    scenario_offsets = {}
+    if scenario_order:
+        for i, sc in enumerate(scenario_order):
+            # categorical positions are not jittered; marker outlines keep overlap readable
+            scenario_offsets[sc] = 0
 
-    label_order = [label_map.get(k, k) for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
-    fig = px.scatter(
-        dfp,
-        x="Scenario",
-        y="Value",
-        color="Scenario",
-        facet_col="KPI Label",
-        facet_col_wrap=3,
-        category_orders={"Scenario": [str(s) for s in scenario_order_in], "KPI Label": label_order},
-        color_discrete_map=scenario_color_map_in or {},
-        custom_data=["KPI", "Formatted Value", "Unit", "Scenario"],
-        height=height,
-    )
-    fig.update_traces(
-        marker=dict(size=14, line=dict(width=1.5, color="white")),
-        hovertemplate=(
-            "<b>%{customdata[3]}</b><br>"
-            "%{customdata[0]}<br>"
-            "%{customdata[1]} %{customdata[2]}"
-            "<extra></extra>"
-        ),
-    )
-    fig.update_yaxes(matches=None, showticklabels=True, title_text="")
-    fig.update_xaxes(title_text="", tickangle=-25)
-    fig.for_each_annotation(lambda a: a.update(text=str(a.text).replace("KPI Label=", "")))
+    fig = go.Figure()
+    axis_palette = ["#374151", "#6b7280", "#4b5563", "#111827", "#9ca3af"]
+
+    for kpi_i, kpi in enumerate(kpis):
+        sub = dfp.loc[dfp["KPI"].astype(str) == kpi].copy()
+        if sub.empty:
+            continue
+        axis_name = "y" if kpi_i == 0 else f"y{kpi_i + 1}"
+        trace_yaxis = "y" if kpi_i == 0 else f"y{kpi_i + 1}"
+        for sc_i, sc in enumerate(scenario_order):
+            hit = sub.loc[sub["Scenario"].astype(str) == sc].copy()
+            if hit.empty:
+                continue
+            val = pd.to_numeric(hit.iloc[0].get("Value"), errors="coerce")
+            if pd.isna(val):
+                continue
+            unit = str(hit.iloc[0].get("Unit", ""))
+            formatted = str(hit.iloc[0].get("Formatted Value", f"{float(val):,.2f}"))
+            col = (scenario_color_map_in or {}).get(sc, SCENARIO_COLOR_PALETTE[sc_i % len(SCENARIO_COLOR_PALETTE)])
+            fig.add_trace(go.Scatter(
+                x=[kpi_label_map.get(kpi, kpi)],
+                y=[float(val)],
+                mode="markers",
+                marker=dict(size=15, color=col, line=dict(width=1.6, color="white")),
+                name=sc,
+                legendgroup=sc,
+                showlegend=(kpi_i == 0),
+                yaxis=trace_yaxis,
+                customdata=[[sc, kpi, formatted, unit]],
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "%{customdata[1]}<br>"
+                    "%{customdata[2]} %{customdata[3]}"
+                    "<extra></extra>"
+                ),
+            ))
+
+    # Configure independent y-axes. All axes overlay the first one, but each KPI trace
+    # reads against its own scale. Left/right free axes keep the diagram in a single panel.
+    layout_axes = {}
+    positions_left = [0.00, 0.055, 0.11]
+    positions_right = [1.00, 0.945]
+    left_i = 0
+    right_i = 0
+    for kpi_i, kpi in enumerate(kpis):
+        sub_vals = pd.to_numeric(dfp.loc[dfp["KPI"].astype(str) == kpi, "Value"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        vmax = float(sub_vals.max()) if not sub_vals.empty else 1.0
+        vmin = float(sub_vals.min()) if not sub_vals.empty else 0.0
+        if vmax <= 0:
+            yrange = [min(0.0, vmin * 1.10), max(1.0, vmax * 1.10)]
+        else:
+            yrange = [0.0, vmax * 1.12]
+        axis_col = axis_palette[kpi_i % len(axis_palette)]
+        side = "left" if kpi_i in [0, 2, 4] else "right"
+        if kpi_i == 0:
+            axis_cfg = dict(
+                title=dict(text=axis_title_map.get(kpi, kpi), font=dict(size=10, color=axis_col)),
+                tickfont=dict(size=10, color=axis_col),
+                range=yrange,
+                showgrid=True,
+                zeroline=True,
+                side=side,
+            )
+            layout_axes["yaxis"] = axis_cfg
+        else:
+            if side == "left":
+                pos = positions_left[min(left_i + 1, len(positions_left) - 1)]
+                left_i += 1
+            else:
+                pos = positions_right[min(right_i, len(positions_right) - 1)]
+                right_i += 1
+            axis_cfg = dict(
+                title=dict(text=axis_title_map.get(kpi, kpi), font=dict(size=10, color=axis_col)),
+                tickfont=dict(size=10, color=axis_col),
+                range=yrange,
+                overlaying="y",
+                side=side,
+                anchor="free",
+                position=float(pos),
+                showgrid=False,
+                zeroline=False,
+            )
+            layout_axes[f"yaxis{kpi_i + 1}"] = axis_cfg
+
     fig.update_layout(
+        **layout_axes,
         title=dict(text=title, x=0.5, xanchor="center"),
+        xaxis=dict(
+            title="",
+            categoryorder="array",
+            categoryarray=x_labels,
+            tickfont=dict(size=11),
+            domain=[0.16, 0.84],
+        ),
         legend_title_text="Scenario",
-        legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="center", x=0.5),
-        margin=dict(l=35, r=25, t=80, b=115),
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+        margin=dict(l=95, r=95, t=80, b=120),
+        height=height,
     )
     return fig
 
@@ -2941,7 +3022,7 @@ def _report_scenario_kpi_scatter_chart(
         scenario_color_map_in: dict,
         scenario_order_in: list,
 ) -> io.BytesIO:
-    """Create a faceted matplotlib scatter chart for scenario KPI comparison in the PDF report."""
+    """Create one KPI scatter chart with separate y-axis scales for the PDF report."""
     import matplotlib.pyplot as plt
     import numpy as _np
 
@@ -2964,46 +3045,100 @@ def _report_scenario_kpi_scatter_chart(
         return _report_fig_to_png_bytes(fig)
 
     label_map = {
-        "End Energy /m²": "EUI\nkWh/m²·a",
-        "Annual Energy Cost /m²": "Energy Cost\n/m²·a",
+        "End Energy /m²": "End Energy\n/m²",
+        "Annual Energy Cost /m²": "Annual Energy\nCost /m²",
         "LCC 50 years /m²": "LCC 50y\n/m²",
-        "Annual Emissions /m²": "Carbon\nkgCO₂e/m²·a",
-        "Total Emissions 50 years /m²": "LC Emissions 50y\nkgCO₂e/m²",
+        "Annual Emissions /m²": "Annual Emissions\n/m²",
+        "Total Emissions 50 years /m²": "LC Emissions\n50y /m²",
+    }
+    unit_map = {
+        "End Energy /m²": "kWh/m²·a",
+        "Annual Energy Cost /m²": "Cost/m²·a",
+        "LCC 50 years /m²": "Cost/m²",
+        "Annual Emissions /m²": "kgCO₂e/m²·a",
+        "Total Emissions 50 years /m²": "kgCO₂e/m²",
     }
     kpis = [k for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
-    n = len(kpis)
-    ncols = 3
-    nrows = int(_np.ceil(n / ncols)) if n else 1
-    fig, axes = plt.subplots(nrows, ncols, figsize=(7.8, 2.55 * nrows + 0.4), dpi=180)
-    axes = _np.array(axes).reshape(-1)
     scenario_order = [str(s) for s in scenario_order_in]
+    if not kpis:
+        fig, ax = plt.subplots(figsize=(7.6, 4.0), dpi=180)
+        ax.text(0.5, 0.5, "No scenario KPI data available", ha="center", va="center")
+        ax.axis("off")
+        return _report_fig_to_png_bytes(fig)
 
-    for ax_i, kpi in enumerate(kpis):
-        ax = axes[ax_i]
+    fig, host = plt.subplots(figsize=(7.9, 4.9), dpi=180)
+    axes = [host]
+    # Additional axes are overlayed and slightly offset to show independent scales.
+    for i in range(1, len(kpis)):
+        ax = host.twinx()
+        axes.append(ax)
+
+    left_offsets = [0, -0.10, -0.20]
+    right_offsets = [0, 0.10]
+    left_count = 0
+    right_count = 0
+    axis_colors = ["#374151", "#6b7280", "#4b5563", "#111827", "#9ca3af"]
+    x_positions = _np.arange(len(kpis))
+    if len(scenario_order) > 1:
+        jitter = _np.linspace(-0.10, 0.10, len(scenario_order))
+    else:
+        jitter = _np.array([0.0])
+
+    legend_handles = []
+    legend_labels = []
+    for kpi_i, kpi in enumerate(kpis):
+        ax = axes[kpi_i]
+        side = "left" if kpi_i in [0, 2, 4] else "right"
+        axis_col = axis_colors[kpi_i % len(axis_colors)]
+        if kpi_i == 0:
+            ax.spines["left"].set_color(axis_col)
+            ax.yaxis.set_label_position("left")
+            ax.yaxis.tick_left()
+        else:
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_visible(False)
+            if side == "left":
+                ax.spines["left"].set_visible(True)
+                ax.spines["left"].set_position(("axes", left_offsets[min(left_count + 1, len(left_offsets) - 1)]))
+                ax.spines["left"].set_color(axis_col)
+                ax.yaxis.set_label_position("left")
+                ax.yaxis.tick_left()
+                left_count += 1
+            else:
+                ax.spines["right"].set_visible(True)
+                ax.spines["right"].set_position(("axes", 1 + right_offsets[min(right_count, len(right_offsets) - 1)]))
+                ax.spines["right"].set_color(axis_col)
+                ax.yaxis.set_label_position("right")
+                ax.yaxis.tick_right()
+                right_count += 1
         sub = dfp.loc[dfp["KPI"].astype(str) == kpi].copy()
-        xs, ys, cols = [], [], []
-        for idx, sc in enumerate(scenario_order):
+        vals = pd.to_numeric(sub["Value"], errors="coerce").dropna()
+        vmax = float(vals.max()) if not vals.empty else 1.0
+        vmin = float(vals.min()) if not vals.empty else 0.0
+        if vmax <= 0:
+            ax.set_ylim(min(0.0, vmin * 1.10), max(1.0, vmax * 1.10))
+        else:
+            ax.set_ylim(0.0, vmax * 1.12)
+        ax.set_ylabel(unit_map.get(kpi, kpi), fontsize=6.4, color=axis_col)
+        ax.tick_params(axis="y", labelsize=5.8, colors=axis_col, width=0.6)
+        ax.grid(kpi_i == 0, axis="y", linewidth=0.35, alpha=0.35)
+        for sc_i, sc in enumerate(scenario_order):
             hit = sub.loc[sub["Scenario"].astype(str) == sc, "Value"]
             if hit.empty or pd.isna(hit.iloc[0]):
                 continue
-            xs.append(idx)
-            ys.append(float(hit.iloc[0]))
-            cols.append((scenario_color_map_in or {}).get(sc, SCENARIO_COLOR_PALETTE[idx % len(SCENARIO_COLOR_PALETTE)]))
-        ax.scatter(xs, ys, s=42, c=cols, edgecolor="white", linewidth=0.7, zorder=3)
-        ax.set_title(label_map.get(kpi, kpi), fontsize=8.2, fontweight="bold")
-        ax.grid(True, axis="y", linewidth=0.4, alpha=0.45)
-        ax.set_xticks(range(len(scenario_order)))
-        ax.set_xticklabels(scenario_order, rotation=35, ha="right", fontsize=5.8)
-        ax.tick_params(axis="y", labelsize=6.1)
-        vals = pd.to_numeric(sub["Value"], errors="coerce").replace([_np.inf, -_np.inf], _np.nan).dropna()
-        if not vals.empty:
-            ymin, ymax = float(vals.min()), float(vals.max())
-            pad = (ymax - ymin) * 0.15 if abs(ymax - ymin) > 1e-9 else max(abs(ymax) * 0.15, 1.0)
-            ax.set_ylim(ymin - pad, ymax + pad)
-    for j in range(len(kpis), len(axes)):
-        axes[j].axis("off")
-    fig.suptitle(title, fontsize=11, fontweight="bold", y=0.99)
-    plt.tight_layout(rect=[0.02, 0.03, 0.98, 0.94])
+            col = (scenario_color_map_in or {}).get(sc, SCENARIO_COLOR_PALETTE[sc_i % len(SCENARIO_COLOR_PALETTE)])
+            handle = ax.scatter(kpi_i + float(jitter[min(sc_i, len(jitter)-1)]), float(hit.iloc[0]), s=34, c=col, edgecolor="white", linewidth=0.65, zorder=4)
+            if kpi_i == 0:
+                legend_handles.append(handle)
+                legend_labels.append(sc)
+
+    host.set_xlim(-0.55, len(kpis) - 0.45)
+    host.set_xticks(x_positions)
+    host.set_xticklabels([label_map.get(k, k) for k in kpis], fontsize=6.3)
+    host.set_title(title, fontsize=11, fontweight="bold", pad=10)
+    if legend_handles:
+        host.legend(legend_handles, legend_labels, loc="lower center", bbox_to_anchor=(0.5, -0.34), ncol=min(3, max(1, len(legend_labels))), fontsize=6.5, frameon=False)
+    fig.subplots_adjust(left=0.24, right=0.76, bottom=0.28, top=0.86)
     return _report_fig_to_png_bytes(fig)
 
 def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
@@ -3411,7 +3546,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                     styles,
                     "Scenario KPI scatter summary",
                     _report_scenario_kpi_scatter_chart(radar_raw_report, "Benchmark-Style Scenario KPI Scatter", colors_scenarios, scenario_order_report),
-                    "The scatter summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) plus 50-year LCC and life-cycle emissions. Each KPI panel has its own y-axis scale.",
+                    "The scatter summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) plus 50-year LCC and life-cycle emissions. Each KPI is shown on one chart with its own y-axis scale.",
                 )
     except Exception:
         pass
@@ -9229,7 +9364,7 @@ with tab_lcc:
                         hole=0.5,
                         height=620,
                     )
-                    fig_type_pie.update_traces(textinfo="value+percent", textfont_size=16, textfont_color="white")
+                    fig_type_pie.update_traces(texttemplate="%{value:.1f}<br>%{percent}", textinfo="none", textfont_size=16, textfont_color="white")
                     fig_type_pie.update_layout(
                         annotations=[dict(
                             text=f"{currency_lcc} {total_nominal_lcc / project_area_lcc:,.2f}<br>per m²" if project_area_lcc > 0 else f"{currency_lcc} {total_nominal_lcc:,.0f}",
@@ -9272,7 +9407,7 @@ with tab_lcc:
                         height=800,
                         category_orders={"End_Use": END_USE_ORDER},
                     )
-                    fig_enduse_pie.update_traces(textinfo="value+percent", textfont_size=18, textfont_color="white")
+                    fig_enduse_pie.update_traces(texttemplate="%{value:.1f}<br>%{percent}", textinfo="none", textfont_size=18, textfont_color="white")
                     fig_enduse_pie.update_layout(showlegend=True)
                     st_plotly_chart(fig_enduse_pie, use_container_width=True, key="lcc_enduse_pie")
                 else:
@@ -9300,7 +9435,7 @@ with tab_lcc:
                         height=800,
                         category_orders={"Energy_Source": ENERGY_SOURCE_ORDER},
                     )
-                    fig_source_pie.update_traces(textinfo="value+percent", textfont_size=18, textfont_color="white")
+                    fig_source_pie.update_traces(texttemplate="%{value:.1f}<br>%{percent}", textinfo="none", textfont_size=18, textfont_color="white")
                     fig_source_pie.update_layout(showlegend=True)
                     st_plotly_chart(fig_source_pie, use_container_width=True, key="lcc_source_pie")
                 else:
@@ -9627,7 +9762,7 @@ with tab7:
                     st_plotly_chart(fig_scenario_kpi_scatter, use_container_width=True, key="scenario_kpi_scatter_summary")
                     st.caption(
                         "The scatter summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) "
-                        "plus 50-year LCC and life-cycle emissions. Each KPI panel has its own y-axis scale."
+                        "plus 50-year LCC and life-cycle emissions. Each KPI is shown on one chart with its own y-axis scale."
                     )
                 else:
                     st.info("No radar KPI data available for the current scenarios.")
