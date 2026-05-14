@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.46",
+    page_title="WSGT_BPVis_ENE 2.2.47",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.46")
+st.sidebar.write("Version 2.2.47")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -779,6 +779,30 @@ def parse_project_setting_int(df: Optional[pd.DataFrame], key: str, default: int
         return max(1, int(float(str(kv.get(key)).replace(",", "."))))
     except Exception:
         return int(default)
+
+
+def parse_project_setting_bool(df: Optional[pd.DataFrame], key: str, default: bool) -> bool:
+    """Read an optional boolean setting from Project_Data without changing legacy parsers."""
+    try:
+        if df is None or not {"Key", "Value"}.issubset(df.columns):
+            return bool(default)
+        kv = dict(zip(df["Key"].astype(str), df["Value"]))
+        raw = kv.get(key, default)
+        if raw is None or str(raw).strip() == "":
+            return bool(default)
+        if isinstance(raw, bool):
+            return bool(raw)
+        s = str(raw).strip().lower()
+        if s in {"1", "true", "yes", "y", "on", "apply", "applied"}:
+            return True
+        if s in {"0", "false", "no", "n", "off", "ignore", "ignored"}:
+            return False
+        try:
+            return bool(int(float(s.replace(",", "."))))
+        except Exception:
+            return bool(default)
+    except Exception:
+        return bool(default)
 
 
 def parse_factors_df(df: Optional[pd.DataFrame]) -> Dict[str, float]:
@@ -2223,7 +2247,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.46"
+REPORT_VERSION = "2.2.47"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2729,6 +2753,36 @@ def _report_eui_series_for_payload(df_energy: pd.DataFrame, payload: dict, years
 
 
 SCENARIO_COMPARISON_PERIOD_KEY = "scenario_comparison_analysis_period"
+SCENARIO_COMPARISON_APPLY_LCC_FILTER_KEY = "scenario_comparison_apply_lcc_filter"
+
+
+def _get_scenario_comparison_apply_lcc_filter(default: bool = True) -> bool:
+    """Return whether Scenarios-tab LCC outputs should reuse the LCC-Analysis operational end-use filter."""
+    try:
+        raw = st.session_state.get(SCENARIO_COMPARISON_APPLY_LCC_FILTER_KEY, default)
+        if isinstance(raw, bool):
+            return bool(raw)
+        s = str(raw).strip().lower()
+        if s in {"1", "true", "yes", "y", "on"}:
+            return True
+        if s in {"0", "false", "no", "n", "off"}:
+            return False
+    except Exception:
+        pass
+    return bool(default)
+
+
+def _scenario_comparison_lcc_global_payload(base_lcc_global: dict, end_uses: list, apply_lcc_filter: bool = True) -> dict:
+    """Return LCC assumptions for the Scenarios tab only.
+
+    If apply_lcc_filter is False, the LCC-Analysis operational end-use filter is ignored and
+    all standard operational consumption end uses are included for scenario comparison. This
+    does not mutate the committed global LCC payload used by the LCC-Analysis tab.
+    """
+    out = _normalize_lcc_global_payload(base_lcc_global or {}, end_uses)
+    if not bool(apply_lcc_filter):
+        out["selected_operational_end_uses"] = _lcc_default_selected_enduses(end_uses)
+    return out
 
 
 def _get_scenario_comparison_analysis_period(default: int = 50) -> int:
@@ -2842,6 +2896,7 @@ def _build_scenario_performance_radar_raw_df(
         lcc_global_in: dict,
         crrem_dataset: Optional[dict] = None,
         scenario_analysis_period: int = 50,
+        apply_lcc_filter: bool = True,
 ) -> pd.DataFrame:
     """Build raw KPI values for the Scenarios performance radar diagrams.
 
@@ -2866,8 +2921,8 @@ def _build_scenario_performance_radar_raw_df(
     except Exception:
         radar_years_50 = list(range(2025, 2025 + scenario_analysis_period))
 
-    radar_lcc_global_50 = dict(lcc_global_in or {})
-    radar_lcc_global_50["analysis_period"] = int(scenario_analysis_period)
+    radar_lcc_global_50_base = dict(lcc_global_in or {})
+    radar_lcc_global_50_base["analysis_period"] = int(scenario_analysis_period)
     lcc_period_kpi_label = _scenario_lcc_kpi_label(int(scenario_analysis_period))
     lc_emissions_period_kpi_label = _scenario_lc_emissions_kpi_label(int(scenario_analysis_period))
 
@@ -2907,6 +2962,12 @@ def _build_scenario_performance_radar_raw_df(
         try:
             df_energy_sc_50 = get_energy_balance_df(file_bytes, filename, scenario_name=sc_name_str)
             end_uses_sc_50 = [_canon_enduse_name(str(c)) for c in df_energy_sc_50.columns if str(c) != "Month"]
+            radar_lcc_global_50 = _scenario_comparison_lcc_global_payload(
+                radar_lcc_global_50_base,
+                end_uses_sc_50,
+                apply_lcc_filter=apply_lcc_filter,
+            )
+            radar_lcc_global_50["analysis_period"] = int(scenario_analysis_period)
             cf_sc_50 = compute_lcc_cashflow_table(
                 df_energy_sc_50,
                 payload_sc,
@@ -4388,6 +4449,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         scenario_order_report = [str(s) for s in scenarios_report.keys()]
         if scenario_order_report:
             scenario_comparison_period_report = _get_scenario_comparison_analysis_period(50)
+            scenario_comparison_apply_lcc_filter_report = _get_scenario_comparison_apply_lcc_filter(True)
             radar_raw_report = _build_scenario_performance_radar_raw_df(
                 file_bytes,
                 filename,
@@ -4400,6 +4462,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                 lcc_global,
                 crrem_dataset=crrem,
                 scenario_analysis_period=scenario_comparison_period_report,
+                apply_lcc_filter=scenario_comparison_apply_lcc_filter_report,
             )
             radar_ref_report = str(st.session_state.get("scenario_radar_reference_scenario", active_name) or active_name)
             if radar_ref_report not in scenario_order_report:
@@ -4477,9 +4540,13 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         pass
     story.append(Paragraph("The report is generated for the active scenario only for the detailed scenario charts below. The radar summary compares all available scenarios.", styles["BodyText"]))
     try:
-        _sc_report_lcc_global = dict(lcc_global or {})
-        _sc_report_lcc_global["analysis_period"] = int(scenario_comparison_period_report)
         _sc_report_end_uses = [_canon_enduse_name(str(c)) for c in df_energy.columns if str(c) != "Month"]
+        _sc_report_lcc_global = _scenario_comparison_lcc_global_payload(
+            lcc_global or {},
+            _sc_report_end_uses,
+            apply_lcc_filter=_get_scenario_comparison_apply_lcc_filter(True),
+        )
+        _sc_report_lcc_global["analysis_period"] = int(scenario_comparison_period_report)
         cf_scenario_report = compute_lcc_cashflow_table(
             df_energy,
             payload,
@@ -4506,7 +4573,13 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
             _report_add_chart(story, styles, "Cumulative emissions", _report_line_chart({active_name: annual_em_sc.cumsum(), "CRREM-Baseline": crrem_total.cumsum()}, "Cumulative Emissions - Active Scenario", "tCO₂e", {active_name: scenario_color, "CRREM-Baseline": CRREM_COLOR_LIMIT}, dashed={"CRREM-Baseline"}), "Cumulative emissions are the running sum of annual decarbonized emissions.")
         except Exception:
             pass
-    add_input_table("Relevant inputs", [("Active scenario", active_name), ("Scenario comparison analysis period", f"{int(scenario_comparison_period_report)} years"), ("Scenario color", scenario_color), ("Scenario-specific raw Energy_Balance override", "Yes" if get_scenario_energy_balance_override(active_name) is not None else "No")])
+    add_input_table("Relevant inputs", [
+        ("Active scenario", active_name),
+        ("Scenario comparison analysis period", f"{int(scenario_comparison_period_report)} years"),
+        ("Apply LCC-Analysis operational filter", "Yes" if _get_scenario_comparison_apply_lcc_filter(True) else "No"),
+        ("Scenario color", scenario_color),
+        ("Scenario-specific raw Energy_Balance override", "Yes" if get_scenario_energy_balance_override(active_name) is not None else "No"),
+    ])
 
     # Model Inputs QA
     add_section("10. Model Inputs QA")
@@ -7422,6 +7495,11 @@ if uploaded_file:
         "Scenario_Comparison_Analysis_Period",
         50,
     )
+    saved_scenario_comparison_apply_lcc_filter = parse_project_setting_bool(
+        cfg_saved["project"],
+        "Scenario_Comparison_Apply_LCC_Filter",
+        True,
+    )
 
     saved_factors = parse_factors_df(cfg_saved["factors"])
     saved_tariffs = parse_tariffs_df(cfg_saved["tariffs"])
@@ -7448,6 +7526,7 @@ if uploaded_file:
         "lon": saved_lon,
         "year": saved_year,
         "scenario_comparison_period": saved_scenario_comparison_period,
+        "scenario_comparison_apply_lcc_filter": saved_scenario_comparison_apply_lcc_filter,
         "factors": saved_factors,
         "tariffs": saved_tariffs,
         "mapping_df": saved_mapping_df,
@@ -7570,6 +7649,11 @@ if uploaded_file:
                 st.session_state[SCENARIO_COMPARISON_PERIOD_KEY] = max(1, int(float(preloaded.get("scenario_comparison_period", 50))))
             except Exception:
                 pass
+
+        try:
+            st.session_state[SCENARIO_COMPARISON_APPLY_LCC_FILTER_KEY] = bool(preloaded.get("scenario_comparison_apply_lcc_filter", True))
+        except Exception:
+            st.session_state[SCENARIO_COMPARISON_APPLY_LCC_FILTER_KEY] = True
 
         if preloaded.get("year") is not None:
             try:
@@ -8296,9 +8380,13 @@ with tab1:
                 )
                 try:
                     _sc_cmp_period_save = _get_scenario_comparison_analysis_period(50)
+                    _sc_cmp_apply_lcc_filter_save = _get_scenario_comparison_apply_lcc_filter(True)
                     project_df = pd.concat([
                         project_df,
-                        pd.DataFrame([{"Key": "Scenario_Comparison_Analysis_Period", "Value": int(_sc_cmp_period_save)}]),
+                        pd.DataFrame([
+                            {"Key": "Scenario_Comparison_Analysis_Period", "Value": int(_sc_cmp_period_save)},
+                            {"Key": "Scenario_Comparison_Apply_LCC_Filter", "Value": 1 if bool(_sc_cmp_apply_lcc_filter_save) else 0},
+                        ]),
                     ], ignore_index=True)
                 except Exception:
                     pass
@@ -11524,7 +11612,9 @@ with tab7:
             # Scenario Comparison has its own analysis period, independent from LCC-Analysis.
             if SCENARIO_COMPARISON_PERIOD_KEY not in st.session_state:
                 st.session_state[SCENARIO_COMPARISON_PERIOD_KEY] = int((preloaded or {}).get("scenario_comparison_period", 50))
-            _period_col, _period_spacer = st.columns([1.15, 2.85])
+            if SCENARIO_COMPARISON_APPLY_LCC_FILTER_KEY not in st.session_state:
+                st.session_state[SCENARIO_COMPARISON_APPLY_LCC_FILTER_KEY] = bool((preloaded or {}).get("scenario_comparison_apply_lcc_filter", True))
+            _period_col, _filter_col, _period_spacer = st.columns([1.15, 1.45, 1.40])
             with _period_col:
                 st.number_input(
                     "Scenario comparison analysis period (years)",
@@ -11535,7 +11625,19 @@ with tab7:
                     key=SCENARIO_COMPARISON_PERIOD_KEY,
                     help="Independent from the LCC-Analysis period. Used for Scenarios-tab life-cycle KPIs, LCC/emissions comparisons, radar/bar summary and delta analysis.",
                 )
+            with _filter_col:
+                st.checkbox(
+                    "Apply LCC-Analysis operational filter",
+                    value=bool(st.session_state.get(SCENARIO_COMPARISON_APPLY_LCC_FILTER_KEY, True)),
+                    key=SCENARIO_COMPARISON_APPLY_LCC_FILTER_KEY,
+                    help=(
+                        "Default: checked. Scenario-comparison LCC uses the operational End Use filter from the LCC-Analysis tab. "
+                        "Unchecked: Scenarios-tab LCC ignores that filter and includes all standard operational consumption end uses. "
+                        "This does not change LCC-Analysis results."
+                    ),
+                )
             scenario_comparison_period = _get_scenario_comparison_analysis_period(50)
+            scenario_comparison_apply_lcc_filter = _get_scenario_comparison_apply_lcc_filter(True)
 
             # On-top scenario radar summary (outside the Life Cycle Comparission expander).
             try:
@@ -11570,6 +11672,7 @@ with tab7:
                     _radar_lcc_global,
                     crrem_dataset=_radar_crrem_dataset,
                     scenario_analysis_period=scenario_comparison_period,
+                    apply_lcc_filter=scenario_comparison_apply_lcc_filter,
                 )
                 st.subheader("Scenario Performance Radar")
 
@@ -11788,7 +11891,11 @@ with tab7:
                     st.info("No Energy_Balance data available for life-cycle comparison.")
                 else:
                     project_year_lcc_cmp = int(st.session_state.get("project_year", 2025))
-                    lcc_global_cmp = _get_lcc_global_state_payload(all_enduses_lcc_cmp)
+                    lcc_global_cmp = _scenario_comparison_lcc_global_payload(
+                        _get_lcc_global_state_payload(all_enduses_lcc_cmp),
+                        all_enduses_lcc_cmp,
+                        apply_lcc_filter=scenario_comparison_apply_lcc_filter,
+                    )
                     analysis_period_lcc_cmp = max(1, int(scenario_comparison_period))
                     lcc_global_cmp["analysis_period"] = int(analysis_period_lcc_cmp)
                     lcc_years_cmp = list(range(project_year_lcc_cmp, project_year_lcc_cmp + analysis_period_lcc_cmp))
