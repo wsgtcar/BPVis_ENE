@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.29",
+    page_title="WSGT_BPVis_ENE 2.2.30",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.29")
+st.sidebar.write("Version 2.2.30")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.29"
+REPORT_VERSION = "2.2.30"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2770,6 +2770,10 @@ def _scenario_kpi_scatter_plotly_figure(
                 y=[float(val)],
                 width=[float(bar_width)],
                 marker=dict(color=col, line=dict(width=0.8, color="white")),
+                text=[formatted],
+                textposition="outside",
+                textfont=dict(size=11, color=col),
+                cliponaxis=False,
                 name=sc,
                 legendgroup=sc,
                 showlegend=(kpi_i == 0),
@@ -2798,7 +2802,7 @@ def _scenario_kpi_scatter_plotly_figure(
         if vmax <= 0:
             yrange = [min(0.0, vmin * 1.10), max(1.0, vmax * 1.10)]
         else:
-            yrange = [0.0, vmax * 1.12]
+            yrange = [0.0, vmax * 1.24]
         axis_col = axis_palette[kpi_i % len(axis_palette)]
         side = "left" if str(kpi) in annual_kpis_left else "right"
         if kpi_i == 0:
