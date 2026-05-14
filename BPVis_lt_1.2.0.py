@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.35",
+    page_title="WSGT_BPVis_ENE 2.2.36",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.35")
+st.sidebar.write("Version 2.2.36")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2204,7 +2204,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.35"
+REPORT_VERSION = "2.2.36"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -4219,7 +4219,9 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
             except Exception:
                 pass
         _report_add_chart(story, styles, "Cumulative LCC", _report_line_chart(lcc_report_series, "Cumulative LCC", currency_r, lcc_report_colors, dashed=lcc_report_dashed), "Nominal cost is undiscounted cash flow. Discounted cost is future cash flow converted to present value using the interest rate. When a payback reference scenario is selected, its cumulative LCC is shown as an additional pair of lines.")
-        _report_add_chart(story, styles, "LCC by cost type", _report_pie_chart(by_type["Nominal Cost"], "Nominal LCC by Cost Type", f"{currency_r} {total_nom:,.0f}", LCC_COST_TYPE_COLORS), "Cost-type shares use total nominal cost over the analysis period.")
+        _report_cost_type_values = (by_type["Nominal Cost"] / project_area_r) if project_area_r else by_type["Nominal Cost"]
+        _report_cost_type_center = f"{currency_r} {total_nom / project_area_r:,.2f}\n/m²" if project_area_r else f"{currency_r} {total_nom:,.0f}"
+        _report_add_chart(story, styles, "LCC by cost type", _report_pie_chart(_report_cost_type_values, "Nominal LCC per m² by Cost Type", _report_cost_type_center, LCC_COST_TYPE_COLORS), "Cost-type shares use nominal LCC intensity over the analysis period.")
         _report_add_chart(story, styles, "LCC by assigned end use", _report_pie_chart(by_end / project_area_r if project_area_r else by_end, "Nominal LCC per m² by End Use", f"{currency_r} {total_nom / project_area_r:,.0f}\n/m²" if project_area_r else f"{currency_r} {total_nom:,.0f}", colors_eu), "Costs assigned to multiple end uses are allocated equally across the assigned end uses.")
     add_input_table("Relevant inputs", [
         ("Analysis period", f"{int(lcc_global.get('analysis_period', 30))} years"),
@@ -10375,12 +10377,23 @@ with tab_lcc:
             with c4:
                 st.subheader("LCC Cost Type Share")
                 pie_type = by_type_lcc.copy()
-                pie_type = pie_type[pie_type["Nominal_Cost"] > 0]
+                # Show this donut consistently as cost intensity (currency/m²), matching the center label.
+                if project_area_lcc > 0:
+                    pie_type["Nominal Cost per m²"] = pie_type["Nominal_Cost"] / project_area_lcc
+                    _lcc_type_value_col = "Nominal Cost per m²"
+                    _lcc_type_center_value = float(pie_type[_lcc_type_value_col].sum())
+                    _lcc_type_center_text = f"{currency_lcc} {_lcc_type_center_value:,.2f}<br>per m²"
+                else:
+                    pie_type["Nominal Cost"] = pie_type["Nominal_Cost"]
+                    _lcc_type_value_col = "Nominal Cost"
+                    _lcc_type_center_value = float(pie_type[_lcc_type_value_col].sum())
+                    _lcc_type_center_text = f"{currency_lcc} {_lcc_type_center_value:,.0f}"
+                pie_type = pie_type[pie_type[_lcc_type_value_col] > 0]
                 if not pie_type.empty:
                     fig_type_pie = px.pie(
                         pie_type,
                         names="Cost Type",
-                        values="Nominal_Cost",
+                        values=_lcc_type_value_col,
                         color="Cost Type",
                         color_discrete_map=LCC_COST_TYPE_COLORS,
                         hole=0.5,
@@ -10389,7 +10402,7 @@ with tab_lcc:
                     fig_type_pie.update_traces(texttemplate="%{value:.1f}<br>%{percent}", textinfo="none", textfont_size=16, textfont_color="white")
                     fig_type_pie.update_layout(
                         annotations=[dict(
-                            text=f"{currency_lcc} {total_nominal_lcc / project_area_lcc:,.2f}<br>per m²" if project_area_lcc > 0 else f"{currency_lcc} {total_nominal_lcc:,.0f}",
+                            text=_lcc_type_center_text,
                             x=0.5,
                             y=0.5,
                             xref="paper",
