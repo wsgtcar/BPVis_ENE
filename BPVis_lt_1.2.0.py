@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.18",
+    page_title="WSGT_BPVis_ENE 2.2.19",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.18")
+st.sidebar.write("Version 2.2.19")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.18"
+REPORT_VERSION = "2.2.19"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9285,9 +9285,9 @@ with tab7:
                                 height=650,
                             )
                             fig_radar.update_traces(
-                                fill="toself",
-                                line=dict(width=2.2),
-                                marker=dict(size=6),
+                                fill=None,
+                                line=dict(width=3.2),
+                                marker=dict(size=7),
                                 hovertemplate=(
                                     "<b>%{customdata[0]}</b><br>"
                                     "%{theta}<br>"
