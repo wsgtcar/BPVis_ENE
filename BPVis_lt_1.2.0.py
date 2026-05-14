@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.37",
+    page_title="WSGT_BPVis_ENE 2.2.39",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.37")
+st.sidebar.write("Version 2.2.39")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -729,6 +729,7 @@ SHEET_LCC_GLOBAL = "LCC_Global"
 SHEET_LCC_INVESTMENTS = "LCC_Investments"
 SHEET_RAW_ENERGY_SCENARIOS = RAW_SCENARIO_ENERGY_SHEET
 SHEET_MODEL_INPUTS_QA = "Model_Inputs_QA"
+SHEET_CRREM_EF_SETTINGS = "CRREM_EF_Settings"
 
 
 def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame]]:
@@ -747,6 +748,7 @@ def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame
         "lcc_investments": sheets.get(SHEET_LCC_INVESTMENTS),
         "scenario_energy": sheets.get(SHEET_RAW_ENERGY_SCENARIOS),
         "model_inputs": sheets.get(SHEET_MODEL_INPUTS_QA),
+        "crrem_ef_settings": sheets.get(SHEET_CRREM_EF_SETTINGS),
         "all_sheets": sheets,  # keep to preserve everything when writing back
     }
 
@@ -2208,7 +2210,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.37"
+REPORT_VERSION = "2.2.39"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -4507,10 +4509,15 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
     # CRREM emission-factor settings (scenario-specific)
     _cef = _coerce_crrem_ef_payload(payload.get("crrem_ef", {}))
     st.session_state["crrem_use_standard_electricity_ef"] = bool(_cef.get("use_standard_electricity", False))
+    # Legacy aggregate key is kept only for backwards compatibility with older sessions.
     st.session_state["crrem_use_custom_decarb_rates"] = bool(_cef.get("use_custom_decarb_rates", False))
-    for _src, _rate in (_cef.get("custom_decarb_rates_pct", {}) or {}).items():
+    _cef_flags = _cef.get("use_custom_decarb_by_source", {}) or {}
+    for _src in ENERGY_SOURCE_ORDER:
         try:
-            _set_num(f"crrem_decarb_rate_{_source_state_key(_src)}", float(_rate), "{:.3f}")
+            _sk = _source_state_key(_src)
+            st.session_state[f"crrem_use_custom_decarb_{_sk}"] = bool(_cef_flags.get(_src, False))
+            _rate = (_cef.get("custom_decarb_rates_pct", {}) or {}).get(_src, 0.0)
+            _set_num(f"crrem_decarb_rate_{_sk}", float(_rate), "{:.3f}")
         except Exception:
             pass
 
@@ -6301,6 +6308,7 @@ def write_config_to_excel(original_bytes: bytes,
                           lcc_global_df: Optional[pd.DataFrame] = None,
                           lcc_investments_df: Optional[pd.DataFrame] = None,
                           model_inputs_qa_df: Optional[pd.DataFrame] = None,
+                          crrem_ef_settings_df: Optional[pd.DataFrame] = None,
                           energy_balance_df: Optional[pd.DataFrame] = None,
                           scenario_energy_overrides_df: Optional[pd.DataFrame] = None,
                           loads_balance_df: Optional[pd.DataFrame] = None) -> bytes:
@@ -6324,6 +6332,8 @@ def write_config_to_excel(original_bytes: bytes,
         sheets[SHEET_LCC_INVESTMENTS] = lcc_investments_df
     if model_inputs_qa_df is not None:
         sheets[SHEET_MODEL_INPUTS_QA] = sanitize_model_inputs_qa_df(model_inputs_qa_df)
+    if crrem_ef_settings_df is not None:
+        sheets[SHEET_CRREM_EF_SETTINGS] = crrem_ef_settings_df
 
 
     # overwrite raw data sheets if provided
@@ -6537,10 +6547,17 @@ def compute_decarb_multiplier(ef_grid: pd.Series, base_year: int, years: list, r
 
 
 def _default_crrem_ef_payload() -> dict:
-    """Default CRREM emission-factor settings stored per scenario."""
+    """Default CRREM emission-factor settings stored per scenario.
+
+    - use_standard_electricity: if True, Electricity initial EF is taken from CRREM country grid EF.
+    - use_custom_decarb_by_source: source-specific switch. If False for a source, that source follows
+      the CRREM grid decarbonization ratio. If True, the source uses its custom annual reduction rate.
+    - use_custom_decarb_rates is kept as a backwards-compatible aggregate flag for older files.
+    """
     return {
         "use_standard_electricity": False,
-        "use_custom_decarb_rates": False,
+        "use_custom_decarb_rates": False,  # legacy/aggregate; do not use for per-source decisions
+        "use_custom_decarb_by_source": {src: False for src in ENERGY_SOURCE_ORDER},
         "custom_decarb_rates_pct": {src: 0.0 for src in ENERGY_SOURCE_ORDER},
     }
 
@@ -6550,7 +6567,27 @@ def _coerce_crrem_ef_payload(settings: Optional[dict]) -> dict:
     out = _default_crrem_ef_payload()
     if isinstance(settings, dict):
         out["use_standard_electricity"] = bool(settings.get("use_standard_electricity", out["use_standard_electricity"]))
-        out["use_custom_decarb_rates"] = bool(settings.get("use_custom_decarb_rates", out["use_custom_decarb_rates"]))
+
+        # Backwards compatibility: older files had one global custom-rate switch.
+        legacy_global_custom = bool(settings.get("use_custom_decarb_rates", out["use_custom_decarb_rates"]))
+        out["use_custom_decarb_rates"] = legacy_global_custom
+
+        # New preferred structure: one custom-rate switch per energy source.
+        raw_flags = (
+            settings.get("use_custom_decarb_by_source", None)
+            or settings.get("use_custom_decarb_rates_by_source", None)
+            or settings.get("custom_decarb_enabled_by_source", None)
+        )
+        if isinstance(raw_flags, dict):
+            for src in ENERGY_SOURCE_ORDER:
+                try:
+                    out["use_custom_decarb_by_source"][src] = bool(raw_flags.get(src, legacy_global_custom))
+                except Exception:
+                    out["use_custom_decarb_by_source"][src] = legacy_global_custom
+        else:
+            # Old behavior: if the global switch was active, all sources used custom rates.
+            out["use_custom_decarb_by_source"] = {src: legacy_global_custom for src in ENERGY_SOURCE_ORDER}
+
         raw_rates = settings.get("custom_decarb_rates_pct", {})
         if isinstance(raw_rates, dict):
             for src in ENERGY_SOURCE_ORDER:
@@ -6558,7 +6595,140 @@ def _coerce_crrem_ef_payload(settings: Optional[dict]) -> dict:
                     out["custom_decarb_rates_pct"][src] = float(str(raw_rates.get(src, out["custom_decarb_rates_pct"].get(src, 0.0))).replace(",", "."))
                 except Exception:
                     out["custom_decarb_rates_pct"][src] = 0.0
+
+    # Keep aggregate flag in sync with per-source flags for compatibility/export.
+    try:
+        out["use_custom_decarb_rates"] = any(bool(out["use_custom_decarb_by_source"].get(src, False)) for src in ENERGY_SOURCE_ORDER)
+    except Exception:
+        out["use_custom_decarb_rates"] = False
     return out
+
+
+def build_crrem_ef_settings_sheet(scenarios: Optional[Dict[str, dict]]) -> pd.DataFrame:
+    """Build a transparent CRREM_EF_Settings sheet from scenario payloads.
+
+    The Scenarios sheet already stores the same information in JSON. This sheet is
+    written as an explicit, human-readable backup so CRREM emission-factor
+    decarbonization settings survive export/reload and can be audited easily.
+    """
+    rows = []
+    if not isinstance(scenarios, dict):
+        scenarios = {}
+    for sc_name, payload in scenarios.items():
+        if not str(sc_name).strip():
+            continue
+        settings = _coerce_crrem_ef_payload((payload or {}).get("crrem_ef", {}))
+        for src in ENERGY_SOURCE_ORDER:
+            rows.append({
+                "Scenario": str(sc_name),
+                "Use_CRREM_Standard_Electricity_EF": bool(settings.get("use_standard_electricity", False)),
+                "Energy_Source": str(src),
+                "Use_Custom_Decarbonization_Rate_For_Source": bool(settings.get("use_custom_decarb_by_source", {}).get(str(src), False)),
+                # Backwards-compatible aggregate column. Kept for older exports/readers.
+                "Use_Custom_Decarbonization_Rates": bool(settings.get("use_custom_decarb_rates", False)),
+                "Custom_Decarbonization_Rate_pct_a": float(settings.get("custom_decarb_rates_pct", {}).get(str(src), 0.0) or 0.0),
+            })
+    return pd.DataFrame(rows, columns=[
+        "Scenario",
+        "Use_CRREM_Standard_Electricity_EF",
+        "Energy_Source",
+        "Use_Custom_Decarbonization_Rate_For_Source",
+        "Use_Custom_Decarbonization_Rates",
+        "Custom_Decarbonization_Rate_pct_a",
+    ])
+
+
+def merge_crrem_ef_settings_sheet_into_scenarios(
+        scenarios: Dict[str, dict],
+        crrem_ef_settings_df: Optional[pd.DataFrame],
+) -> Dict[str, dict]:
+    """Merge CRREM_EF_Settings sheet into scenario payloads, if present.
+
+    This is intentionally conservative: when the sheet is absent/invalid, the
+    CRREM EF settings already embedded in the Scenarios payload remain untouched.
+    """
+    if not isinstance(scenarios, dict):
+        scenarios = {}
+    if crrem_ef_settings_df is None or not isinstance(crrem_ef_settings_df, pd.DataFrame) or crrem_ef_settings_df.empty:
+        return scenarios
+
+    required = {"Scenario", "Energy_Source", "Custom_Decarbonization_Rate_pct_a"}
+    if not required.issubset(set(crrem_ef_settings_df.columns)):
+        return scenarios
+
+    def _bool_from_cell(x, default=False):
+        try:
+            if isinstance(x, bool):
+                return bool(x)
+            if isinstance(x, (int, float)) and not pd.isna(x):
+                return bool(int(x))
+            s = str(x).strip().lower()
+            if s in {"true", "yes", "y", "1", "x"}:
+                return True
+            if s in {"false", "no", "n", "0", ""}:
+                return False
+        except Exception:
+            pass
+        return bool(default)
+
+    df = crrem_ef_settings_df.copy()
+    df["Scenario"] = df["Scenario"].astype(str)
+    df["Energy_Source"] = df["Energy_Source"].astype(str)
+
+    for sc_name, group in df.groupby("Scenario"):
+        sc_name = str(sc_name).strip()
+        if not sc_name:
+            continue
+        if sc_name not in scenarios or not isinstance(scenarios.get(sc_name), dict):
+            scenarios[sc_name] = default_scenario_payload([], None)
+
+        settings = _coerce_crrem_ef_payload(scenarios[sc_name].get("crrem_ef", {}))
+
+        # Booleans are repeated per source row; take the first row for the electricity-standard switch.
+        try:
+            if "Use_CRREM_Standard_Electricity_EF" in group.columns:
+                settings["use_standard_electricity"] = _bool_from_cell(group["Use_CRREM_Standard_Electricity_EF"].iloc[0], settings.get("use_standard_electricity", False))
+        except Exception:
+            pass
+
+        # Legacy global custom switch, used only if no per-source column exists.
+        legacy_global_custom = bool(settings.get("use_custom_decarb_rates", False))
+        try:
+            if "Use_Custom_Decarbonization_Rates" in group.columns:
+                legacy_global_custom = _bool_from_cell(group["Use_Custom_Decarbonization_Rates"].iloc[0], legacy_global_custom)
+        except Exception:
+            pass
+
+        rates = dict(settings.get("custom_decarb_rates_pct", {}) or {})
+        flags = dict(settings.get("use_custom_decarb_by_source", {}) or {})
+        has_source_specific_flag_col = "Use_Custom_Decarbonization_Rate_For_Source" in group.columns
+
+        for _, row in group.iterrows():
+            src = str(row.get("Energy_Source", "")).strip()
+            if src not in ENERGY_SOURCE_ORDER:
+                # accept case-insensitive source names from edited workbooks
+                for opt in ENERGY_SOURCE_ORDER:
+                    if opt.lower() == src.lower():
+                        src = opt
+                        break
+            if src not in ENERGY_SOURCE_ORDER:
+                continue
+            try:
+                rates[src] = float(str(row.get("Custom_Decarbonization_Rate_pct_a", 0.0)).replace(",", "."))
+            except Exception:
+                rates[src] = 0.0
+
+            if has_source_specific_flag_col:
+                flags[src] = _bool_from_cell(row.get("Use_Custom_Decarbonization_Rate_For_Source", False), flags.get(src, False))
+            else:
+                flags[src] = bool(legacy_global_custom)
+
+        settings["custom_decarb_rates_pct"] = {src: float(rates.get(src, 0.0) or 0.0) for src in ENERGY_SOURCE_ORDER}
+        settings["use_custom_decarb_by_source"] = {src: bool(flags.get(src, False)) for src in ENERGY_SOURCE_ORDER}
+        settings["use_custom_decarb_rates"] = any(settings["use_custom_decarb_by_source"].values())
+        scenarios[sc_name]["crrem_ef"] = _coerce_crrem_ef_payload(settings)
+
+    return scenarios
 
 
 def _source_state_key(src: str) -> str:
@@ -6594,12 +6764,13 @@ def _source_decarb_multiplier(
         return 1.0
 
     settings = _coerce_crrem_ef_payload(crrem_ef_settings)
-    if bool(settings.get("use_custom_decarb_rates", False)):
+    if bool(settings.get("use_custom_decarb_by_source", {}).get(str(src), False)):
         try:
             rate_pct = float(settings.get("custom_decarb_rates_pct", {}).get(str(src), 0.0))
         except Exception:
             rate_pct = 0.0
         # 100% means zero EF after one year; values above 100% are clamped to avoid negative EFs.
+        # Negative values are allowed to represent an annual EF increase.
         rate_pct = max(-100.0, min(100.0, rate_pct))
         return max(0.0, (1.0 - rate_pct / 100.0) ** (int(year) - int(anchor_year)))
 
@@ -6673,11 +6844,15 @@ def _source_emission_factor_at_year(
 
 def _crrem_ef_payload_from_session() -> dict:
     rates = {}
+    flags = {}
     for src in ENERGY_SOURCE_ORDER:
-        rates[src] = float(st.session_state.get(f"crrem_decarb_rate_{_source_state_key(src)}", 0.0) or 0.0)
+        sk = _source_state_key(src)
+        rates[src] = float(st.session_state.get(f"crrem_decarb_rate_{sk}", 0.0) or 0.0)
+        flags[src] = bool(st.session_state.get(f"crrem_use_custom_decarb_{sk}", False))
     return {
         "use_standard_electricity": bool(st.session_state.get("crrem_use_standard_electricity_ef", False)),
-        "use_custom_decarb_rates": bool(st.session_state.get("crrem_use_custom_decarb_rates", False)),
+        "use_custom_decarb_rates": any(flags.values()),
+        "use_custom_decarb_by_source": flags,
         "custom_decarb_rates_pct": rates,
     }
 
@@ -7021,6 +7196,7 @@ if uploaded_file:
         "lcc_investments_df": cfg_saved.get("lcc_investments"),
         "scenario_energy_df": cfg_saved.get("scenario_energy"),
         "model_inputs_df": cfg_saved.get("model_inputs"),
+        "crrem_ef_settings_df": cfg_saved.get("crrem_ef_settings"),
         "file_bytes": file_bytes,
     }
 
@@ -7207,6 +7383,10 @@ with tab1:
                     preloaded.get("lcc_investments_df") if preloaded else None,
                     end_uses,
                 )
+                scenarios_from_file = merge_crrem_ef_settings_sheet_into_scenarios(
+                    scenarios_from_file,
+                    preloaded.get("crrem_ef_settings_df") if preloaded else None,
+                )
                 st.session_state["scenarios"] = scenarios_from_file
                 st.session_state["active_scenario"] = active_from_file or list(scenarios_from_file.keys())[0]
             else:
@@ -7216,6 +7396,10 @@ with tab1:
                     preloaded.get("lcc_global_df") if preloaded else None,
                     preloaded.get("lcc_investments_df") if preloaded else None,
                     end_uses,
+                )
+                scenarios_from_file = merge_crrem_ef_settings_sheet_into_scenarios(
+                    scenarios_from_file,
+                    preloaded.get("crrem_ef_settings_df") if preloaded else None,
                 )
                 st.session_state["scenarios"] = scenarios_from_file
                 st.session_state["active_scenario"] = "Base" if "Base" in scenarios_from_file else list(scenarios_from_file.keys())[0]
@@ -7542,22 +7726,49 @@ with tab1:
         with st.sidebar.expander("Emission Factors"):
             st.caption("Assign Emission Factors per source")
             def_f = preloaded["factors"] if preloaded else {}
-            co2_Emissions_Electricity = numeric_input("CO2 Factor Electricity", float(def_f.get("Electricity", 0.300)),
-                                                      key="co2_Emissions_Electricity", min_value=0.0, max_value=1.0,
-                                                      fmt="{:.5f}")
+
             st.checkbox(
                 "Adopt CRREM Standard Electricity Emission Factors",
                 key="crrem_use_standard_electricity_ef",
                 help="If active, electricity uses the selected country's CRREM grid emission factor for the project year and follows the CRREM grid decarbonization pathway. Other sources still use user-entered initial factors."
             )
+
+            _crrem_elec_ef_preview = None
             try:
                 _crrem_preview = load_crrem_dataset(st.session_state.get("project_country", "Germany"))
                 _ef_grid_preview = (_crrem_preview or {}).get("ef_grid")
-                _crrem_elec_ef_preview = _crrem_grid_factor_for_year(_ef_grid_preview, int(st.session_state.get("project_year", 2025)))
-                if st.session_state.get("crrem_use_standard_electricity_ef", False) and _crrem_elec_ef_preview is not None:
-                    st.caption(f"Using CRREM electricity EF for {st.session_state.get('project_country', 'selected country')} in {int(st.session_state.get('project_year', 2025))}: {_crrem_elec_ef_preview:.5f} kgCO₂e/kWh")
+                _crrem_elec_ef_preview = _crrem_grid_factor_for_year(
+                    _ef_grid_preview,
+                    int(st.session_state.get("project_year", 2025)),
+                )
             except Exception:
-                pass
+                _crrem_elec_ef_preview = None
+
+            # If the CRREM-standard option is selected, bring the value into the
+            # visible electricity-factor input before the input widget is rendered.
+            # This makes the active value explicit and avoids the previous situation
+            # where CRREM logic used a hidden value different from the displayed field.
+            if st.session_state.get("crrem_use_standard_electricity_ef", False):
+                if _crrem_elec_ef_preview is not None:
+                    st.session_state["co2_Emissions_Electricity"] = float(_crrem_elec_ef_preview)
+                    st.session_state["co2_Emissions_Electricity_txt"] = f"{float(_crrem_elec_ef_preview):.5f}"
+                    st.caption(
+                        f"Using CRREM electricity EF for {st.session_state.get('project_country', 'selected country')} "
+                        f"in {int(st.session_state.get('project_year', 2025))}: "
+                        f"{float(_crrem_elec_ef_preview):.5f} kgCO₂e/kWh"
+                    )
+                else:
+                    st.warning("CRREM electricity factor could not be loaded for the selected country/year. The user-entered electricity factor is used instead.")
+
+            _elec_default = float(_crrem_elec_ef_preview) if (st.session_state.get("crrem_use_standard_electricity_ef", False) and _crrem_elec_ef_preview is not None) else float(def_f.get("Electricity", 0.300))
+            co2_Emissions_Electricity = numeric_input(
+                "CO2 Factor Electricity",
+                _elec_default,
+                key="co2_Emissions_Electricity",
+                min_value=0.0,
+                max_value=1.0,
+                fmt="{:.5f}",
+            )
             co2_Emissions_Green_Electricity = numeric_input("CO2 Factor Green Electricity",
                                                             float(def_f.get("Green Electricity", 0.000)),
                                                             key="co2_Emissions_Green_Electricity", min_value=0.0,
@@ -7875,6 +8086,7 @@ with tab1:
                     lcc_global_df=lcc_global_df,
                     lcc_investments_df=lcc_investments_df,
                     model_inputs_qa_df=build_model_inputs_qa_df(),
+                    crrem_ef_settings_df=build_crrem_ef_settings_sheet(st.session_state.get("scenarios", {})),
                     energy_balance_df=st.session_state.get(_RAW_ENERGY_KEY),
                     scenario_energy_overrides_df=build_scenario_energy_overrides_df(
                         effective_scenario_energy_overrides_for_export()
@@ -7902,7 +8114,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_2_8.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_2_38.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -7911,7 +8123,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_2_8.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_2_38.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -8954,23 +9166,32 @@ with tab6:
             target_id = "1.5C" if target_label.startswith("1.5") else "2C"
 
             with st.expander("Emission factor decarbonization settings", expanded=False):
-                st.checkbox(
-                    "Use custom annual decarbonization rates per energy source",
-                    key="crrem_use_custom_decarb_rates",
-                    help="If inactive, all non-green sources follow the CRREM grid decarbonization ratio. If active, each source uses the annual reduction rate entered below."
+                st.caption(
+                    "Each energy source can either follow the CRREM grid decarbonization ratio or use a custom "
+                    "annual reduction rate. Custom rates are percentage reductions compared with the previous year. "
+                    "Example: 3 means the emission factor is multiplied by 0.97 each year."
                 )
-                st.caption("Custom rates are annual percentage reductions compared with the previous year. Example: 3 means the emission factor is multiplied by 0.97 each year.")
                 _rate_cols = st.columns(3)
                 for _i, _src in enumerate(ENERGY_SOURCE_ORDER):
+                    _sk = _source_state_key(_src)
                     with _rate_cols[_i % 3]:
+                        st.markdown(f"**{_src}**")
+                        st.checkbox(
+                            "Use custom rate",
+                            key=f"crrem_use_custom_decarb_{_sk}",
+                            help=(
+                                f"If checked, {_src} uses the annual reduction rate below. "
+                                "If unchecked, it follows the CRREM grid decarbonization ratio."
+                            ),
+                        )
                         numeric_input(
                             f"{_src} decarbonization (%/a)",
-                            float(st.session_state.get(f"crrem_decarb_rate_{_source_state_key(_src)}", 0.0) or 0.0),
-                            key=f"crrem_decarb_rate_{_source_state_key(_src)}",
+                            float(st.session_state.get(f"crrem_decarb_rate_{_sk}", 0.0) or 0.0),
+                            key=f"crrem_decarb_rate_{_sk}",
                             min_value=-100.0,
                             max_value=100.0,
                             fmt="{:.3f}",
-                            help="Used only when custom annual decarbonization rates are active."
+                            help="Used only when 'Use custom rate' is checked for this energy source."
                         )
 
             pt_df = crrem["property_types"].copy()
