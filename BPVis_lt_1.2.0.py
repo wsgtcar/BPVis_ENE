@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.17",
+    page_title="WSGT_BPVis_ENE 2.2.18",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.17")
+st.sidebar.write("Version 2.2.18")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.17"
+REPORT_VERSION = "2.2.18"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9136,6 +9136,196 @@ with tab7:
                                 "Annual Net CO₂ (t/a)": float(_v_cmp),
                                 "Cumulative Net CO₂ (t)": float(_cum_emissions_series_t.loc[_y_cmp]),
                             })
+
+                    # Scenario radar diagram (lower KPI values are better; transformed to a 0-100 performance score
+                    # so better scenarios form a larger polygon). Fixed 50-year horizon for LCC/emissions KPIs.
+                    try:
+                        radar_rows_raw = []
+                        if _area and float(_area) > 0 and scenario_order:
+                            radar_years_50 = list(range(int(project_year_lcc_cmp), int(project_year_lcc_cmp) + 50))
+                            radar_lcc_global_50 = dict(lcc_global_cmp or {})
+                            radar_lcc_global_50["analysis_period"] = 50
+                            radar_crrem = _crrem_cmp
+                            if radar_crrem is None:
+                                try:
+                                    radar_crrem = load_crrem_dataset(st.session_state.get("project_country", "Germany"))
+                                except Exception:
+                                    radar_crrem = None
+
+                            try:
+                                df_cmp_idx = df_cmp.copy()
+                                df_cmp_idx["Scenario"] = df_cmp_idx["Scenario"].astype(str)
+                                df_cmp_idx = df_cmp_idx.set_index("Scenario", drop=False)
+                            except Exception:
+                                df_cmp_idx = pd.DataFrame()
+
+                            for _idx_sc, _sc_name in enumerate(scenario_order):
+                                _sc_name_str = str(_sc_name)
+                                _payload_sc = scenarios.get(_sc_name_str, {}) or {}
+
+                                # 1) End Energy /m² (use the static net EUI already calculated for scenario comparison).
+                                try:
+                                    end_energy_m2 = float(df_cmp_idx.loc[_sc_name_str, "Net EUI (kWh/m²·a)"])
+                                except Exception:
+                                    end_energy_m2 = np.nan
+
+                                # 2 + 3) Annual energy cost /m² and 50-year nominal LCC /m².
+                                annual_energy_cost_m2 = np.nan
+                                lcc_50_nominal_m2 = np.nan
+                                try:
+                                    _df_energy_sc_50 = get_energy_balance_df(
+                                        uploaded_file.getvalue(),
+                                        uploaded_file.name,
+                                        scenario_name=_sc_name_str,
+                                    )
+                                    _end_uses_sc_50 = [_canon_enduse_name(str(c)) for c in _df_energy_sc_50.columns if c != "Month"]
+                                    _cf_sc_50 = compute_lcc_cashflow_table(
+                                        _df_energy_sc_50,
+                                        _payload_sc,
+                                        _end_uses_sc_50,
+                                        int(project_year_lcc_cmp),
+                                        lcc_global=radar_lcc_global_50,
+                                    )
+                                    if _cf_sc_50 is not None and not _cf_sc_50.empty:
+                                        _energy_cf_50 = _cf_sc_50.loc[_cf_sc_50["Cost Type"].astype(str) == "Energy"].copy()
+                                        if not _energy_cf_50.empty:
+                                            annual_energy_cost_m2 = float(
+                                                _energy_cf_50.loc[_energy_cf_50["Year"].astype(int) == int(project_year_lcc_cmp), "Nominal Cost"].sum()
+                                            ) / float(_area)
+                                        lcc_50_nominal_m2 = float(_cf_sc_50["Nominal Cost"].sum()) / float(_area)
+                                except Exception:
+                                    pass
+
+                                # 4 + 5) Annual and cumulative 50-year emissions /m² using CRREM decarbonization.
+                                annual_emissions_m2 = np.nan
+                                total_emissions_50_m2 = np.nan
+                                try:
+                                    _df_energy_em_50 = get_energy_balance_df(
+                                        uploaded_file.getvalue(),
+                                        uploaded_file.name,
+                                        scenario_name=_sc_name_str,
+                                    )
+                                    _emis_series_50_t = compute_crrem_like_scenario_emissions_series(
+                                        _df_energy_em_50,
+                                        _payload_sc,
+                                        radar_crrem,
+                                        int(project_year_lcc_cmp),
+                                        radar_years_50,
+                                    ).reindex(radar_years_50).fillna(0.0)
+                                    annual_emissions_m2 = (float(_emis_series_50_t.iloc[0]) * 1000.0) / float(_area) if len(_emis_series_50_t) else np.nan
+                                    total_emissions_50_m2 = (float(_emis_series_50_t.sum()) * 1000.0) / float(_area) if len(_emis_series_50_t) else np.nan
+                                except Exception:
+                                    pass
+
+                                radar_rows_raw.extend([
+                                    {"Scenario": _sc_name_str, "KPI": "End Energy /m²", "Value": end_energy_m2, "Unit": "kWh/m²·a"},
+                                    {"Scenario": _sc_name_str, "KPI": "Annual Energy Cost /m²", "Value": annual_energy_cost_m2, "Unit": f"{_curr}/m²·a"},
+                                    {"Scenario": _sc_name_str, "KPI": "LCC 50 years /m²", "Value": lcc_50_nominal_m2, "Unit": f"{_curr}/m²"},
+                                    {"Scenario": _sc_name_str, "KPI": "Annual Emissions /m²", "Value": annual_emissions_m2, "Unit": "kgCO₂e/m²·a"},
+                                    {"Scenario": _sc_name_str, "KPI": "Total Emissions 50 years /m²", "Value": total_emissions_50_m2, "Unit": "kgCO₂e/m²"},
+                                ])
+
+                        radar_raw_df = pd.DataFrame(radar_rows_raw)
+                        radar_plot_df = pd.DataFrame()
+                        if not radar_raw_df.empty:
+                            radar_raw_df["Value"] = pd.to_numeric(radar_raw_df["Value"], errors="coerce")
+                            radar_raw_df = radar_raw_df.replace([np.inf, -np.inf], np.nan)
+                            radar_raw_df["Formatted Value"] = radar_raw_df.apply(
+                                lambda r: "n/a" if pd.isna(r.get("Value")) else f"{float(r.get('Value')):,.2f}",
+                                axis=1,
+                            )
+
+                            radar_score_rows = []
+                            kpi_order_radar = [
+                                "End Energy /m²",
+                                "Annual Energy Cost /m²",
+                                "LCC 50 years /m²",
+                                "Annual Emissions /m²",
+                                "Total Emissions 50 years /m²",
+                            ]
+                            for _kpi in kpi_order_radar:
+                                _sub = radar_raw_df.loc[radar_raw_df["KPI"].astype(str) == _kpi].copy()
+                                _vals = pd.to_numeric(_sub["Value"], errors="coerce")
+                                _finite_vals = _vals[np.isfinite(_vals)]
+                                if _finite_vals.empty:
+                                    continue
+                                _vmin = float(_finite_vals.min())
+                                _vmax = float(_finite_vals.max())
+                                for _i_r, _r_radar in _sub.iterrows():
+                                    _val = _r_radar.get("Value")
+                                    if pd.isna(_val) or not np.isfinite(float(_val)):
+                                        _score = np.nan
+                                    elif abs(_vmax - _vmin) < 1e-12:
+                                        _score = 100.0
+                                    else:
+                                        # Lower KPI values are better. Use an inverted normalized score so
+                                        # the best/lower scenarios are plotted further away from the center.
+                                        _score = 100.0 * (_vmax - float(_val)) / (_vmax - _vmin)
+                                    radar_score_rows.append({
+                                        "Scenario": str(_r_radar.get("Scenario", "")),
+                                        "KPI": str(_r_radar.get("KPI", "")),
+                                        "Score": _score,
+                                        "Value": _val,
+                                        "Formatted Value": str(_r_radar.get("Formatted Value", "n/a")),
+                                        "Unit": str(_r_radar.get("Unit", "")),
+                                    })
+                            radar_plot_df = pd.DataFrame(radar_score_rows)
+
+                        st.subheader("Scenario Performance Radar")
+                        if not radar_plot_df.empty and radar_plot_df["Score"].notna().any():
+                            fig_radar = px.line_polar(
+                                radar_plot_df,
+                                r="Score",
+                                theta="KPI",
+                                color="Scenario",
+                                line_close=True,
+                                color_discrete_map=scenario_color_map,
+                                category_orders={"KPI": kpi_order_radar, "Scenario": scenario_order},
+                                custom_data=["Scenario", "Formatted Value", "Unit"],
+                                height=650,
+                            )
+                            fig_radar.update_traces(
+                                fill="toself",
+                                line=dict(width=2.2),
+                                marker=dict(size=6),
+                                hovertemplate=(
+                                    "<b>%{customdata[0]}</b><br>"
+                                    "%{theta}<br>"
+                                    "Actual KPI: %{customdata[1]} %{customdata[2]}<br>"
+                                    "Performance score: %{r:.1f}/100"
+                                    "<extra></extra>"
+                                ),
+                            )
+                            fig_radar.update_layout(
+                                polar=dict(
+                                    radialaxis=dict(
+                                        range=[0, 100],
+                                        tickvals=[0, 25, 50, 75, 100],
+                                        ticktext=["Worst", "25", "50", "75", "Best"],
+                                        showline=True,
+                                    ),
+                                ),
+                                legend_title_text="Scenario",
+                                legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+                                margin=dict(l=40, r=40, t=40, b=110),
+                            )
+                            st_plotly_chart(fig_radar, use_container_width=True, key="scenario_performance_radar")
+                            st.caption(
+                                "The radar uses an inverted normalized score for each KPI: lower actual KPI values plot further outwards, "
+                                "so better-performing scenarios form a larger polygon. LCC and total emissions use a fixed 50-year horizon."
+                            )
+                            show_radar_data = st.checkbox(
+                                "Show radar KPI input data",
+                                value=False,
+                                key="scenario_radar_data_show",
+                            )
+                            if show_radar_data:
+                                st.dataframe(radar_raw_df, use_container_width=True)
+                        else:
+                            st.info("No radar KPI data available for the current scenarios.")
+
+                    except Exception as _radar_err:
+                        st.info("Scenario performance radar could not be generated for the current inputs.")
 
                     # First row: LCC diagrams (annual first, cumulative second)
                     lc1, lc2 = st.columns(2)
