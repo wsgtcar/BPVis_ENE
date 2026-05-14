@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.40",
+    page_title="WSGT_BPVis_ENE 2.2.41",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.40")
+st.sidebar.write("Version 2.2.41")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2223,7 +2223,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.40"
+REPORT_VERSION = "2.2.41"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3536,6 +3536,12 @@ def _scenario_radar_plotly_figure(
         except Exception:
             return "n/a"
 
+    # Build all radar series first. Filled polar polygons can otherwise steal
+    # hover events from scenarios plotted below them. The figure therefore uses
+    # two layers: (1) filled line polygons with hover disabled, and (2) marker-only
+    # hover traces added after all polygons so every scenario point remains hoverable.
+    radar_series = []
+
     for _i, _sc in enumerate(scenario_order):
         sub = dfp.loc[dfp["Scenario"].astype(str) == str(_sc)].copy()
         if sub.empty:
@@ -3576,25 +3582,50 @@ def _scenario_radar_plotly_figure(
                 )
             hover_text.append(_hover)
 
-        # Close polygon explicitly and keep hover text on the closing point.
-        if theta_vals and r_vals:
-            theta_vals_closed = theta_vals + [theta_vals[0]]
-            r_vals_closed = r_vals + [r_vals[0]]
-            hover_text_closed = hover_text + [hover_text[0] if hover_text else ""]
-        else:
+        if not theta_vals or not r_vals:
             continue
 
         _col = (scenario_color_map_in or {}).get(str(_sc), SCENARIO_COLOR_PALETTE[_i % len(SCENARIO_COLOR_PALETTE)])
+        radar_series.append({
+            "scenario": str(_sc),
+            "color": _col,
+            "theta": theta_vals,
+            "r": r_vals,
+            "hover": hover_text,
+        })
+
+    # Layer 1: filled polygons. Hover is disabled so translucent fill areas do not
+    # block access to the marker-only hover layer above.
+    for _series in radar_series:
+        _theta_closed = _series["theta"] + [_series["theta"][0]]
+        _r_closed = _series["r"] + [_series["r"][0]]
         fig.add_trace(go.Scatterpolar(
-            r=r_vals_closed,
-            theta=theta_vals_closed,
-            mode="lines+markers",
-            name=str(_sc),
-            line=dict(color=_col, width=3.6),
-            marker=dict(color=_col, size=8),
+            r=_r_closed,
+            theta=_theta_closed,
+            mode="lines",
+            name=_series["scenario"],
+            line=dict(color=_series["color"], width=3.4),
             fill="toself",
-            fillcolor=_plotly_rgba_from_color(_col, 0.10),
-            text=hover_text_closed,
+            fillcolor=_plotly_rgba_from_color(_series["color"], 0.10),
+            hoverinfo="skip",
+            hovertemplate=None,
+        ))
+
+    # Layer 2: marker-only hover traces. These are added last and carry the full
+    # tooltip text. They are hidden from the legend to keep one legend item per scenario.
+    for _series in radar_series:
+        fig.add_trace(go.Scatterpolar(
+            r=_series["r"],
+            theta=_series["theta"],
+            mode="markers",
+            name=f"{_series['scenario']} hover",
+            showlegend=False,
+            marker=dict(
+                color=_series["color"],
+                size=11,
+                line=dict(color="white", width=1.2),
+            ),
+            text=_series["hover"],
             hovertemplate="%{text}<extra></extra>",
         ))
 
