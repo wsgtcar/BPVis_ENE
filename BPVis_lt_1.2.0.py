@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.24",
+    page_title="WSGT_BPVis_ENE 2.2.25",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.24")
+st.sidebar.write("Version 2.2.25")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.24"
+REPORT_VERSION = "2.2.25"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9408,7 +9408,19 @@ with tab_lcc:
                         category_orders={"End_Use": END_USE_ORDER},
                     )
                     fig_enduse_pie.update_traces(texttemplate="%{value:.1f}<br>%{percent}", textinfo="none", textfont_size=18, textfont_color="white")
-                    fig_enduse_pie.update_layout(showlegend=True)
+                    _lcc_enduse_total_m2 = float(pie_enduse["Nominal Cost per m²"].sum())
+                    fig_enduse_pie.update_layout(
+                        annotations=[dict(
+                            text=f"{currency_lcc} {_lcc_enduse_total_m2:,.2f}<br>per m²",
+                            x=0.5,
+                            y=0.5,
+                            xref="paper",
+                            yref="paper",
+                            showarrow=False,
+                            font=dict(size=38, color="black"),
+                        )],
+                        showlegend=True,
+                    )
                     st_plotly_chart(fig_enduse_pie, use_container_width=True, key="lcc_enduse_pie")
                 else:
                     st.info("No positive End Use costs available for the pie chart.")
@@ -9436,7 +9448,19 @@ with tab_lcc:
                         category_orders={"Energy_Source": ENERGY_SOURCE_ORDER},
                     )
                     fig_source_pie.update_traces(texttemplate="%{value:.1f}<br>%{percent}", textinfo="none", textfont_size=18, textfont_color="white")
-                    fig_source_pie.update_layout(showlegend=True)
+                    _lcc_source_total_m2 = float(pie_source["Nominal Cost per m²"].sum())
+                    fig_source_pie.update_layout(
+                        annotations=[dict(
+                            text=f"{currency_lcc} {_lcc_source_total_m2:,.2f}<br>per m²",
+                            x=0.5,
+                            y=0.5,
+                            xref="paper",
+                            yref="paper",
+                            showarrow=False,
+                            font=dict(size=38, color="black"),
+                        )],
+                        showlegend=True,
+                    )
                     st_plotly_chart(fig_source_pie, use_container_width=True, key="lcc_source_pie")
                 else:
                     st.info("No positive operational energy costs available for the energy-source pie chart.")
