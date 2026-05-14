@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.30",
+    page_title="WSGT_BPVis_ENE 2.2.31",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.30")
+st.sidebar.write("Version 2.2.31")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.30"
+REPORT_VERSION = "2.2.31"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2857,6 +2857,238 @@ def _scenario_kpi_scatter_plotly_figure(
     )
     return fig
 
+
+def _prepare_scenario_delta_analysis_dfs(
+        radar_raw_df: pd.DataFrame,
+        reference_scenario: Optional[str] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (delta_long_df, delta_summary_df) for scenario delta analysis.
+
+    The KPI values come from the same raw dataset used by the scenario radar/bar summary:
+    End Energy, Annual Energy Cost, 50-year LCC, Annual Emissions and 50-year LC Emissions.
+
+    Sign convention:
+    - Delta = Scenario value - Reference value (positive means the scenario has a higher KPI value).
+    - Improvement = Reference value - Scenario value (positive means the scenario is lower/better).
+    - Improvement % = Improvement / abs(Reference value) * 100.
+    - Marginal abatement cost = additional 50-year LCC per avoided 50-year tCO2e, using per-m2 values.
+    """
+    if radar_raw_df is None or radar_raw_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    raw = radar_raw_df.copy()
+    raw["Scenario"] = raw["Scenario"].astype(str)
+    raw["KPI"] = raw["KPI"].astype(str)
+    raw["Value"] = pd.to_numeric(raw["Value"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    raw = raw[raw["KPI"].isin(SCENARIO_RADAR_KPI_ORDER)].copy()
+    raw = raw[raw["Value"].notna()].copy()
+    if raw.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    scenario_order_raw = raw["Scenario"].dropna().astype(str).drop_duplicates().tolist()
+    ref = str(reference_scenario or "").strip()
+    if ref not in scenario_order_raw:
+        ref = scenario_order_raw[0] if scenario_order_raw else ""
+    if not ref:
+        return pd.DataFrame(), pd.DataFrame()
+
+    ref_df = raw.loc[raw["Scenario"].astype(str) == ref].copy()
+    ref_vals = dict(zip(ref_df["KPI"].astype(str), pd.to_numeric(ref_df["Value"], errors="coerce")))
+    ref_units = dict(zip(ref_df["KPI"].astype(str), ref_df.get("Unit", "")))
+
+    long_rows = []
+    for sc in scenario_order_raw:
+        if str(sc) == ref:
+            continue
+        sc_df = raw.loc[raw["Scenario"].astype(str) == str(sc)].copy()
+        sc_vals = dict(zip(sc_df["KPI"].astype(str), pd.to_numeric(sc_df["Value"], errors="coerce")))
+        sc_units = dict(zip(sc_df["KPI"].astype(str), sc_df.get("Unit", "")))
+        for kpi in SCENARIO_RADAR_KPI_ORDER:
+            ref_val = ref_vals.get(kpi, np.nan)
+            sc_val = sc_vals.get(kpi, np.nan)
+            if pd.isna(ref_val) or pd.isna(sc_val):
+                continue
+            ref_val = float(ref_val)
+            sc_val = float(sc_val)
+            delta = sc_val - ref_val
+            improvement = ref_val - sc_val
+            if abs(ref_val) < 1e-12:
+                improvement_pct = np.nan if abs(sc_val) >= 1e-12 else 0.0
+            else:
+                improvement_pct = 100.0 * improvement / abs(ref_val)
+            unit = str(sc_units.get(kpi, ref_units.get(kpi, "")) or "")
+            long_rows.append({
+                "Reference Scenario": ref,
+                "Scenario": str(sc),
+                "KPI": kpi,
+                "Reference Value": ref_val,
+                "Scenario Value": sc_val,
+                "Delta (Scenario - Reference)": delta,
+                "Improvement (Reference - Scenario)": improvement,
+                "Improvement vs Reference (%)": improvement_pct,
+                "Unit": unit,
+                "Status": "Better / lower" if improvement > 1e-9 else ("Worse / higher" if improvement < -1e-9 else "No change"),
+            })
+
+    delta_long = pd.DataFrame(long_rows)
+    if delta_long.empty:
+        return delta_long, pd.DataFrame()
+
+    # Build a compact summary table with key savings and marginal abatement cost.
+    summary_rows = []
+    for sc in delta_long["Scenario"].dropna().astype(str).drop_duplicates().tolist():
+        sub = delta_long.loc[delta_long["Scenario"].astype(str) == sc].copy()
+        def _val(kpi, col):
+            hit = sub.loc[sub["KPI"].astype(str) == kpi, col]
+            return float(hit.iloc[0]) if not hit.empty and pd.notna(hit.iloc[0]) else np.nan
+        lcc_delta = _val("LCC 50 years /m²", "Delta (Scenario - Reference)")
+        lc_em_avoided_kg = _val("Total Emissions 50 years /m²", "Improvement (Reference - Scenario)")
+        if pd.notna(lcc_delta) and pd.notna(lc_em_avoided_kg) and abs(float(lc_em_avoided_kg)) > 1e-12:
+            mac = float(lcc_delta) / (float(lc_em_avoided_kg) / 1000.0)
+        else:
+            mac = np.nan
+        summary_rows.append({
+            "Reference Scenario": ref,
+            "Scenario": sc,
+            "End Energy improvement (%)": _val("End Energy /m²", "Improvement vs Reference (%)"),
+            "Annual Energy Cost improvement (%)": _val("Annual Energy Cost /m²", "Improvement vs Reference (%)"),
+            "LCC 50y improvement (%)": _val("LCC 50 years /m²", "Improvement vs Reference (%)"),
+            "Annual Emissions improvement (%)": _val("Annual Emissions /m²", "Improvement vs Reference (%)"),
+            "LC Emissions 50y improvement (%)": _val("Total Emissions 50 years /m²", "Improvement vs Reference (%)"),
+            "LCC delta (currency/m²)": lcc_delta,
+            "LC emissions avoided (kgCO₂e/m²)": lc_em_avoided_kg,
+            "Marginal abatement cost (currency/tCO₂e)": mac,
+        })
+    summary_df = pd.DataFrame(summary_rows)
+    return delta_long, summary_df
+
+
+def _scenario_delta_improvement_plotly_figure(
+        delta_long_df: pd.DataFrame,
+        scenario_color_map_in: dict,
+        scenario_order_in: list,
+        title: str = "Scenario delta vs reference",
+        height: int = 520,
+) -> go.Figure:
+    """Grouped bar chart of improvement percentages versus the selected reference scenario."""
+    if delta_long_df is None or delta_long_df.empty:
+        return go.Figure()
+    dfp = delta_long_df.copy()
+    dfp["Scenario"] = dfp["Scenario"].astype(str)
+    dfp["KPI"] = dfp["KPI"].astype(str)
+    dfp["Improvement vs Reference (%)"] = pd.to_numeric(dfp["Improvement vs Reference (%)"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    dfp = dfp[dfp["Improvement vs Reference (%)"].notna()].copy()
+    if dfp.empty:
+        return go.Figure()
+
+    label_map = {
+        "End Energy /m²": "End Energy<br>/m²",
+        "Annual Energy Cost /m²": "Annual Energy<br>Cost /m²",
+        "LCC 50 years /m²": "LCC 50 years<br>/m²",
+        "Annual Emissions /m²": "Annual Emissions<br>/m²",
+        "Total Emissions 50 years /m²": "LC Emissions<br>50 years /m²",
+    }
+    scenario_order = [str(s) for s in scenario_order_in if str(s) in set(dfp["Scenario"].astype(str))]
+    if not scenario_order:
+        scenario_order = dfp["Scenario"].dropna().astype(str).drop_duplicates().tolist()
+
+    fig = go.Figure()
+    for i, sc in enumerate(scenario_order):
+        sub = dfp.loc[dfp["Scenario"].astype(str) == sc].copy()
+        if sub.empty:
+            continue
+        sub["KPI"] = pd.Categorical(sub["KPI"], categories=SCENARIO_RADAR_KPI_ORDER, ordered=True)
+        sub = sub.sort_values("KPI")
+        col = (scenario_color_map_in or {}).get(sc, SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)])
+        fig.add_trace(go.Bar(
+            x=[label_map.get(str(k), str(k)) for k in sub["KPI"].astype(str)],
+            y=sub["Improvement vs Reference (%)"].astype(float),
+            marker=dict(color=col),
+            name=sc,
+            text=[f"{v:,.1f}%" for v in sub["Improvement vs Reference (%)"].astype(float)],
+            textposition="outside",
+            cliponaxis=False,
+            customdata=np.stack([
+                sub["Scenario"].astype(str),
+                sub["KPI"].astype(str),
+                sub["Reference Value"].astype(float),
+                sub["Scenario Value"].astype(float),
+                sub["Unit"].astype(str),
+            ], axis=-1),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>%{customdata[1]}<br>"
+                "Improvement: %{y:.2f}%<br>"
+                "Reference: %{customdata[2]:,.2f} %{customdata[4]}<br>"
+                "Scenario: %{customdata[3]:,.2f} %{customdata[4]}<extra></extra>"
+            ),
+        ))
+    fig.add_hline(y=0, line_color="black", line_dash="dash", line_width=1.2)
+    fig.update_layout(
+        title=dict(text=title, x=0.5, xanchor="center"),
+        yaxis_title="Improvement vs reference (%)",
+        xaxis_title="",
+        barmode="group",
+        legend_title_text="Scenario",
+        legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
+        margin=dict(l=50, r=30, t=70, b=120),
+        height=height,
+    )
+    fig.update_yaxes(zeroline=True)
+    return fig
+
+
+def _scenario_delta_mac_plotly_figure(
+        delta_summary_df: pd.DataFrame,
+        scenario_color_map_in: dict,
+        scenario_order_in: list,
+        title: str = "Marginal abatement cost",
+        height: int = 420,
+) -> go.Figure:
+    """Bar chart of marginal abatement cost (currency/tCO2e avoided)."""
+    if delta_summary_df is None or delta_summary_df.empty:
+        return go.Figure()
+    dfp = delta_summary_df.copy()
+    dfp["Scenario"] = dfp["Scenario"].astype(str)
+    mac_col = "Marginal abatement cost (currency/tCO₂e)"
+    dfp[mac_col] = pd.to_numeric(dfp[mac_col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    dfp = dfp[dfp[mac_col].notna()].copy()
+    if dfp.empty:
+        return go.Figure()
+    scenario_order = [str(s) for s in scenario_order_in if str(s) in set(dfp["Scenario"].astype(str))]
+    if not scenario_order:
+        scenario_order = dfp["Scenario"].dropna().astype(str).drop_duplicates().tolist()
+    dfp["Scenario"] = pd.Categorical(dfp["Scenario"], categories=scenario_order, ordered=True)
+    dfp = dfp.sort_values("Scenario")
+    colors = [(scenario_color_map_in or {}).get(str(sc), SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)]) for i, sc in enumerate(dfp["Scenario"].astype(str))]
+    fig = go.Figure(go.Bar(
+        x=dfp["Scenario"].astype(str),
+        y=dfp[mac_col].astype(float),
+        marker=dict(color=colors),
+        text=[f"{v:,.0f}" for v in dfp[mac_col].astype(float)],
+        textposition="outside",
+        cliponaxis=False,
+        customdata=np.stack([
+            dfp["LCC delta (currency/m²)"].astype(float),
+            dfp["LC emissions avoided (kgCO₂e/m²)"].astype(float),
+        ], axis=-1),
+        hovertemplate=(
+            "%{x}<br>MAC: %{y:,.0f} per tCO₂e<br>"
+            "LCC delta: %{customdata[0]:,.2f} per m²<br>"
+            "LC emissions avoided: %{customdata[1]:,.2f} kgCO₂e/m²<extra></extra>"
+        ),
+    ))
+    fig.add_hline(y=0, line_color="black", line_dash="dash", line_width=1.2)
+    fig.update_layout(
+        title=dict(text=title, x=0.5, xanchor="center"),
+        xaxis_title="Scenario",
+        yaxis_title="Cost per tCO₂e avoided",
+        margin=dict(l=50, r=30, t=70, b=70),
+        height=height,
+        showlegend=False,
+    )
+    return fig
+
+
 def _scenario_radar_plotly_figure(
         plot_df: pd.DataFrame,
         scenario_color_map_in: dict,
@@ -3160,6 +3392,117 @@ def _report_scenario_kpi_scatter_chart(
         host.legend(legend_handles, legend_labels, loc="lower center", bbox_to_anchor=(0.5, -0.34), ncol=min(3, max(1, len(legend_labels))), fontsize=6.5, frameon=False)
     fig.subplots_adjust(left=0.24, right=0.76, bottom=0.28, top=0.86)
     return _report_fig_to_png_bytes(fig)
+
+
+def _report_scenario_delta_improvement_chart(
+        delta_long_df: pd.DataFrame,
+        title: str,
+        scenario_color_map_in: dict,
+        scenario_order_in: list,
+) -> io.BytesIO:
+    """Create a grouped bar chart of KPI improvement percentages for the PDF report."""
+    import matplotlib.pyplot as plt
+    import numpy as _np
+
+    if delta_long_df is None or delta_long_df.empty:
+        fig, ax = plt.subplots(figsize=(7.6, 3.8), dpi=180)
+        ax.text(0.5, 0.5, "No scenario delta data available", ha="center", va="center")
+        ax.axis("off")
+        return _report_fig_to_png_bytes(fig)
+
+    dfp = delta_long_df.copy()
+    dfp["Scenario"] = dfp["Scenario"].astype(str)
+    dfp["KPI"] = dfp["KPI"].astype(str)
+    dfp["Improvement vs Reference (%)"] = pd.to_numeric(dfp["Improvement vs Reference (%)"], errors="coerce").replace([_np.inf, -_np.inf], _np.nan)
+    dfp = dfp[dfp["Improvement vs Reference (%)"].notna()].copy()
+    if dfp.empty:
+        fig, ax = plt.subplots(figsize=(7.6, 3.8), dpi=180)
+        ax.text(0.5, 0.5, "No scenario delta data available", ha="center", va="center")
+        ax.axis("off")
+        return _report_fig_to_png_bytes(fig)
+
+    label_map = {
+        "End Energy /m²": "End Energy\n/m²",
+        "Annual Energy Cost /m²": "Annual Energy\nCost /m²",
+        "LCC 50 years /m²": "LCC 50y\n/m²",
+        "Annual Emissions /m²": "Annual Emissions\n/m²",
+        "Total Emissions 50 years /m²": "LC Emissions\n50y /m²",
+    }
+    kpis = [k for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
+    scenario_order = [str(s) for s in scenario_order_in if str(s) in set(dfp["Scenario"].astype(str))]
+    if not scenario_order:
+        scenario_order = dfp["Scenario"].dropna().astype(str).drop_duplicates().tolist()
+
+    fig, ax = plt.subplots(figsize=(7.8, 4.2), dpi=180)
+    x = _np.arange(len(kpis))
+    n_sc = max(1, len(scenario_order))
+    group_width = 0.76
+    bar_width = min(0.18, group_width / n_sc * 0.84)
+    offsets = _np.array([0.0]) if n_sc == 1 else _np.linspace(-group_width/2 + bar_width/2, group_width/2 - bar_width/2, n_sc)
+    for i, sc in enumerate(scenario_order):
+        vals = []
+        for kpi in kpis:
+            hit = dfp.loc[(dfp["Scenario"].astype(str) == sc) & (dfp["KPI"].astype(str) == kpi), "Improvement vs Reference (%)"]
+            vals.append(float(hit.iloc[0]) if not hit.empty and pd.notna(hit.iloc[0]) else _np.nan)
+        col = (scenario_color_map_in or {}).get(sc, SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)])
+        bars = ax.bar(x + offsets[min(i, len(offsets)-1)], vals, width=bar_width, label=sc, color=col, edgecolor="white", linewidth=0.4)
+        for rect, v in zip(bars, vals):
+            if _np.isfinite(v):
+                ax.text(rect.get_x()+rect.get_width()/2, v, f"{v:,.0f}%", ha="center", va="bottom" if v >= 0 else "top", fontsize=5.7, rotation=90)
+    ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels([label_map.get(k, k) for k in kpis], fontsize=6.4)
+    ax.set_ylabel("Improvement vs reference (%)", fontsize=REPORT_AXIS_LABEL_SIZE)
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
+    _report_apply_axis_style(ax)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.32), ncol=min(3, max(1, len(scenario_order))), fontsize=6.5, frameon=False)
+    fig.subplots_adjust(left=0.10, right=0.98, bottom=0.29, top=0.88)
+    return _report_fig_to_png_bytes(fig)
+
+
+def _report_scenario_delta_mac_chart(
+        delta_summary_df: pd.DataFrame,
+        title: str,
+        scenario_color_map_in: dict,
+        scenario_order_in: list,
+) -> io.BytesIO:
+    """Create a marginal abatement cost bar chart for the PDF report."""
+    import matplotlib.pyplot as plt
+    import numpy as _np
+
+    mac_col = "Marginal abatement cost (currency/tCO₂e)"
+    if delta_summary_df is None or delta_summary_df.empty or mac_col not in delta_summary_df.columns:
+        fig, ax = plt.subplots(figsize=(7.2, 3.4), dpi=180)
+        ax.text(0.5, 0.5, "No marginal abatement cost data available", ha="center", va="center")
+        ax.axis("off")
+        return _report_fig_to_png_bytes(fig)
+    dfp = delta_summary_df.copy()
+    dfp["Scenario"] = dfp["Scenario"].astype(str)
+    dfp[mac_col] = pd.to_numeric(dfp[mac_col], errors="coerce").replace([_np.inf, -_np.inf], _np.nan)
+    dfp = dfp[dfp[mac_col].notna()].copy()
+    if dfp.empty:
+        fig, ax = plt.subplots(figsize=(7.2, 3.4), dpi=180)
+        ax.text(0.5, 0.5, "No marginal abatement cost data available", ha="center", va="center")
+        ax.axis("off")
+        return _report_fig_to_png_bytes(fig)
+    scenario_order = [str(s) for s in scenario_order_in if str(s) in set(dfp["Scenario"].astype(str))]
+    if not scenario_order:
+        scenario_order = dfp["Scenario"].dropna().astype(str).drop_duplicates().tolist()
+    dfp["Scenario"] = pd.Categorical(dfp["Scenario"].astype(str), categories=scenario_order, ordered=True)
+    dfp = dfp.sort_values("Scenario")
+    colors_l = [(scenario_color_map_in or {}).get(str(sc), SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)]) for i, sc in enumerate(dfp["Scenario"].astype(str))]
+    fig, ax = plt.subplots(figsize=(7.2, 3.4), dpi=180)
+    bars = ax.bar(dfp["Scenario"].astype(str), dfp[mac_col].astype(float), color=colors_l, edgecolor="white", linewidth=0.5)
+    for rect, v in zip(bars, dfp[mac_col].astype(float)):
+        ax.text(rect.get_x()+rect.get_width()/2, v, f"{v:,.0f}", ha="center", va="bottom" if v >= 0 else "top", fontsize=6.2)
+    ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
+    ax.set_ylabel("Cost per tCO₂e avoided", fontsize=REPORT_AXIS_LABEL_SIZE)
+    ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
+    _report_apply_axis_style(ax)
+    _report_reduce_xticks(ax, max_ticks=8, rotation=20)
+    fig.tight_layout()
+    return _report_fig_to_png_bytes(fig)
+
 
 def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     """Generate an A4 PDF report for the active scenario, excluding the Raw Data tab."""
@@ -3568,6 +3911,39 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                     _report_scenario_kpi_scatter_chart(radar_raw_report, "Benchmark-Style Scenario KPI Bar", colors_scenarios, scenario_order_report),
                     "The bar summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) plus 50-year LCC and life-cycle emissions. Each KPI is shown as vertical bars on one chart with its own y-axis scale.",
                 )
+                delta_ref_report = str(st.session_state.get("scenario_delta_reference_scenario", radar_ref_report) or radar_ref_report)
+                if delta_ref_report not in scenario_order_report:
+                    delta_ref_report = radar_ref_report if radar_ref_report in scenario_order_report else scenario_order_report[0]
+                delta_long_report, delta_summary_report = _prepare_scenario_delta_analysis_dfs(
+                    radar_raw_report,
+                    reference_scenario=delta_ref_report,
+                )
+                if isinstance(delta_long_report, pd.DataFrame) and not delta_long_report.empty:
+                    _report_add_chart(
+                        story,
+                        styles,
+                        f"Scenario delta analysis - improvement vs {delta_ref_report}",
+                        _report_scenario_delta_improvement_chart(delta_long_report, f"KPI Improvement vs {delta_ref_report}", colors_scenarios, scenario_order_report),
+                        "Positive values mean the scenario has a lower/better KPI value than the selected reference. Negative values mean higher/worse than the reference.",
+                    )
+                    if isinstance(delta_summary_report, pd.DataFrame) and not delta_summary_report.empty:
+                        _report_add_chart(
+                            story,
+                            styles,
+                            "Scenario delta analysis - marginal abatement cost",
+                            _report_scenario_delta_mac_chart(delta_summary_report, "Marginal Abatement Cost", colors_scenarios, scenario_order_report),
+                            "Marginal abatement cost is calculated from the 50-year LCC delta divided by 50-year life-cycle emissions avoided, using per-m² values.",
+                        )
+                        delta_rows_report = [["Scenario", "LC emissions avoided", "LCC delta", "MAC"]]
+                        for _, _dr in delta_summary_report.iterrows():
+                            delta_rows_report.append([
+                                str(_dr.get("Scenario", "")),
+                                _report_format_number(_dr.get("LC emissions avoided (kgCO₂e/m²)", np.nan), decimals=2),
+                                _report_format_number(_dr.get("LCC delta (currency/m²)", np.nan), decimals=2),
+                                _report_format_number(_dr.get("Marginal abatement cost (currency/tCO₂e)", np.nan), decimals=0),
+                            ])
+                        story.append(_report_table_flowable(delta_rows_report, col_widths=[4.0 * cm, 4.3 * cm, 3.5 * cm, 3.5 * cm], font_size=6.3))
+                        story.append(Spacer(1, 0.2 * cm))
     except Exception:
         pass
     story.append(Paragraph("The report is generated for the active scenario only for the detailed scenario charts below. The radar summary compares all available scenarios.", styles["BodyText"]))
@@ -9839,6 +10215,93 @@ with tab7:
                         "The bar summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) "
                         "plus 50-year LCC and life-cycle emissions. Each KPI is shown as vertical bars on one chart with its own y-axis scale."
                     )
+
+                    with st.expander("Scenario Delta Analysis", expanded=True):
+                        st.caption(
+                            "Compare every scenario against one selected reference scenario. Positive improvement means the scenario has "
+                            "a lower/better KPI value than the reference. Marginal abatement cost is calculated from 50-year LCC delta "
+                            "and 50-year life-cycle emissions avoided."
+                        )
+                        _delta_scenario_options = [str(s) for s in scenario_order]
+                        _delta_ref_key = "scenario_delta_reference_scenario"
+                        _delta_ref_widget_key = "scenario_delta_reference_scenario_select"
+                        _delta_ref_default = str(st.session_state.get(_delta_ref_key, "") or "")
+                        if _delta_ref_default not in _delta_scenario_options:
+                            _delta_ref_default = str(st.session_state.get("scenario_radar_reference_scenario", "") or "")
+                        if _delta_ref_default not in _delta_scenario_options:
+                            _delta_ref_default = str(active_selected) if str(active_selected) in _delta_scenario_options else (
+                                _delta_scenario_options[0] if _delta_scenario_options else ""
+                            )
+                        if _delta_ref_default and st.session_state.get(_delta_ref_widget_key) not in _delta_scenario_options:
+                            st.session_state[_delta_ref_widget_key] = _delta_ref_default
+                        if _delta_scenario_options:
+                            _delta_ctrl_col, _delta_space_col = st.columns([1.15, 2.85])
+                            with _delta_ctrl_col:
+                                _delta_ref_scenario = st.selectbox(
+                                    "Delta reference scenario",
+                                    options=_delta_scenario_options,
+                                    index=_delta_scenario_options.index(_delta_ref_default) if _delta_ref_default in _delta_scenario_options else 0,
+                                    key=_delta_ref_widget_key,
+                                    help="The selected scenario is used as the baseline and is not plotted in the delta charts.",
+                                )
+                            st.session_state[_delta_ref_key] = _delta_ref_scenario
+
+                            _delta_long_df, _delta_summary_df = _prepare_scenario_delta_analysis_dfs(
+                                _radar_raw_df,
+                                reference_scenario=_delta_ref_scenario,
+                            )
+                            if _delta_long_df.empty:
+                                st.info("At least two scenarios with valid KPI values are required for scenario delta analysis.")
+                            else:
+                                _dcol1, _dcol2 = st.columns([1.55, 1.0])
+                                with _dcol1:
+                                    _fig_delta_pct = _scenario_delta_improvement_plotly_figure(
+                                        _delta_long_df,
+                                        scenario_color_map,
+                                        scenario_order,
+                                        title=f"KPI improvement vs {_delta_ref_scenario}",
+                                        height=520,
+                                    )
+                                    st_plotly_chart(_fig_delta_pct, use_container_width=True, key="scenario_delta_improvement_pct")
+                                with _dcol2:
+                                    _fig_delta_mac = _scenario_delta_mac_plotly_figure(
+                                        _delta_summary_df,
+                                        scenario_color_map,
+                                        scenario_order,
+                                        title="Marginal abatement cost",
+                                        height=520,
+                                    )
+                                    if _fig_delta_mac.data:
+                                        st_plotly_chart(_fig_delta_mac, use_container_width=True, key="scenario_delta_mac")
+                                    else:
+                                        st.info("Marginal abatement cost is available only when life-cycle emissions are reduced compared with the reference.")
+
+                                _delta_display = _delta_long_df.copy()
+                                for _c in ["Reference Value", "Scenario Value", "Delta (Scenario - Reference)", "Improvement (Reference - Scenario)", "Improvement vs Reference (%)"]:
+                                    if _c in _delta_display.columns:
+                                        _delta_display[_c] = pd.to_numeric(_delta_display[_c], errors="coerce")
+                                _delta_display["Reference Value"] = _delta_display["Reference Value"].map(lambda v: "n/a" if pd.isna(v) else f"{float(v):,.2f}")
+                                _delta_display["Scenario Value"] = _delta_display["Scenario Value"].map(lambda v: "n/a" if pd.isna(v) else f"{float(v):,.2f}")
+                                _delta_display["Delta"] = _delta_display["Delta (Scenario - Reference)"].map(lambda v: "n/a" if pd.isna(v) else f"{float(v):,.2f}")
+                                _delta_display["Improvement"] = _delta_display["Improvement (Reference - Scenario)"].map(lambda v: "n/a" if pd.isna(v) else f"{float(v):,.2f}")
+                                _delta_display["Improvement %"] = _delta_display["Improvement vs Reference (%)"].map(lambda v: "n/a" if pd.isna(v) else f"{float(v):,.1f}%")
+                                _delta_display = _delta_display[[
+                                    "Reference Scenario", "Scenario", "KPI", "Reference Value", "Scenario Value",
+                                    "Delta", "Improvement", "Improvement %", "Unit", "Status"
+                                ]]
+                                st.dataframe(_delta_display, use_container_width=True, hide_index=True)
+
+                                if isinstance(_delta_summary_df, pd.DataFrame) and not _delta_summary_df.empty:
+                                    _summary_display = _delta_summary_df.copy()
+                                    for _c in _summary_display.columns:
+                                        if _c not in ["Reference Scenario", "Scenario"]:
+                                            _summary_display[_c] = pd.to_numeric(_summary_display[_c], errors="coerce").map(
+                                                lambda v: "n/a" if pd.isna(v) else f"{float(v):,.2f}"
+                                            )
+                                    with st.expander("Scenario delta summary table", expanded=False):
+                                        st.dataframe(_summary_display, use_container_width=True, hide_index=True)
+                        else:
+                            st.info("No scenarios available for delta analysis.")
                 else:
                     st.info("No radar KPI data available for the current scenarios.")
             except Exception:
