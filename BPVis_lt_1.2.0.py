@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.26",
+    page_title="WSGT_BPVis_ENE 2.2.27",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.26")
+st.sidebar.write("Version 2.2.27")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.26"
+REPORT_VERSION = "2.2.27"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2793,7 +2793,12 @@ def _scenario_kpi_scatter_plotly_figure(
         else:
             yrange = [0.0, vmax * 1.12]
         axis_col = axis_palette[kpi_i % len(axis_palette)]
-        side = "left" if kpi_i in [0, 2, 4] else "right"
+        # Keep annual KPI scales on the left side and life-cycle/total KPI scales on the right side.
+        # This makes the multi-axis scatter easier to read:
+        #   left:  End Energy /m², Annual Energy Cost /m², Annual Emissions /m²
+        #   right: LCC 50 years /m², Total Emissions 50 years /m²
+        annual_kpis_left = {"End Energy /m²", "Annual Energy Cost /m²", "Annual Emissions /m²"}
+        side = "left" if str(kpi) in annual_kpis_left else "right"
         if kpi_i == 0:
             axis_cfg = dict(
                 title=dict(text=axis_title_map.get(kpi, kpi), font=dict(size=10, color=axis_col)),
