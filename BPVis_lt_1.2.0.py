@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.39",
+    page_title="WSGT_BPVis_ENE 2.2.40",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.39")
+st.sidebar.write("Version 2.2.40")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -766,6 +766,19 @@ def parse_project_df(df: Optional[pd.DataFrame]) -> Tuple[Optional[str], Optiona
         area = None
     currency = kv.get("Currency")
     return name, area, currency
+
+
+def parse_project_setting_int(df: Optional[pd.DataFrame], key: str, default: int) -> int:
+    """Read an optional integer setting from Project_Data without changing legacy parsers."""
+    try:
+        if df is None or not {"Key", "Value"}.issubset(df.columns):
+            return int(default)
+        kv = dict(zip(df["Key"].astype(str), df["Value"]))
+        if key not in kv or kv.get(key) is None or str(kv.get(key)).strip() == "":
+            return int(default)
+        return max(1, int(float(str(kv.get(key)).replace(",", "."))))
+    except Exception:
+        return int(default)
 
 
 def parse_factors_df(df: Optional[pd.DataFrame]) -> Dict[str, float]:
@@ -2210,7 +2223,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.39"
+REPORT_VERSION = "2.2.40"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2715,13 +2728,106 @@ def _report_eui_series_for_payload(df_energy: pd.DataFrame, payload: dict, years
 
 
 
-SCENARIO_RADAR_KPI_ORDER = [
-    "End Energy /m²",
-    "Annual Energy Cost /m²",
-    "LCC 50 years /m²",
-    "Annual Emissions /m²",
-    "Total Emissions 50 years /m²",
-]
+SCENARIO_COMPARISON_PERIOD_KEY = "scenario_comparison_analysis_period"
+
+
+def _get_scenario_comparison_analysis_period(default: int = 50) -> int:
+    """Return the committed scenario-comparison analysis period.
+
+    This is intentionally independent from the LCC-Analysis period. It controls
+    the Scenarios tab radar/bar/delta KPIs and the life-cycle comparison charts.
+    """
+    try:
+        val = st.session_state.get(SCENARIO_COMPARISON_PERIOD_KEY, default)
+    except Exception:
+        val = default
+    try:
+        return max(1, int(float(str(val).replace(",", "."))))
+    except Exception:
+        return int(default)
+
+
+def _scenario_lcc_kpi_label(period_years: int) -> str:
+    return f"LCC {int(period_years)} years /m²"
+
+
+def _scenario_lc_emissions_kpi_label(period_years: int) -> str:
+    return f"Total Emissions {int(period_years)} years /m²"
+
+
+def _is_scenario_lcc_kpi(kpi: str) -> bool:
+    return str(kpi).startswith("LCC ") and str(kpi).endswith(" years /m²")
+
+
+def _is_scenario_lc_emissions_kpi(kpi: str) -> bool:
+    return str(kpi).startswith("Total Emissions ") and str(kpi).endswith(" years /m²")
+
+
+def _scenario_radar_kpi_order(period_years: Optional[int] = None, radar_raw_df: Optional[pd.DataFrame] = None) -> list:
+    """Return the scenario KPI order, using the period labels present in a dataframe when available."""
+    if isinstance(radar_raw_df, pd.DataFrame) and not radar_raw_df.empty and "KPI" in radar_raw_df.columns:
+        kpis_present = [str(k) for k in radar_raw_df["KPI"].dropna().astype(str).unique().tolist()]
+        lcc_labels = [k for k in kpis_present if _is_scenario_lcc_kpi(k)]
+        emis_labels = [k for k in kpis_present if _is_scenario_lc_emissions_kpi(k)]
+        lcc_label = lcc_labels[0] if lcc_labels else _scenario_lcc_kpi_label(period_years or _get_scenario_comparison_analysis_period())
+        emis_label = emis_labels[0] if emis_labels else _scenario_lc_emissions_kpi_label(period_years or _get_scenario_comparison_analysis_period())
+    else:
+        period_years = int(period_years or _get_scenario_comparison_analysis_period())
+        lcc_label = _scenario_lcc_kpi_label(period_years)
+        emis_label = _scenario_lc_emissions_kpi_label(period_years)
+    return [
+        "End Energy /m²",
+        "Annual Energy Cost /m²",
+        lcc_label,
+        "Annual Emissions /m²",
+        emis_label,
+    ]
+
+
+# Backward-compatible default order used when no dynamic scenario-comparison period is supplied.
+SCENARIO_RADAR_KPI_ORDER = _scenario_radar_kpi_order(50)
+
+
+def _scenario_kpi_short_label(kpi: str) -> str:
+    k = str(kpi)
+    if k == "End Energy /m²":
+        return "End Energy<br>/m²"
+    if k == "Annual Energy Cost /m²":
+        return "Annual Energy<br>Cost /m²"
+    if _is_scenario_lcc_kpi(k):
+        try:
+            yrs = k.split(" ")[1]
+        except Exception:
+            yrs = ""
+        return f"LCC {yrs} years<br>/m²" if yrs else "LCC<br>/m²"
+    if k == "Annual Emissions /m²":
+        return "Annual Emissions<br>/m²"
+    if _is_scenario_lc_emissions_kpi(k):
+        try:
+            yrs = k.split(" ")[2]
+        except Exception:
+            yrs = ""
+        return f"LC Emissions<br>{yrs} years /m²" if yrs else "LC Emissions<br>/m²"
+    return k.replace("/", "<br>/")
+
+
+def _scenario_kpi_short_label_report(kpi: str) -> str:
+    return _scenario_kpi_short_label(kpi).replace("<br>", "\n")
+
+
+def _scenario_kpi_axis_title(kpi: str, currency_label: str = "Cost") -> str:
+    k = str(kpi)
+    if k == "End Energy /m²":
+        return "kWh/m²·a"
+    if k == "Annual Energy Cost /m²":
+        return f"{currency_label}/m²·a" if currency_label and currency_label != "Cost" else "Cost/m²·a"
+    if _is_scenario_lcc_kpi(k):
+        return f"{currency_label}/m²" if currency_label and currency_label != "Cost" else "Cost/m²"
+    if k == "Annual Emissions /m²":
+        return "kgCO₂e/m²·a"
+    if _is_scenario_lc_emissions_kpi(k):
+        return "kgCO₂e/m²"
+    return ""
 
 
 def _build_scenario_performance_radar_raw_df(
@@ -2735,6 +2841,7 @@ def _build_scenario_performance_radar_raw_df(
         currency_symbol_in: str,
         lcc_global_in: dict,
         crrem_dataset: Optional[dict] = None,
+        scenario_analysis_period: int = 50,
 ) -> pd.DataFrame:
     """Build raw KPI values for the Scenarios performance radar diagrams.
 
@@ -2751,12 +2858,18 @@ def _build_scenario_performance_radar_raw_df(
         return pd.DataFrame(columns=["Scenario", "KPI", "Value", "Unit"])
 
     try:
-        radar_years_50 = list(range(int(project_year), int(project_year) + 50))
+        scenario_analysis_period = max(1, int(float(scenario_analysis_period)))
     except Exception:
-        radar_years_50 = list(range(2025, 2025 + 50))
+        scenario_analysis_period = 50
+    try:
+        radar_years_50 = list(range(int(project_year), int(project_year) + scenario_analysis_period))
+    except Exception:
+        radar_years_50 = list(range(2025, 2025 + scenario_analysis_period))
 
     radar_lcc_global_50 = dict(lcc_global_in or {})
-    radar_lcc_global_50["analysis_period"] = 50
+    radar_lcc_global_50["analysis_period"] = int(scenario_analysis_period)
+    lcc_period_kpi_label = _scenario_lcc_kpi_label(int(scenario_analysis_period))
+    lc_emissions_period_kpi_label = _scenario_lc_emissions_kpi_label(int(scenario_analysis_period))
 
     radar_crrem = crrem_dataset
     if radar_crrem is None:
@@ -2788,7 +2901,7 @@ def _build_scenario_performance_radar_raw_df(
             except Exception:
                 end_energy_m2 = np.nan
 
-        # 2 + 3) Annual energy cost /m² and 50-year nominal LCC /m².
+        # 2 + 3) Annual energy cost /m² and scenario-period nominal LCC /m².
         annual_energy_cost_m2 = np.nan
         lcc_50_nominal_m2 = np.nan
         try:
@@ -2811,7 +2924,7 @@ def _build_scenario_performance_radar_raw_df(
         except Exception:
             pass
 
-        # 4 + 5) Annual and cumulative 50-year emissions /m² using CRREM decarbonization.
+        # 4 + 5) Annual and cumulative scenario-period emissions /m² using CRREM decarbonization.
         annual_emissions_m2 = np.nan
         total_emissions_50_m2 = np.nan
         try:
@@ -2831,9 +2944,9 @@ def _build_scenario_performance_radar_raw_df(
         rows.extend([
             {"Scenario": sc_name_str, "KPI": "End Energy /m²", "Value": end_energy_m2, "Unit": "kWh/m²·a"},
             {"Scenario": sc_name_str, "KPI": "Annual Energy Cost /m²", "Value": annual_energy_cost_m2, "Unit": f"{currency_symbol_in}/m²·a"},
-            {"Scenario": sc_name_str, "KPI": "LCC 50 years /m²", "Value": lcc_50_nominal_m2, "Unit": f"{currency_symbol_in}/m²"},
+            {"Scenario": sc_name_str, "KPI": lcc_period_kpi_label, "Value": lcc_50_nominal_m2, "Unit": f"{currency_symbol_in}/m²"},
             {"Scenario": sc_name_str, "KPI": "Annual Emissions /m²", "Value": annual_emissions_m2, "Unit": "kgCO₂e/m²·a"},
-            {"Scenario": sc_name_str, "KPI": "Total Emissions 50 years /m²", "Value": total_emissions_50_m2, "Unit": "kgCO₂e/m²"},
+            {"Scenario": sc_name_str, "KPI": lc_emissions_period_kpi_label, "Value": total_emissions_50_m2, "Unit": "kgCO₂e/m²"},
         ])
 
     out = pd.DataFrame(rows)
@@ -2882,7 +2995,8 @@ def _prepare_scenario_radar_plot_dfs(
     absolute_rows = []
     axis_rows = []
 
-    for kpi in SCENARIO_RADAR_KPI_ORDER:
+    kpi_order = _scenario_radar_kpi_order(radar_raw_df=raw)
+    for kpi in kpi_order:
         sub = raw.loc[raw["KPI"].astype(str) == kpi].copy()
         vals = pd.to_numeric(sub["Value"], errors="coerce")
         finite_vals = vals[np.isfinite(vals)]
@@ -3010,27 +3124,14 @@ def _scenario_kpi_scatter_plotly_figure(
     dfp["Scenario"] = dfp["Scenario"].astype(str)
     dfp["KPI"] = dfp["KPI"].astype(str)
     dfp["Value"] = pd.to_numeric(dfp["Value"], errors="coerce").replace([np.inf, -np.inf], np.nan)
-    dfp = dfp[dfp["KPI"].isin(SCENARIO_RADAR_KPI_ORDER)].copy()
+    kpi_order = _scenario_radar_kpi_order(radar_raw_df=dfp)
+    dfp = dfp[dfp["KPI"].isin(kpi_order)].copy()
     dfp = dfp[dfp["Value"].notna()].copy()
     if dfp.empty:
         return go.Figure()
 
-    kpi_label_map = {
-        "End Energy /m²": "End Energy<br>/m²",
-        "Annual Energy Cost /m²": "Annual Energy<br>Cost /m²",
-        "LCC 50 years /m²": "LCC 50 years<br>/m²",
-        "Annual Emissions /m²": "Annual Emissions<br>/m²",
-        "Total Emissions 50 years /m²": "LC Emissions<br>50 years /m²",
-    }
-    axis_title_map = {
-        "End Energy /m²": "kWh/m²·a",
-        "Annual Energy Cost /m²": "Cost/m²·a",
-        "LCC 50 years /m²": "Cost/m²",
-        "Annual Emissions /m²": "kgCO₂e/m²·a",
-        "Total Emissions 50 years /m²": "kgCO₂e/m²",
-    }
-    kpis = [k for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
-    x_labels = [kpi_label_map.get(k, k) for k in kpis]
+    kpis = [k for k in kpi_order if k in set(dfp["KPI"].astype(str))]
+    x_labels = [_scenario_kpi_short_label(k) for k in kpis]
     scenario_order = [str(s) for s in scenario_order_in if str(s) in set(dfp["Scenario"].astype(str))]
     if not scenario_order:
         scenario_order = [str(s) for s in dfp["Scenario"].dropna().astype(str).unique().tolist()]
@@ -3104,7 +3205,7 @@ def _scenario_kpi_scatter_plotly_figure(
         side = "left" if str(kpi) in annual_kpis_left else "right"
         if kpi_i == 0:
             axis_cfg = dict(
-                title=dict(text=axis_title_map.get(kpi, kpi), font=dict(size=10, color=axis_col)),
+                title=dict(text=_scenario_kpi_axis_title(kpi), font=dict(size=10, color=axis_col)),
                 tickfont=dict(size=10, color=axis_col),
                 range=yrange,
                 showgrid=True,
@@ -3120,7 +3221,7 @@ def _scenario_kpi_scatter_plotly_figure(
                 pos = positions_right[min(right_i, len(positions_right) - 1)]
                 right_i += 1
             axis_cfg = dict(
-                title=dict(text=axis_title_map.get(kpi, kpi), font=dict(size=10, color=axis_col)),
+                title=dict(text=_scenario_kpi_axis_title(kpi), font=dict(size=10, color=axis_col)),
                 tickfont=dict(size=10, color=axis_col),
                 range=yrange,
                 overlaying="y",
@@ -3162,13 +3263,13 @@ def _prepare_scenario_delta_analysis_dfs(
     """Return (delta_long_df, delta_summary_df) for scenario delta analysis.
 
     The KPI values come from the same raw dataset used by the scenario radar/bar summary:
-    End Energy, Annual Energy Cost, 50-year LCC, Annual Emissions and 50-year LC Emissions.
+    End Energy, Annual Energy Cost, scenario-period LCC, Annual Emissions and scenario-period LC Emissions.
 
     Sign convention:
     - Delta = Scenario value - Reference value (positive means the scenario has a higher KPI value).
     - Improvement = Reference value - Scenario value (positive means the scenario is lower/better).
     - Improvement % = Improvement / abs(Reference value) * 100.
-    - Marginal abatement cost = additional 50-year LCC per avoided 50-year tCO2e, using per-m2 values.
+    - Marginal abatement cost = additional scenario-period LCC per avoided scenario-period tCO2e, using per-m2 values.
     """
     if radar_raw_df is None or radar_raw_df.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -3177,7 +3278,8 @@ def _prepare_scenario_delta_analysis_dfs(
     raw["Scenario"] = raw["Scenario"].astype(str)
     raw["KPI"] = raw["KPI"].astype(str)
     raw["Value"] = pd.to_numeric(raw["Value"], errors="coerce").replace([np.inf, -np.inf], np.nan)
-    raw = raw[raw["KPI"].isin(SCENARIO_RADAR_KPI_ORDER)].copy()
+    kpi_order = _scenario_radar_kpi_order(radar_raw_df=raw)
+    raw = raw[raw["KPI"].isin(kpi_order)].copy()
     raw = raw[raw["Value"].notna()].copy()
     if raw.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -3200,7 +3302,7 @@ def _prepare_scenario_delta_analysis_dfs(
         sc_df = raw.loc[raw["Scenario"].astype(str) == str(sc)].copy()
         sc_vals = dict(zip(sc_df["KPI"].astype(str), pd.to_numeric(sc_df["Value"], errors="coerce")))
         sc_units = dict(zip(sc_df["KPI"].astype(str), sc_df.get("Unit", "")))
-        for kpi in SCENARIO_RADAR_KPI_ORDER:
+        for kpi in kpi_order:
             ref_val = ref_vals.get(kpi, np.nan)
             sc_val = sc_vals.get(kpi, np.nan)
             if pd.isna(ref_val) or pd.isna(sc_val):
@@ -3238,8 +3340,10 @@ def _prepare_scenario_delta_analysis_dfs(
         def _val(kpi, col):
             hit = sub.loc[sub["KPI"].astype(str) == kpi, col]
             return float(hit.iloc[0]) if not hit.empty and pd.notna(hit.iloc[0]) else np.nan
-        lcc_delta = _val("LCC 50 years /m²", "Delta (Scenario - Reference)")
-        lc_em_avoided_kg = _val("Total Emissions 50 years /m²", "Improvement (Reference - Scenario)")
+        lcc_kpi_label = next((k for k in kpi_order if _is_scenario_lcc_kpi(k)), _scenario_lcc_kpi_label(_get_scenario_comparison_analysis_period()))
+        lc_em_kpi_label = next((k for k in kpi_order if _is_scenario_lc_emissions_kpi(k)), _scenario_lc_emissions_kpi_label(_get_scenario_comparison_analysis_period()))
+        lcc_delta = _val(lcc_kpi_label, "Delta (Scenario - Reference)")
+        lc_em_avoided_kg = _val(lc_em_kpi_label, "Improvement (Reference - Scenario)")
         if pd.notna(lcc_delta) and pd.notna(lc_em_avoided_kg) and abs(float(lc_em_avoided_kg)) > 1e-12:
             mac = float(lcc_delta) / (float(lc_em_avoided_kg) / 1000.0)
         else:
@@ -3249,9 +3353,9 @@ def _prepare_scenario_delta_analysis_dfs(
             "Scenario": sc,
             "End Energy improvement (%)": _val("End Energy /m²", "Improvement vs Reference (%)"),
             "Annual Energy Cost improvement (%)": _val("Annual Energy Cost /m²", "Improvement vs Reference (%)"),
-            "LCC 50y improvement (%)": _val("LCC 50 years /m²", "Improvement vs Reference (%)"),
+            f"LCC {str(lcc_kpi_label).split(' ')[1] if len(str(lcc_kpi_label).split(' ')) > 1 else ''}y improvement (%)": _val(lcc_kpi_label, "Improvement vs Reference (%)"),
             "Annual Emissions improvement (%)": _val("Annual Emissions /m²", "Improvement vs Reference (%)"),
-            "LC Emissions 50y improvement (%)": _val("Total Emissions 50 years /m²", "Improvement vs Reference (%)"),
+            f"LC Emissions {str(lc_em_kpi_label).split(' ')[2] if len(str(lc_em_kpi_label).split(' ')) > 2 else ''}y improvement (%)": _val(lc_em_kpi_label, "Improvement vs Reference (%)"),
             "LCC delta (currency/m²)": lcc_delta,
             "LC emissions avoided (kgCO₂e/m²)": lc_em_avoided_kg,
             "Marginal abatement cost (currency/tCO₂e)": mac,
@@ -3278,13 +3382,7 @@ def _scenario_delta_improvement_plotly_figure(
     if dfp.empty:
         return go.Figure()
 
-    label_map = {
-        "End Energy /m²": "End Energy<br>/m²",
-        "Annual Energy Cost /m²": "Annual Energy<br>Cost /m²",
-        "LCC 50 years /m²": "LCC 50 years<br>/m²",
-        "Annual Emissions /m²": "Annual Emissions<br>/m²",
-        "Total Emissions 50 years /m²": "LC Emissions<br>50 years /m²",
-    }
+    kpi_order = _scenario_radar_kpi_order(radar_raw_df=dfp)
     scenario_order = [str(s) for s in scenario_order_in if str(s) in set(dfp["Scenario"].astype(str))]
     if not scenario_order:
         scenario_order = dfp["Scenario"].dropna().astype(str).drop_duplicates().tolist()
@@ -3294,11 +3392,11 @@ def _scenario_delta_improvement_plotly_figure(
         sub = dfp.loc[dfp["Scenario"].astype(str) == sc].copy()
         if sub.empty:
             continue
-        sub["KPI"] = pd.Categorical(sub["KPI"], categories=SCENARIO_RADAR_KPI_ORDER, ordered=True)
+        sub["KPI"] = pd.Categorical(sub["KPI"], categories=kpi_order, ordered=True)
         sub = sub.sort_values("KPI")
         col = (scenario_color_map_in or {}).get(sc, SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)])
         fig.add_trace(go.Bar(
-            x=[label_map.get(str(k), str(k)) for k in sub["KPI"].astype(str)],
+            x=[_scenario_kpi_short_label(str(k)) for k in sub["KPI"].astype(str)],
             y=sub["Improvement vs Reference (%)"].astype(float),
             marker=dict(color=col),
             name=sc,
@@ -3420,7 +3518,7 @@ def _scenario_radar_plotly_figure(
     dfp["Radial"] = pd.to_numeric(dfp["Radial"], errors="coerce")
 
     # Keep the same KPI order everywhere and include only KPIs with data.
-    kpi_order = [k for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
+    kpi_order = [k for k in _scenario_radar_kpi_order(radar_raw_df=dfp) if k in set(dfp["KPI"].astype(str))]
     if not kpi_order:
         kpi_order = dfp["KPI"].dropna().astype(str).drop_duplicates().tolist()
 
@@ -3553,7 +3651,7 @@ def _report_radar_chart(
     import matplotlib.pyplot as plt
     import numpy as _np
 
-    labels = [k for k in SCENARIO_RADAR_KPI_ORDER if plot_df is not None and not plot_df.loc[plot_df["KPI"].astype(str) == k].empty]
+    labels = [k for k in _scenario_radar_kpi_order(radar_raw_df=plot_df) if plot_df is not None and not plot_df.loc[plot_df["KPI"].astype(str) == k].empty]
     if not labels:
         fig, ax = plt.subplots(figsize=(7.6, 5.0), dpi=180)
         ax.text(0.5, 0.5, "No radar data available", ha="center", va="center")
@@ -3631,7 +3729,8 @@ def _report_scenario_kpi_scatter_chart(
     dfp["Scenario"] = dfp["Scenario"].astype(str)
     dfp["KPI"] = dfp["KPI"].astype(str)
     dfp["Value"] = pd.to_numeric(dfp["Value"], errors="coerce").replace([_np.inf, -_np.inf], _np.nan)
-    dfp = dfp[dfp["KPI"].isin(SCENARIO_RADAR_KPI_ORDER)].copy()
+    kpi_order = _scenario_radar_kpi_order(radar_raw_df=dfp)
+    dfp = dfp[dfp["KPI"].isin(kpi_order)].copy()
     dfp = dfp[dfp["Value"].notna()].copy()
     if dfp.empty:
         fig, ax = plt.subplots(figsize=(7.6, 4.0), dpi=180)
@@ -3639,21 +3738,7 @@ def _report_scenario_kpi_scatter_chart(
         ax.axis("off")
         return _report_fig_to_png_bytes(fig)
 
-    label_map = {
-        "End Energy /m²": "End Energy\n/m²",
-        "Annual Energy Cost /m²": "Annual Energy\nCost /m²",
-        "LCC 50 years /m²": "LCC 50y\n/m²",
-        "Annual Emissions /m²": "Annual Emissions\n/m²",
-        "Total Emissions 50 years /m²": "LC Emissions\n50y /m²",
-    }
-    unit_map = {
-        "End Energy /m²": "kWh/m²·a",
-        "Annual Energy Cost /m²": "Cost/m²·a",
-        "LCC 50 years /m²": "Cost/m²",
-        "Annual Emissions /m²": "kgCO₂e/m²·a",
-        "Total Emissions 50 years /m²": "kgCO₂e/m²",
-    }
-    kpis = [k for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
+    kpis = [k for k in kpi_order if k in set(dfp["KPI"].astype(str))]
     scenario_order = [str(s) for s in scenario_order_in if str(s) in set(dfp["Scenario"].astype(str))]
     if not scenario_order:
         scenario_order = [str(s) for s in dfp["Scenario"].dropna().astype(str).unique().tolist()]
@@ -3719,7 +3804,7 @@ def _report_scenario_kpi_scatter_chart(
             ax.set_ylim(min(0.0, vmin * 1.10), max(1.0, vmax * 1.10))
         else:
             ax.set_ylim(0.0, vmax * 1.12)
-        ax.set_ylabel(unit_map.get(kpi, kpi), fontsize=6.4, color=axis_col)
+        ax.set_ylabel(_scenario_kpi_axis_title(kpi), fontsize=6.4, color=axis_col)
         ax.tick_params(axis="y", labelsize=5.8, colors=axis_col, width=0.6)
         ax.grid(kpi_i == 0, axis="y", linewidth=0.35, alpha=0.35)
         for sc_i, sc in enumerate(scenario_order):
@@ -3734,7 +3819,7 @@ def _report_scenario_kpi_scatter_chart(
 
     host.set_xlim(-0.55, len(kpis) - 0.45)
     host.set_xticks(x_positions)
-    host.set_xticklabels([label_map.get(k, k) for k in kpis], fontsize=6.3)
+    host.set_xticklabels([_scenario_kpi_short_label_report(k) for k in kpis], fontsize=6.3)
     host.set_title(title, fontsize=11, fontweight="bold", pad=10)
     if legend_handles:
         host.legend(legend_handles, legend_labels, loc="lower center", bbox_to_anchor=(0.5, -0.34), ncol=min(3, max(1, len(legend_labels))), fontsize=6.5, frameon=False)
@@ -3769,14 +3854,7 @@ def _report_scenario_delta_improvement_chart(
         ax.axis("off")
         return _report_fig_to_png_bytes(fig)
 
-    label_map = {
-        "End Energy /m²": "End Energy\n/m²",
-        "Annual Energy Cost /m²": "Annual Energy\nCost /m²",
-        "LCC 50 years /m²": "LCC 50y\n/m²",
-        "Annual Emissions /m²": "Annual Emissions\n/m²",
-        "Total Emissions 50 years /m²": "LC Emissions\n50y /m²",
-    }
-    kpis = [k for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
+    kpis = [k for k in _scenario_radar_kpi_order(radar_raw_df=dfp) if k in set(dfp["KPI"].astype(str))]
     scenario_order = [str(s) for s in scenario_order_in if str(s) in set(dfp["Scenario"].astype(str))]
     if not scenario_order:
         scenario_order = dfp["Scenario"].dropna().astype(str).drop_duplicates().tolist()
@@ -3799,7 +3877,7 @@ def _report_scenario_delta_improvement_chart(
                 ax.text(rect.get_x()+rect.get_width()/2, v, f"{v:,.0f}%", ha="center", va="bottom" if v >= 0 else "top", fontsize=5.7, rotation=90)
     ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
     ax.set_xticks(x)
-    ax.set_xticklabels([label_map.get(k, k) for k in kpis], fontsize=6.4)
+    ax.set_xticklabels([_scenario_kpi_short_label_report(k) for k in kpis], fontsize=6.4)
     ax.set_ylabel("Improvement vs reference (%)", fontsize=REPORT_AXIS_LABEL_SIZE)
     ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
     _report_apply_axis_style(ax)
@@ -4244,6 +4322,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         scenarios_report = st.session_state.get("scenarios", {}) or {}
         scenario_order_report = [str(s) for s in scenarios_report.keys()]
         if scenario_order_report:
+            scenario_comparison_period_report = _get_scenario_comparison_analysis_period(50)
             radar_raw_report = _build_scenario_performance_radar_raw_df(
                 file_bytes,
                 filename,
@@ -4255,6 +4334,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                 currency_r,
                 lcc_global,
                 crrem_dataset=crrem,
+                scenario_analysis_period=scenario_comparison_period_report,
             )
             radar_ref_report = str(st.session_state.get("scenario_radar_reference_scenario", active_name) or active_name)
             if radar_ref_report not in scenario_order_report:
@@ -4293,7 +4373,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                     styles,
                     "Scenario KPI bar summary",
                     _report_scenario_kpi_scatter_chart(radar_raw_report, "Benchmark-Style Scenario KPI Bar", colors_scenarios, scenario_order_report),
-                    "The bar summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) plus 50-year LCC and life-cycle emissions. Each KPI is shown as vertical bars on one chart with its own y-axis scale.",
+                    "The bar summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) plus scenario-period LCC and life-cycle emissions. Each KPI is shown as vertical bars on one chart with its own y-axis scale.",
                 )
                 delta_ref_report = str(st.session_state.get("scenario_delta_reference_scenario", radar_ref_report) or radar_ref_report)
                 if delta_ref_report not in scenario_order_report:
@@ -4316,7 +4396,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                             styles,
                             "Scenario delta analysis - marginal abatement cost",
                             _report_scenario_delta_mac_chart(delta_summary_report, "Marginal Abatement Cost", colors_scenarios, scenario_order_report),
-                            "Marginal abatement cost is calculated from the 50-year LCC delta divided by 50-year life-cycle emissions avoided, using per-m² values.",
+                            "Marginal abatement cost is calculated from the scenario-period LCC delta divided by scenario-period life-cycle emissions avoided, using per-m² values.",
                         )
                         delta_rows_report = [["Scenario", "LC emissions avoided", "LCC delta", "MAC"]]
                         for _, _dr in delta_summary_report.iterrows():
@@ -4331,14 +4411,27 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     except Exception:
         pass
     story.append(Paragraph("The report is generated for the active scenario only for the detailed scenario charts below. The radar summary compares all available scenarios.", styles["BodyText"]))
-    if not cf.empty:
-        by_year = cf.groupby("Year", as_index=True).agg({"Nominal Cost": "sum", "Discounted Cost": "sum"})
-        energy_by_year = cf.loc[cf["Cost Type"] == "Energy"].groupby("Year")["Nominal Cost"].sum().reindex(by_year.index).fillna(0.0)
+    try:
+        _sc_report_lcc_global = dict(lcc_global or {})
+        _sc_report_lcc_global["analysis_period"] = int(scenario_comparison_period_report)
+        _sc_report_end_uses = [_canon_enduse_name(str(c)) for c in df_energy.columns if str(c) != "Month"]
+        cf_scenario_report = compute_lcc_cashflow_table(
+            df_energy,
+            payload,
+            _sc_report_end_uses,
+            project_year_r,
+            lcc_global=_sc_report_lcc_global,
+        )
+    except Exception:
+        cf_scenario_report = cf
+    if isinstance(cf_scenario_report, pd.DataFrame) and not cf_scenario_report.empty:
+        by_year = cf_scenario_report.groupby("Year", as_index=True).agg({"Nominal Cost": "sum", "Discounted Cost": "sum"})
+        energy_by_year = cf_scenario_report.loc[cf_scenario_report["Cost Type"] == "Energy"].groupby("Year")["Nominal Cost"].sum().reindex(by_year.index).fillna(0.0)
         _report_add_chart(story, styles, "Annual energy cost", _report_line_chart({active_name: energy_by_year}, "Annual Energy Cost", f"{currency_r}/a", {active_name: scenario_color}), "Annual energy cost is calculated from active-scenario factored kWh, tariffs and energy inflation.")
         _report_add_chart(story, styles, "Cumulative LCC", _report_line_chart({"Nominal": by_year["Nominal Cost"].cumsum(), "Discounted": by_year["Discounted Cost"].cumsum()}, "Cumulative LCC - Active Scenario", currency_r, {"Nominal": scenario_color, "Discounted": scenario_color}, dashed={"Discounted"}), "Solid line is nominal cumulative cost; dashed line is discounted cumulative cost.")
     if crrem is not None:
         try:
-            analysis_period = max(1, _to_int_lcc(lcc_global.get("analysis_period", 30), 30))
+            analysis_period = max(1, int(scenario_comparison_period_report))
             years_sc = list(range(project_year_r, project_year_r + analysis_period))
             annual_em_sc = compute_crrem_like_scenario_emissions_series(df_energy, payload, crrem, project_year_r, years_sc).reindex(years_sc).fillna(0.0)
             target_id = "1.5C" if str(st.session_state.get("crrem_target_select", "1.5°C")).startswith("1.5") else "2C"
@@ -4348,7 +4441,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
             _report_add_chart(story, styles, "Cumulative emissions", _report_line_chart({active_name: annual_em_sc.cumsum(), "CRREM-Baseline": crrem_total.cumsum()}, "Cumulative Emissions - Active Scenario", "tCO₂e", {active_name: scenario_color, "CRREM-Baseline": CRREM_COLOR_LIMIT}, dashed={"CRREM-Baseline"}), "Cumulative emissions are the running sum of annual decarbonized emissions.")
         except Exception:
             pass
-    add_input_table("Relevant inputs", [("Active scenario", active_name), ("Scenario color", scenario_color), ("Scenario-specific raw Energy_Balance override", "Yes" if get_scenario_energy_balance_override(active_name) is not None else "No")])
+    add_input_table("Relevant inputs", [("Active scenario", active_name), ("Scenario comparison analysis period", f"{int(scenario_comparison_period_report)} years"), ("Scenario color", scenario_color), ("Scenario-specific raw Energy_Balance override", "Yes" if get_scenario_energy_balance_override(active_name) is not None else "No")])
 
     # Model Inputs QA
     add_section("10. Model Inputs QA")
@@ -7159,6 +7252,12 @@ if uploaded_file:
     saved_name, saved_area, saved_currency, saved_building_use, saved_country, saved_lat, saved_lon, saved_year = \
         parse_project_df_with_building_use(cfg_saved["project"])
 
+    saved_scenario_comparison_period = parse_project_setting_int(
+        cfg_saved["project"],
+        "Scenario_Comparison_Analysis_Period",
+        50,
+    )
+
     saved_factors = parse_factors_df(cfg_saved["factors"])
     saved_tariffs = parse_tariffs_df(cfg_saved["tariffs"])
     saved_mapping_df = cfg_saved["mapping"]
@@ -7183,6 +7282,7 @@ if uploaded_file:
         "lat": saved_lat,
         "lon": saved_lon,
         "year": saved_year,
+        "scenario_comparison_period": saved_scenario_comparison_period,
         "factors": saved_factors,
         "tariffs": saved_tariffs,
         "mapping_df": saved_mapping_df,
@@ -7297,6 +7397,12 @@ if uploaded_file:
             try:
                 st.session_state["project_year"] = int(float(preloaded["year"]))
                 st.session_state["project_year_txt"] = str(int(float(preloaded["year"])))
+            except Exception:
+                pass
+
+        if preloaded.get("scenario_comparison_period") is not None:
+            try:
+                st.session_state[SCENARIO_COMPARISON_PERIOD_KEY] = max(1, int(float(preloaded.get("scenario_comparison_period", 50))))
             except Exception:
                 pass
 
@@ -8023,6 +8129,14 @@ with tab1:
                     lon_val,
                     int(st.session_state.get("project_year", 2025)),
                 )
+                try:
+                    _sc_cmp_period_save = _get_scenario_comparison_analysis_period(50)
+                    project_df = pd.concat([
+                        project_df,
+                        pd.DataFrame([{"Key": "Scenario_Comparison_Analysis_Period", "Value": int(_sc_cmp_period_save)}]),
+                    ], ignore_index=True)
+                except Exception:
+                    pass
 
                 factors_df = build_factors_df(
                     co2_Emissions_Electricity,
@@ -11102,6 +11216,21 @@ with tab7:
             for i, s in enumerate(scenario_order):
                 scenario_color_map[str(s)] = str(_saved_scenario_colors.get(str(s), SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)]))
 
+            # Scenario Comparison has its own analysis period, independent from LCC-Analysis.
+            if SCENARIO_COMPARISON_PERIOD_KEY not in st.session_state:
+                st.session_state[SCENARIO_COMPARISON_PERIOD_KEY] = int((preloaded or {}).get("scenario_comparison_period", 50))
+            _period_col, _period_spacer = st.columns([1.15, 2.85])
+            with _period_col:
+                st.number_input(
+                    "Scenario comparison analysis period (years)",
+                    min_value=1,
+                    max_value=100,
+                    step=1,
+                    format="%d",
+                    key=SCENARIO_COMPARISON_PERIOD_KEY,
+                    help="Independent from the LCC-Analysis period. Used for Scenarios-tab life-cycle KPIs, LCC/emissions comparisons, radar/bar summary and delta analysis.",
+                )
+            scenario_comparison_period = _get_scenario_comparison_analysis_period(50)
 
             # On-top scenario radar summary (outside the Life Cycle Comparission expander).
             try:
@@ -11135,6 +11264,7 @@ with tab7:
                     _curr,
                     _radar_lcc_global,
                     crrem_dataset=_radar_crrem_dataset,
+                    scenario_analysis_period=scenario_comparison_period,
                 )
                 st.subheader("Scenario Performance Radar")
 
@@ -11233,14 +11363,14 @@ with tab7:
                     st_plotly_chart(fig_scenario_kpi_scatter, use_container_width=True, key="scenario_kpi_scatter_summary")
                     st.caption(
                         "The bar summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) "
-                        "plus 50-year LCC and life-cycle emissions. Each KPI is shown as vertical bars on one chart with its own y-axis scale."
+                        "plus scenario-period LCC and life-cycle emissions. Each KPI is shown as vertical bars on one chart with its own y-axis scale."
                     )
 
                     with st.expander("Scenario Delta Analysis", expanded=True):
                         st.caption(
                             "Compare every scenario against one selected reference scenario. Positive improvement means the scenario has "
-                            "a lower/better KPI value than the reference. Marginal abatement cost is calculated from 50-year LCC delta "
-                            "and 50-year life-cycle emissions avoided."
+                            "a lower/better KPI value than the reference. Marginal abatement cost is calculated from scenario-period LCC delta "
+                            "and scenario-period life-cycle emissions avoided."
                         )
                         _delta_scenario_options = [str(s) for s in scenario_order]
                         _delta_ref_key = "scenario_delta_reference_scenario"
@@ -11329,7 +11459,7 @@ with tab7:
 
             with st.expander("Life Cycle Comparission", expanded=True):
                 st.caption(
-                    "Life-cycle comparison uses the committed global LCC assumptions from the LCC-Analysis tab. "
+                    "Life-cycle comparison uses the Scenarios-tab analysis period and the committed global LCC assumptions from the LCC-Analysis tab. "
                     "Scenario-specific Energy_Balance overrides and LCC investment measures are included."
                 )
 
@@ -11354,7 +11484,8 @@ with tab7:
                 else:
                     project_year_lcc_cmp = int(st.session_state.get("project_year", 2025))
                     lcc_global_cmp = _get_lcc_global_state_payload(all_enduses_lcc_cmp)
-                    analysis_period_lcc_cmp = max(1, _to_int_lcc(lcc_global_cmp.get("analysis_period", 30), 30))
+                    analysis_period_lcc_cmp = max(1, int(scenario_comparison_period))
+                    lcc_global_cmp["analysis_period"] = int(analysis_period_lcc_cmp)
                     lcc_years_cmp = list(range(project_year_lcc_cmp, project_year_lcc_cmp + analysis_period_lcc_cmp))
 
                     fig_lcc_cmp = go.Figure()
