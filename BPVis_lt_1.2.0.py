@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.32",
+    page_title="WSGT_BPVis_ENE 2.2.33",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.32")
+st.sidebar.write("Version 2.2.33")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.32"
+REPORT_VERSION = "2.2.33"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3097,45 +3097,117 @@ def _scenario_radar_plotly_figure(
         mode: str = "improvement",
         height: int = 620,
 ):
-    """Create a report/app radar figure using Plotly without changing Streamlit-native charts elsewhere."""
+    """Create a report/app radar figure using Plotly without changing Streamlit-native charts elsewhere.
+
+    The radar is built trace-by-trace (go.Scatterpolar instead of px.line_polar) so the
+    hover labels are explicit and stable after scenario-comparison calculations change.
+    """
     if plot_df is None or plot_df.empty:
         return go.Figure()
 
-    # Ensure all custom-data columns exist for both radar modes.
-    plot_df = plot_df.copy()
+    dfp = plot_df.copy()
+    # Ensure all hover/data columns exist for both radar modes.
     for _c in [
-        "Scenario", "Formatted Value", "Unit", "Percent of Highest", "Axis Maximum",
+        "Scenario", "KPI", "Radial", "Formatted Value", "Unit", "Percent of Highest", "Axis Maximum",
         "Improvement vs Reference %", "Reference Scenario", "Reference Formatted Value",
+        "Improvement Axis Min", "Improvement Axis Max",
     ]:
-        if _c not in plot_df.columns:
-            plot_df[_c] = np.nan if _c not in ["Scenario", "Formatted Value", "Unit", "Reference Scenario", "Reference Formatted Value"] else ""
+        if _c not in dfp.columns:
+            if _c in ["Scenario", "KPI", "Formatted Value", "Unit", "Reference Scenario", "Reference Formatted Value"]:
+                dfp[_c] = ""
+            else:
+                dfp[_c] = np.nan
 
-    fig = px.line_polar(
-        plot_df,
-        r="Radial",
-        theta="KPI",
-        color="Scenario",
-        line_close=True,
-        color_discrete_map=scenario_color_map_in or {},
-        category_orders={"KPI": SCENARIO_RADAR_KPI_ORDER, "Scenario": [str(s) for s in scenario_order_in]},
-        custom_data=[
-            "Scenario",
-            "Formatted Value",
-            "Unit",
-            "Percent of Highest",
-            "Axis Maximum",
-            "Improvement vs Reference %",
-            "Reference Scenario",
-            "Reference Formatted Value",
-        ],
-        height=height,
-    )
+    dfp["Scenario"] = dfp["Scenario"].astype(str)
+    dfp["KPI"] = dfp["KPI"].astype(str)
+    dfp["Radial"] = pd.to_numeric(dfp["Radial"], errors="coerce")
+
+    # Keep the same KPI order everywhere and include only KPIs with data.
+    kpi_order = [k for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
+    if not kpi_order:
+        kpi_order = dfp["KPI"].dropna().astype(str).drop_duplicates().tolist()
+
+    scenario_order = [str(s) for s in scenario_order_in if str(s) in set(dfp["Scenario"].astype(str))]
+    if not scenario_order:
+        scenario_order = dfp["Scenario"].dropna().astype(str).drop_duplicates().tolist()
+
+    fig = go.Figure()
+
+    def _fmt_num(x, decimals=1, suffix=""):
+        try:
+            if pd.isna(x) or not np.isfinite(float(x)):
+                return "n/a"
+            return f"{float(x):,.{decimals}f}{suffix}"
+        except Exception:
+            return "n/a"
+
+    for _i, _sc in enumerate(scenario_order):
+        sub = dfp.loc[dfp["Scenario"].astype(str) == str(_sc)].copy()
+        if sub.empty:
+            continue
+        sub["KPI"] = pd.Categorical(sub["KPI"].astype(str), categories=kpi_order, ordered=True)
+        sub = sub.sort_values("KPI")
+        sub = sub[sub["Radial"].notna()].copy()
+        if sub.empty:
+            continue
+
+        theta_vals = sub["KPI"].astype(str).tolist()
+        r_vals = pd.to_numeric(sub["Radial"], errors="coerce").astype(float).tolist()
+        hover_text = []
+        for _, _row in sub.iterrows():
+            _kpi = str(_row.get("KPI", ""))
+            _formatted = str(_row.get("Formatted Value", "n/a"))
+            _unit = str(_row.get("Unit", ""))
+            if mode == "improvement":
+                _ref_s = str(_row.get("Reference Scenario", ""))
+                _ref_f = str(_row.get("Reference Formatted Value", "n/a"))
+                _impr = pd.to_numeric(_row.get("Improvement vs Reference %"), errors="coerce")
+                _hover = (
+                    f"<b>{_sc}</b><br>"
+                    f"{_kpi}<br>"
+                    f"Actual KPI: {_formatted} {_unit}<br>"
+                    f"Improvement vs {_ref_s}: {_fmt_num(_impr, 1, '%')}<br>"
+                    f"Reference KPI: {_ref_f} {_unit}"
+                )
+            else:
+                _pct = pd.to_numeric(_row.get("Percent of Highest"), errors="coerce")
+                _axis_max = pd.to_numeric(_row.get("Axis Maximum"), errors="coerce")
+                _hover = (
+                    f"<b>{_sc}</b><br>"
+                    f"{_kpi}<br>"
+                    f"Actual KPI: {_formatted} {_unit}<br>"
+                    f"Axis-scaled value: {_fmt_num(_pct, 1, '%')} of axis max<br>"
+                    f"Axis max: {_fmt_num(_axis_max, 2)} {_unit}"
+                )
+            hover_text.append(_hover)
+
+        # Close polygon explicitly and keep hover text on the closing point.
+        if theta_vals and r_vals:
+            theta_vals_closed = theta_vals + [theta_vals[0]]
+            r_vals_closed = r_vals + [r_vals[0]]
+            hover_text_closed = hover_text + [hover_text[0] if hover_text else ""]
+        else:
+            continue
+
+        _col = (scenario_color_map_in or {}).get(str(_sc), SCENARIO_COLOR_PALETTE[_i % len(SCENARIO_COLOR_PALETTE)])
+        fig.add_trace(go.Scatterpolar(
+            r=r_vals_closed,
+            theta=theta_vals_closed,
+            mode="lines+markers",
+            name=str(_sc),
+            line=dict(color=_col, width=3.6),
+            marker=dict(color=_col, size=8),
+            fill="toself",
+            fillcolor=_plotly_rgba_from_color(_col, 0.10),
+            text=hover_text_closed,
+            hovertemplate="%{text}<extra></extra>",
+        ))
 
     if mode == "improvement":
         # Values in the dataframe are shifted to avoid negative radii. Tick labels show the real improvement %.
         try:
-            axis_min = float(pd.to_numeric(plot_df.get("Improvement Axis Min"), errors="coerce").dropna().iloc[0])
-            axis_max = float(pd.to_numeric(plot_df.get("Improvement Axis Max"), errors="coerce").dropna().iloc[0])
+            axis_min = float(pd.to_numeric(dfp.get("Improvement Axis Min"), errors="coerce").dropna().iloc[0])
+            axis_max = float(pd.to_numeric(dfp.get("Improvement Axis Max"), errors="coerce").dropna().iloc[0])
         except Exception:
             axis_min, axis_max = -10.0, 10.0
         if abs(axis_max - axis_min) < 1e-9:
@@ -3145,38 +3217,12 @@ def _scenario_radar_plotly_figure(
         ticktext = [f"{t:,.0f}%" for t in tick_actual]
         radial_range = [0, float(axis_max - axis_min)]
         radial_title = "Improvement vs reference"
-        hover_label = "Improvement vs %{customdata[6]}: %{customdata[5]:.1f}%<br>Reference KPI: %{customdata[7]} %{customdata[2]}"
     else:
         tickvals = [0, 25, 50, 75, 100]
         ticktext = ["0%", "25%", "50%", "75%", "Axis max"]
         radial_range = [0, 100]
         radial_title = "Axis-scaled value"
-        hover_label = "Axis-scaled value: %{customdata[3]:.1f}% of axis max"
 
-    fig.update_traces(
-        fill="toself",
-        line=dict(width=3.6),
-        marker=dict(size=8),
-        hovertemplate=(
-            "<b>%{customdata[0]}</b><br>"
-            "%{theta}<br>"
-            "Actual KPI: %{customdata[1]} %{customdata[2]}<br>"
-            + hover_label +
-            "<extra></extra>"
-        ),
-    )
-    try:
-        for _i, _tr in enumerate(fig.data):
-            _sc = str(getattr(_tr, "name", ""))
-            _col = (scenario_color_map_in or {}).get(_sc, SCENARIO_COLOR_PALETTE[_i % len(SCENARIO_COLOR_PALETTE)])
-            _tr.update(
-                fill="toself",
-                fillcolor=_plotly_rgba_from_color(_col, 0.10),
-                line=dict(color=_col, width=3.6),
-                marker=dict(color=_col, size=8),
-            )
-    except Exception:
-        pass
     fig.update_layout(
         title=dict(text=title, x=0.5, xanchor="center"),
         polar=dict(
@@ -3187,10 +3233,15 @@ def _scenario_radar_plotly_figure(
                 title=dict(text=radial_title, font=dict(size=10)),
                 showline=True,
             ),
+            angularaxis=dict(
+                categoryorder="array",
+                categoryarray=kpi_order,
+            ),
         ),
         legend_title_text="Scenario",
         legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
         margin=dict(l=40, r=40, t=70, b=110),
+        height=height,
     )
     return fig
 
