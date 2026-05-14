@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.22",
+    page_title="WSGT_BPVis_ENE 2.2.23",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.22")
+st.sidebar.write("Version 2.2.23")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.22"
+REPORT_VERSION = "2.2.23"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2681,6 +2681,86 @@ def _prepare_scenario_radar_plot_dfs(
 
     return improvement_df, absolute_df, axis_df
 
+def _plotly_rgba_from_color(color: str, alpha: float = 0.10) -> str:
+    """Return an rgba() string from a hex-like color; fallback is neutral gray."""
+    try:
+        col = str(color or "#777777").strip()
+        if not col.startswith("#"):
+            col = f"#{col}"
+        r, g, b = pcolors.hex_to_rgb(col)
+        return f"rgba({int(r)},{int(g)},{int(b)},{float(alpha):.3f})"
+    except Exception:
+        return f"rgba(119,119,119,{float(alpha):.3f})"
+
+
+def _scenario_kpi_scatter_plotly_figure(
+        radar_raw_df: pd.DataFrame,
+        scenario_color_map_in: dict,
+        scenario_order_in: list,
+        title: str = "Scenario KPI scatter summary",
+        height: int = 620,
+) -> go.Figure:
+    """Create a faceted scatter plot for Benchmark-style scenario KPIs.
+
+    Each KPI gets its own y-axis scale because the units and value ranges differ strongly.
+    """
+    if radar_raw_df is None or radar_raw_df.empty:
+        return go.Figure()
+
+    dfp = radar_raw_df.copy()
+    dfp["Scenario"] = dfp["Scenario"].astype(str)
+    dfp["KPI"] = dfp["KPI"].astype(str)
+    dfp["Value"] = pd.to_numeric(dfp["Value"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    dfp = dfp[dfp["KPI"].isin(SCENARIO_RADAR_KPI_ORDER)].copy()
+    dfp = dfp[dfp["Value"].notna()].copy()
+    if dfp.empty:
+        return go.Figure()
+
+    label_map = {
+        "End Energy /m²": "Energy Density (EUI)<br>kWh/m²·a",
+        "Annual Energy Cost /m²": "Energy Cost<br>currency/m²·a",
+        "LCC 50 years /m²": "LCC 50 years<br>currency/m²",
+        "Annual Emissions /m²": "Carbon Intensity<br>kgCO₂e/m²·a",
+        "Total Emissions 50 years /m²": "LC Emissions 50 years<br>kgCO₂e/m²",
+    }
+    dfp["KPI Label"] = dfp["KPI"].map(label_map).fillna(dfp["KPI"])
+    dfp["Unit"] = dfp.get("Unit", "").astype(str)
+    dfp["Formatted Value"] = dfp.get("Formatted Value", "").astype(str)
+
+    label_order = [label_map.get(k, k) for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
+    fig = px.scatter(
+        dfp,
+        x="Scenario",
+        y="Value",
+        color="Scenario",
+        facet_col="KPI Label",
+        facet_col_wrap=3,
+        category_orders={"Scenario": [str(s) for s in scenario_order_in], "KPI Label": label_order},
+        color_discrete_map=scenario_color_map_in or {},
+        custom_data=["KPI", "Formatted Value", "Unit", "Scenario"],
+        height=height,
+    )
+    fig.update_traces(
+        marker=dict(size=14, line=dict(width=1.5, color="white")),
+        hovertemplate=(
+            "<b>%{customdata[3]}</b><br>"
+            "%{customdata[0]}<br>"
+            "%{customdata[1]} %{customdata[2]}"
+            "<extra></extra>"
+        ),
+    )
+    fig.update_yaxes(matches=None, showticklabels=True, title_text="")
+    fig.update_xaxes(title_text="", tickangle=-25)
+    fig.for_each_annotation(lambda a: a.update(text=str(a.text).replace("KPI Label=", "")))
+    fig.update_layout(
+        title=dict(text=title, x=0.5, xanchor="center"),
+        legend_title_text="Scenario",
+        legend=dict(orientation="h", yanchor="top", y=-0.16, xanchor="center", x=0.5),
+        margin=dict(l=35, r=25, t=80, b=115),
+    )
+    return fig
+
+
 def _scenario_radar_plotly_figure(
         plot_df: pd.DataFrame,
         scenario_color_map_in: dict,
@@ -2746,7 +2826,7 @@ def _scenario_radar_plotly_figure(
         hover_label = "Axis-scaled value: %{customdata[3]:.1f}% of axis max"
 
     fig.update_traces(
-        fill="none",
+        fill="toself",
         line=dict(width=3.6),
         marker=dict(size=8),
         hovertemplate=(
@@ -2757,6 +2837,18 @@ def _scenario_radar_plotly_figure(
             "<extra></extra>"
         ),
     )
+    try:
+        for _i, _tr in enumerate(fig.data):
+            _sc = str(getattr(_tr, "name", ""))
+            _col = (scenario_color_map_in or {}).get(_sc, SCENARIO_COLOR_PALETTE[_i % len(SCENARIO_COLOR_PALETTE)])
+            _tr.update(
+                fill="toself",
+                fillcolor=_plotly_rgba_from_color(_col, 0.10),
+                line=dict(color=_col, width=3.6),
+                marker=dict(color=_col, size=8),
+            )
+    except Exception:
+        pass
     fig.update_layout(
         title=dict(text=title, x=0.5, xanchor="center"),
         polar=dict(
@@ -2835,10 +2927,83 @@ def _report_radar_chart(
         vals += vals[:1]
         col = (scenario_color_map_in or {}).get(sc, SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)])
         ax.plot(angles, vals, color=col, linewidth=1.7, marker="o", markersize=3.2, label=sc)
+        ax.fill(angles, vals, color=col, alpha=0.10)
         plotted.append(sc)
     if plotted:
         ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.22), ncol=min(3, max(1, len(plotted))), fontsize=6.6, frameon=False)
     plt.tight_layout(rect=[0.02, 0.07, 0.98, 0.95])
+    return _report_fig_to_png_bytes(fig)
+
+
+def _report_scenario_kpi_scatter_chart(
+        radar_raw_df: pd.DataFrame,
+        title: str,
+        scenario_color_map_in: dict,
+        scenario_order_in: list,
+) -> io.BytesIO:
+    """Create a faceted matplotlib scatter chart for scenario KPI comparison in the PDF report."""
+    import matplotlib.pyplot as plt
+    import numpy as _np
+
+    if radar_raw_df is None or radar_raw_df.empty:
+        fig, ax = plt.subplots(figsize=(7.6, 4.0), dpi=180)
+        ax.text(0.5, 0.5, "No scenario KPI data available", ha="center", va="center")
+        ax.axis("off")
+        return _report_fig_to_png_bytes(fig)
+
+    dfp = radar_raw_df.copy()
+    dfp["Scenario"] = dfp["Scenario"].astype(str)
+    dfp["KPI"] = dfp["KPI"].astype(str)
+    dfp["Value"] = pd.to_numeric(dfp["Value"], errors="coerce").replace([_np.inf, -_np.inf], _np.nan)
+    dfp = dfp[dfp["KPI"].isin(SCENARIO_RADAR_KPI_ORDER)].copy()
+    dfp = dfp[dfp["Value"].notna()].copy()
+    if dfp.empty:
+        fig, ax = plt.subplots(figsize=(7.6, 4.0), dpi=180)
+        ax.text(0.5, 0.5, "No scenario KPI data available", ha="center", va="center")
+        ax.axis("off")
+        return _report_fig_to_png_bytes(fig)
+
+    label_map = {
+        "End Energy /m²": "EUI\nkWh/m²·a",
+        "Annual Energy Cost /m²": "Energy Cost\n/m²·a",
+        "LCC 50 years /m²": "LCC 50y\n/m²",
+        "Annual Emissions /m²": "Carbon\nkgCO₂e/m²·a",
+        "Total Emissions 50 years /m²": "LC Emissions 50y\nkgCO₂e/m²",
+    }
+    kpis = [k for k in SCENARIO_RADAR_KPI_ORDER if k in set(dfp["KPI"].astype(str))]
+    n = len(kpis)
+    ncols = 3
+    nrows = int(_np.ceil(n / ncols)) if n else 1
+    fig, axes = plt.subplots(nrows, ncols, figsize=(7.8, 2.55 * nrows + 0.4), dpi=180)
+    axes = _np.array(axes).reshape(-1)
+    scenario_order = [str(s) for s in scenario_order_in]
+
+    for ax_i, kpi in enumerate(kpis):
+        ax = axes[ax_i]
+        sub = dfp.loc[dfp["KPI"].astype(str) == kpi].copy()
+        xs, ys, cols = [], [], []
+        for idx, sc in enumerate(scenario_order):
+            hit = sub.loc[sub["Scenario"].astype(str) == sc, "Value"]
+            if hit.empty or pd.isna(hit.iloc[0]):
+                continue
+            xs.append(idx)
+            ys.append(float(hit.iloc[0]))
+            cols.append((scenario_color_map_in or {}).get(sc, SCENARIO_COLOR_PALETTE[idx % len(SCENARIO_COLOR_PALETTE)]))
+        ax.scatter(xs, ys, s=42, c=cols, edgecolor="white", linewidth=0.7, zorder=3)
+        ax.set_title(label_map.get(kpi, kpi), fontsize=8.2, fontweight="bold")
+        ax.grid(True, axis="y", linewidth=0.4, alpha=0.45)
+        ax.set_xticks(range(len(scenario_order)))
+        ax.set_xticklabels(scenario_order, rotation=35, ha="right", fontsize=5.8)
+        ax.tick_params(axis="y", labelsize=6.1)
+        vals = pd.to_numeric(sub["Value"], errors="coerce").replace([_np.inf, -_np.inf], _np.nan).dropna()
+        if not vals.empty:
+            ymin, ymax = float(vals.min()), float(vals.max())
+            pad = (ymax - ymin) * 0.15 if abs(ymax - ymin) > 1e-9 else max(abs(ymax) * 0.15, 1.0)
+            ax.set_ylim(ymin - pad, ymax + pad)
+    for j in range(len(kpis), len(axes)):
+        axes[j].axis("off")
+    fig.suptitle(title, fontsize=11, fontweight="bold", y=0.99)
+    plt.tight_layout(rect=[0.02, 0.03, 0.98, 0.94])
     return _report_fig_to_png_bytes(fig)
 
 def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
@@ -3241,6 +3406,13 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                         ])
                     story.append(_report_table_flowable(radar_axis_rows, col_widths=[6.5 * cm, 4.5 * cm, 4.5 * cm], font_size=6.5))
                     story.append(Spacer(1, 0.2 * cm))
+                _report_add_chart(
+                    story,
+                    styles,
+                    "Scenario KPI scatter summary",
+                    _report_scenario_kpi_scatter_chart(radar_raw_report, "Benchmark-Style Scenario KPI Scatter", colors_scenarios, scenario_order_report),
+                    "The scatter summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) plus 50-year LCC and life-cycle emissions. Each KPI panel has its own y-axis scale.",
+                )
     except Exception:
         pass
     story.append(Paragraph("The report is generated for the active scenario only for the detailed scenario charts below. The radar summary compares all available scenarios.", styles["BodyText"]))
@@ -9443,6 +9615,20 @@ with tab7:
                         if not _radar_axis_df.empty:
                             st.caption("Axis maximum values used in the axis-scaled absolute radar:")
                             st.dataframe(_radar_axis_df, use_container_width=True)
+
+                    st.subheader("Scenario KPI Scatter Summary")
+                    fig_scenario_kpi_scatter = _scenario_kpi_scatter_plotly_figure(
+                        _radar_raw_df,
+                        scenario_color_map,
+                        scenario_order,
+                        title="Benchmark-style KPI scatter by scenario",
+                        height=620,
+                    )
+                    st_plotly_chart(fig_scenario_kpi_scatter, use_container_width=True, key="scenario_kpi_scatter_summary")
+                    st.caption(
+                        "The scatter summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) "
+                        "plus 50-year LCC and life-cycle emissions. Each KPI panel has its own y-axis scale."
+                    )
                 else:
                     st.info("No radar KPI data available for the current scenarios.")
             except Exception:
