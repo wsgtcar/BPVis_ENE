@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.21",
+    page_title="WSGT_BPVis_ENE 2.2.22",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.21")
+st.sidebar.write("Version 2.2.22")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.21"
+REPORT_VERSION = "2.2.22"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -2550,57 +2550,136 @@ def _build_scenario_performance_radar_raw_df(
     return out
 
 
-def _prepare_scenario_radar_plot_dfs(radar_raw_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Return (improvement_df, absolute_axis_scaled_df, axis_max_df).
+def _prepare_scenario_radar_plot_dfs(
+        radar_raw_df: pd.DataFrame,
+        reference_scenario: Optional[str] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Return (relative_improvement_df, absolute_axis_scaled_df, axis_max_df).
 
-    improvement_df:
-        r = 100 - value/max(value), therefore 100% of highest is at the center and
-        lower/better values move outward.
-    absolute_axis_scaled_df:
-        r = value/max(value), therefore each KPI axis has its own 0...max scale.
+    Relative improvement radar:
+        improvement_% = (reference_value - scenario_value) / abs(reference_value) * 100.
+        The selected reference scenario itself is excluded from this plot. Positive values
+        mean the scenario is better/lower than the reference for that KPI; negative values
+        mean the scenario is worse/higher than the reference. Because polar charts do not
+        handle negative radii robustly, the plotted radial value is shifted internally while
+        the axis tick labels and hover text show the real improvement percentage.
+
+    Axis-scaled absolute radar:
+        r = value / max(value) * 100 for each KPI, therefore each KPI axis has its own
+        maximum scale while retaining actual values in hover text.
     """
     if radar_raw_df is None or radar_raw_df.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     raw = radar_raw_df.copy()
+    raw["Scenario"] = raw["Scenario"].astype(str)
+    raw["KPI"] = raw["KPI"].astype(str)
     raw["Value"] = pd.to_numeric(raw["Value"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    scenario_order_raw = [str(x) for x in raw["Scenario"].dropna().astype(str).drop_duplicates().tolist()]
+    ref_scenario = str(reference_scenario).strip() if reference_scenario is not None else ""
+    if ref_scenario not in scenario_order_raw:
+        ref_scenario = scenario_order_raw[0] if scenario_order_raw else ""
 
     improvement_rows = []
     absolute_rows = []
     axis_rows = []
+
     for kpi in SCENARIO_RADAR_KPI_ORDER:
         sub = raw.loc[raw["KPI"].astype(str) == kpi].copy()
         vals = pd.to_numeric(sub["Value"], errors="coerce")
         finite_vals = vals[np.isfinite(vals)]
         if finite_vals.empty:
             continue
+
         vmax = float(finite_vals.max())
         unit = str(sub["Unit"].dropna().iloc[0]) if "Unit" in sub.columns and not sub["Unit"].dropna().empty else ""
         axis_rows.append({"KPI": kpi, "Axis Maximum": vmax, "Unit": unit})
+
+        ref_hit = sub.loc[sub["Scenario"].astype(str) == ref_scenario].copy()
+        ref_val = np.nan
+        ref_formatted = "n/a"
+        if not ref_hit.empty:
+            ref_val = pd.to_numeric(ref_hit.iloc[0].get("Value"), errors="coerce")
+            if pd.notna(ref_val) and np.isfinite(float(ref_val)):
+                ref_val = float(ref_val)
+                ref_formatted = str(ref_hit.iloc[0].get("Formatted Value", f"{ref_val:,.2f}"))
+
         for _, row in sub.iterrows():
             val = row.get("Value")
             if pd.isna(val) or not np.isfinite(float(val)):
-                pct = np.nan
+                pct_highest = np.nan
             elif abs(vmax) < 1e-12:
-                pct = 100.0
+                pct_highest = 100.0
             else:
-                pct = 100.0 * float(val) / vmax
+                pct_highest = 100.0 * float(val) / vmax
+
             formatted = str(row.get("Formatted Value", "n/a"))
             scenario = str(row.get("Scenario", ""))
+            unit_row = str(row.get("Unit", unit))
+
             base = {
                 "Scenario": scenario,
                 "KPI": kpi,
                 "Value": val,
                 "Formatted Value": formatted,
-                "Unit": str(row.get("Unit", unit)),
-                "Percent of Highest": pct,
+                "Unit": unit_row,
+                "Percent of Highest": pct_highest,
                 "Axis Maximum": vmax,
+                "Reference Scenario": ref_scenario,
+                "Reference Value": ref_val,
+                "Reference Formatted Value": ref_formatted,
             }
-            improvement_rows.append({**base, "Radial": (100.0 - pct) if pd.notna(pct) else np.nan})
-            absolute_rows.append({**base, "Radial": pct})
 
-    return pd.DataFrame(improvement_rows), pd.DataFrame(absolute_rows), pd.DataFrame(axis_rows)
+            # Absolute radar keeps all scenarios.
+            absolute_rows.append({**base, "Radial": pct_highest})
 
+            # Relative-improvement radar excludes the selected reference scenario.
+            if scenario == ref_scenario:
+                continue
+            improvement_pct = np.nan
+            try:
+                if pd.notna(ref_val) and np.isfinite(float(ref_val)):
+                    if abs(float(ref_val)) < 1e-12:
+                        # If both are zero, there is no improvement; otherwise the relative value is undefined.
+                        improvement_pct = 0.0 if abs(float(val)) < 1e-12 else np.nan
+                    else:
+                        improvement_pct = 100.0 * (float(ref_val) - float(val)) / abs(float(ref_val))
+            except Exception:
+                improvement_pct = np.nan
+            improvement_rows.append({**base, "Improvement vs Reference %": improvement_pct})
+
+    improvement_df = pd.DataFrame(improvement_rows)
+    absolute_df = pd.DataFrame(absolute_rows)
+    axis_df = pd.DataFrame(axis_rows)
+
+    # Build one shared real improvement axis for the radar so negative improvements can be shown clearly.
+    if not improvement_df.empty:
+        vals = pd.to_numeric(improvement_df.get("Improvement vs Reference %"), errors="coerce").replace([np.inf, -np.inf], np.nan)
+        finite = vals[np.isfinite(vals)]
+        if finite.empty:
+            axis_min, axis_max = -10.0, 10.0
+        else:
+            raw_min = min(float(finite.min()), 0.0)
+            raw_max = max(float(finite.max()), 0.0)
+            span = max(raw_max - raw_min, 1.0)
+            # A simple readable step set in percentage points.
+            candidates = [5, 10, 20, 25, 50, 100, 200, 500]
+            step = candidates[-1]
+            for c in candidates:
+                if span / c <= 6:
+                    step = float(c)
+                    break
+            axis_min = float(np.floor(raw_min / step) * step)
+            axis_max = float(np.ceil(raw_max / step) * step)
+            if abs(axis_max - axis_min) < 1e-9:
+                axis_min -= step
+                axis_max += step
+        improvement_df["Improvement Axis Min"] = axis_min
+        improvement_df["Improvement Axis Max"] = axis_max
+        improvement_df["Radial"] = pd.to_numeric(improvement_df["Improvement vs Reference %"], errors="coerce") - axis_min
+
+    return improvement_df, absolute_df, axis_df
 
 def _scenario_radar_plotly_figure(
         plot_df: pd.DataFrame,
@@ -2614,6 +2693,15 @@ def _scenario_radar_plotly_figure(
     if plot_df is None or plot_df.empty:
         return go.Figure()
 
+    # Ensure all custom-data columns exist for both radar modes.
+    plot_df = plot_df.copy()
+    for _c in [
+        "Scenario", "Formatted Value", "Unit", "Percent of Highest", "Axis Maximum",
+        "Improvement vs Reference %", "Reference Scenario", "Reference Formatted Value",
+    ]:
+        if _c not in plot_df.columns:
+            plot_df[_c] = np.nan if _c not in ["Scenario", "Formatted Value", "Unit", "Reference Scenario", "Reference Formatted Value"] else ""
+
     fig = px.line_polar(
         plot_df,
         r="Radial",
@@ -2622,17 +2710,41 @@ def _scenario_radar_plotly_figure(
         line_close=True,
         color_discrete_map=scenario_color_map_in or {},
         category_orders={"KPI": SCENARIO_RADAR_KPI_ORDER, "Scenario": [str(s) for s in scenario_order_in]},
-        custom_data=["Scenario", "Formatted Value", "Unit", "Percent of Highest", "Axis Maximum"],
+        custom_data=[
+            "Scenario",
+            "Formatted Value",
+            "Unit",
+            "Percent of Highest",
+            "Axis Maximum",
+            "Improvement vs Reference %",
+            "Reference Scenario",
+            "Reference Formatted Value",
+        ],
         height=height,
     )
+
     if mode == "improvement":
-        hover_label = "Value relative to highest: %{customdata[3]:.1f}%"
-        ticktext = ["100% / highest", "75%", "50%", "25%", "0% / best"]
-        radial_title = "Higher/better outward"
+        # Values in the dataframe are shifted to avoid negative radii. Tick labels show the real improvement %.
+        try:
+            axis_min = float(pd.to_numeric(plot_df.get("Improvement Axis Min"), errors="coerce").dropna().iloc[0])
+            axis_max = float(pd.to_numeric(plot_df.get("Improvement Axis Max"), errors="coerce").dropna().iloc[0])
+        except Exception:
+            axis_min, axis_max = -10.0, 10.0
+        if abs(axis_max - axis_min) < 1e-9:
+            axis_min, axis_max = axis_min - 10.0, axis_max + 10.0
+        tick_actual = np.linspace(axis_min, axis_max, 5)
+        tickvals = [float(t - axis_min) for t in tick_actual]
+        ticktext = [f"{t:,.0f}%" for t in tick_actual]
+        radial_range = [0, float(axis_max - axis_min)]
+        radial_title = "Improvement vs reference"
+        hover_label = "Improvement vs %{customdata[6]}: %{customdata[5]:.1f}%<br>Reference KPI: %{customdata[7]} %{customdata[2]}"
     else:
-        hover_label = "Axis-scaled value: %{customdata[3]:.1f}% of axis max"
+        tickvals = [0, 25, 50, 75, 100]
         ticktext = ["0%", "25%", "50%", "75%", "Axis max"]
+        radial_range = [0, 100]
         radial_title = "Axis-scaled value"
+        hover_label = "Axis-scaled value: %{customdata[3]:.1f}% of axis max"
+
     fig.update_traces(
         fill="none",
         line=dict(width=3.6),
@@ -2649,8 +2761,8 @@ def _scenario_radar_plotly_figure(
         title=dict(text=title, x=0.5, xanchor="center"),
         polar=dict(
             radialaxis=dict(
-                range=[0, 100],
-                tickvals=[0, 25, 50, 75, 100],
+                range=radial_range,
+                tickvals=tickvals,
                 ticktext=ticktext,
                 title=dict(text=radial_title, font=dict(size=10)),
                 showline=True,
@@ -2661,7 +2773,6 @@ def _scenario_radar_plotly_figure(
         margin=dict(l=40, r=40, t=70, b=110),
     )
     return fig
-
 
 def _report_radar_chart(
         plot_df: pd.DataFrame,
@@ -2689,17 +2800,34 @@ def _report_radar_chart(
     ax.set_theta_direction(-1)
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(labels, fontsize=6.8)
-    ax.set_ylim(0, 100)
-    ax.set_yticks([0, 25, 50, 75, 100])
+
     if mode == "improvement":
-        ax.set_yticklabels(["100/highest", "75", "50", "25", "0/best"], fontsize=6.2)
+        try:
+            axis_min = float(pd.to_numeric(plot_df.get("Improvement Axis Min"), errors="coerce").dropna().iloc[0])
+            axis_max = float(pd.to_numeric(plot_df.get("Improvement Axis Max"), errors="coerce").dropna().iloc[0])
+        except Exception:
+            axis_min, axis_max = -10.0, 10.0
+        if abs(axis_max - axis_min) < 1e-9:
+            axis_min, axis_max = axis_min - 10.0, axis_max + 10.0
+        tick_actual = _np.linspace(axis_min, axis_max, 5)
+        tickvals = [float(t - axis_min) for t in tick_actual]
+        ticklabels = [f"{t:,.0f}%" for t in tick_actual]
+        ax.set_ylim(0, float(axis_max - axis_min))
+        ax.set_yticks(tickvals)
+        ax.set_yticklabels(ticklabels, fontsize=6.2)
     else:
+        ax.set_ylim(0, 100)
+        ax.set_yticks([0, 25, 50, 75, 100])
         ax.set_yticklabels(["0", "25%", "50%", "75%", "Axis max"], fontsize=6.2)
+
     ax.grid(True, linewidth=0.5, alpha=0.55)
     ax.set_title(title, fontsize=11, fontweight="bold", pad=18)
 
+    plotted = []
     for i, sc in enumerate([str(s) for s in scenario_order_in]):
         sub = plot_df.loc[plot_df["Scenario"].astype(str) == sc].copy()
+        if sub.empty:
+            continue
         vals = []
         for lab in labels:
             hit = sub.loc[sub["KPI"].astype(str) == lab, "Radial"]
@@ -2707,7 +2835,9 @@ def _report_radar_chart(
         vals += vals[:1]
         col = (scenario_color_map_in or {}).get(sc, SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)])
         ax.plot(angles, vals, color=col, linewidth=1.7, marker="o", markersize=3.2, label=sc)
-    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.22), ncol=min(3, max(1, len(scenario_order_in))), fontsize=6.6, frameon=False)
+        plotted.append(sc)
+    if plotted:
+        ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.22), ncol=min(3, max(1, len(plotted))), fontsize=6.6, frameon=False)
     plt.tight_layout(rect=[0.02, 0.07, 0.98, 0.95])
     return _report_fig_to_png_bytes(fig)
 
@@ -3079,14 +3209,20 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                 lcc_global,
                 crrem_dataset=crrem,
             )
-            radar_improvement_report, radar_absolute_report, radar_axis_report = _prepare_scenario_radar_plot_dfs(radar_raw_report)
+            radar_ref_report = str(st.session_state.get("scenario_radar_reference_scenario", active_name) or active_name)
+            if radar_ref_report not in scenario_order_report:
+                radar_ref_report = scenario_order_report[0]
+            radar_improvement_report, radar_absolute_report, radar_axis_report = _prepare_scenario_radar_plot_dfs(
+                radar_raw_report,
+                reference_scenario=radar_ref_report,
+            )
             if not radar_improvement_report.empty:
                 _report_add_chart(
                     story,
                     styles,
-                    "Scenario radar - relative improvement",
+                    f"Scenario radar - relative improvement vs {radar_ref_report}",
                     _report_radar_chart(radar_improvement_report, "Relative Improvement Radar", colors_scenarios, scenario_order_report, mode="improvement"),
-                    "For each KPI, the highest scenario value is placed at the center. Lower/better values move outward, so better scenarios form larger polygons.",
+                    f"The selected reference scenario ({radar_ref_report}) is not plotted. Values show improvement versus the reference: positive values are lower/better; negative values are higher/worse.",
                 )
                 _report_add_chart(
                     story,
@@ -9240,25 +9376,49 @@ with tab7:
                     _radar_lcc_global,
                     crrem_dataset=_radar_crrem_dataset,
                 )
-                _radar_improvement_df, _radar_absolute_df, _radar_axis_df = _prepare_scenario_radar_plot_dfs(_radar_raw_df)
-
                 st.subheader("Scenario Performance Radar")
-                if not _radar_improvement_df.empty and _radar_improvement_df["Radial"].notna().any():
+
+                _scenario_order_str = [str(s) for s in scenario_order]
+                _radar_ref_default = str(st.session_state.get("scenario_radar_reference_scenario", active_selected) or active_selected)
+                if _radar_ref_default not in _scenario_order_str:
+                    _radar_ref_default = _scenario_order_str[0] if _scenario_order_str else ""
+                    if _radar_ref_default:
+                        st.session_state["scenario_radar_reference_scenario"] = _radar_ref_default
+
+                _ctrl_col, _spacer_col = st.columns([1.15, 2.85])
+                with _ctrl_col:
+                    _radar_ref_scenario = st.selectbox(
+                        "Relative radar reference scenario",
+                        options=_scenario_order_str,
+                        index=_scenario_order_str.index(_radar_ref_default) if _radar_ref_default in _scenario_order_str else 0,
+                        key="scenario_radar_reference_scenario",
+                        help="The selected scenario is used as the 0% reference and is filtered out from the relative improvement radar.",
+                    )
+
+                _radar_improvement_df, _radar_absolute_df, _radar_axis_df = _prepare_scenario_radar_plot_dfs(
+                    _radar_raw_df,
+                    reference_scenario=_radar_ref_scenario,
+                )
+
+                if (not _radar_absolute_df.empty and _radar_absolute_df["Radial"].notna().any()):
                     rcol1, rcol2 = st.columns(2)
                     with rcol1:
-                        fig_radar_improvement = _scenario_radar_plotly_figure(
-                            _radar_improvement_df,
-                            scenario_color_map,
-                            scenario_order,
-                            "Relative improvement radar",
-                            mode="improvement",
-                            height=620,
-                        )
-                        st_plotly_chart(fig_radar_improvement, use_container_width=True, key="scenario_performance_radar_improvement")
-                        st.caption(
-                            "Each KPI is shown relative to the highest scenario value. The scale is inverted: "
-                            "100% of the highest value is at the center and 0% is at the outer edge, so lower/better values form a larger polygon."
-                        )
+                        if not _radar_improvement_df.empty and _radar_improvement_df["Radial"].notna().any():
+                            fig_radar_improvement = _scenario_radar_plotly_figure(
+                                _radar_improvement_df,
+                                scenario_color_map,
+                                scenario_order,
+                                f"Relative improvement radar vs {_radar_ref_scenario}",
+                                mode="improvement",
+                                height=620,
+                            )
+                            st_plotly_chart(fig_radar_improvement, use_container_width=True, key="scenario_performance_radar_improvement")
+                            st.caption(
+                                "The reference scenario is not plotted. Improvement = (reference KPI − scenario KPI) / reference KPI. "
+                                "Positive values mean lower/better than the reference; negative values mean higher/worse."
+                            )
+                        else:
+                            st.info("Select at least two scenarios to show the relative improvement radar.")
                     with rcol2:
                         fig_radar_absolute = _scenario_radar_plotly_figure(
                             _radar_absolute_df,
