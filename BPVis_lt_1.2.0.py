@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.34",
+    page_title="WSGT_BPVis_ENE 2.2.35",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.34")
+st.sidebar.write("Version 2.2.35")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1799,6 +1799,243 @@ def _lcc_energy_rows_for_payload(df_energy: pd.DataFrame, payload: dict, selecte
     return df[["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"]]
 
 
+def _parse_crrem_measures_for_lcc(payload: dict, max_year: Optional[int] = None) -> dict:
+    """Parse CRREM Decarbonization Path measures that affect LCC operational cost.
+
+    LCC-relevant CRREM measures are time-dependent changes to:
+    - Energy tariffs by source
+    - Efficiency factors by end use
+    - Assigned energy source by end use
+    - On-site generation annual production
+
+    Emission-factor measures are intentionally ignored here because they affect carbon, not cost.
+    """
+    payload = payload or {}
+    raw_measures = payload.get("crrem_measures", [])
+    try:
+        measures_records = _measures_df_to_records(raw_measures)
+    except Exception:
+        measures_records = raw_measures if isinstance(raw_measures, list) else []
+
+    tariff_measures = {s: [] for s in ENERGY_SOURCE_ORDER}  # source -> [(year, tariff_at_measure_year)]
+    eff_measures = []                                       # [(year, end_use, efficiency_factor)]
+    src_measures = []                                       # [(year, end_use, energy_source)]
+    pv_measures = []                                        # [(year, annual_generation_kWh)]
+
+    def _year_or_none(x):
+        try:
+            if x is None or str(x).strip() == "":
+                return None
+            return int(float(str(x).replace(",", ".")))
+        except Exception:
+            return None
+
+    def _float_or_none(x):
+        try:
+            if x is None or str(x).strip() == "":
+                return None
+            return float(str(x).replace(",", "."))
+        except Exception:
+            return None
+
+    def _norm_src(x):
+        sx = str(x).strip()
+        for opt in ENERGY_SOURCE_ORDER:
+            if sx.lower() == str(opt).lower():
+                return str(opt)
+        return None
+
+    def _after_arrow(label: str) -> str:
+        parts = str(label).split("→", 1)
+        return parts[1].strip() if len(parts) > 1 else str(label).strip()
+
+    for rec in measures_records or []:
+        if not isinstance(rec, dict):
+            continue
+        p = str(rec.get("Parameter", "")).strip()
+        y = _year_or_none(rec.get("Year"))
+        if not p or y is None:
+            continue
+        if max_year is not None and int(y) > int(max_year):
+            continue
+        v_raw = rec.get("New Value", "")
+        p_l = p.lower()
+        target = _after_arrow(p)
+
+        if p_l.startswith("energy tariffs"):
+            src = _norm_src(target)
+            val = _float_or_none(v_raw)
+            if src is not None and val is not None:
+                tariff_measures[src].append((int(y), float(val)))
+            continue
+
+        if p_l.startswith("efficiency factors"):
+            eu = _canon_enduse_name(target)
+            val = _float_or_none(v_raw)
+            if eu and val is not None:
+                eff_measures.append((int(y), str(eu), float(val)))
+            continue
+
+        if p_l.startswith("assign energy sources"):
+            eu = _canon_enduse_name(target)
+            src = _norm_src(v_raw)
+            if eu and src is not None:
+                src_measures.append((int(y), str(eu), str(src)))
+            continue
+
+        if (
+                p_l.startswith("on-site_generation")
+                or p_l.startswith("on-site generation")
+                or p_l.startswith("pv_generation")
+                or "annual production" in p_l
+                or "pv annual production" in p_l
+        ):
+            val = _float_or_none(v_raw)
+            if val is not None:
+                pv_measures.append((int(y), float(val)))
+            continue
+
+    for src in list(tariff_measures.keys()):
+        tariff_measures[src] = sorted(tariff_measures[src], key=lambda t: t[0])
+    eff_measures = sorted(eff_measures, key=lambda t: t[0])
+    src_measures = sorted(src_measures, key=lambda t: t[0])
+    pv_measures = sorted(pv_measures, key=lambda t: t[0])
+
+    return {
+        "tariff_measures": tariff_measures,
+        "eff_measures": eff_measures,
+        "src_measures": src_measures,
+        "pv_measures": pv_measures,
+    }
+
+
+def _lcc_tariff_at_year(
+        src: str,
+        year: int,
+        project_year: int,
+        base_tariffs: dict,
+        energy_inflation_pct: dict,
+        tariff_measures: Optional[dict] = None,
+) -> float:
+    """Return the nominal tariff for an energy source in a calendar year.
+
+    If a CRREM tariff measure exists, the measure's value is treated as the tariff in the
+    measure year and is escalated from that year onward with the LCC energy-inflation rate
+    of the same source. Otherwise the scenario base tariff is escalated from project_year.
+    """
+    src = str(src)
+    rate = _to_float_lcc((energy_inflation_pct or {}).get(src, 0.0), 0.0) / 100.0
+    base_year = int(project_year)
+    base_val = _to_float_lcc((base_tariffs or {}).get(src, 0.0), 0.0)
+
+    latest = None
+    for ym, val in (tariff_measures or {}).get(src, []):
+        if int(ym) <= int(year) and int(ym) >= int(project_year):
+            latest = (int(ym), float(val))
+    if latest is not None:
+        base_year, base_val = latest
+
+    offset = max(0, int(year) - int(base_year))
+    return float(base_val) * ((1.0 + rate) ** offset)
+
+
+def _lcc_energy_rows_for_payload_year(
+        df_energy: pd.DataFrame,
+        payload: dict,
+        selected_end_uses: list,
+        year: int,
+        project_year: int,
+        energy_inflation_pct: Optional[dict] = None,
+        parsed_crrem_lcc_measures: Optional[dict] = None,
+) -> pd.DataFrame:
+    """Return annual operational-energy cost rows for one scenario and one calendar year.
+
+    This is the LCC counterpart to the CRREM Decarbonization Path logic. It applies
+    scenario-specific CRREM measures from their measure year onward, so future source
+    substitutions, efficiency changes, tariff changes and on-site-generation measures affect
+    annual LCC cash flows.
+    """
+    if df_energy is None or df_energy.empty or "Month" not in df_energy.columns:
+        return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
+
+    payload = payload or {}
+    eff_base = payload.get("efficiency", {}) or {}
+    src_base = payload.get("mapping", {}) or {}
+    base_tariffs = payload.get("tariffs", {}) or {}
+    pv_cfg = payload.get("pv", {}) or {}
+    measures = parsed_crrem_lcc_measures or _parse_crrem_measures_for_lcc(payload, max_year=int(year))
+
+    selected = [_canon_enduse_name(str(u)) for u in (selected_end_uses or []) if str(u).strip()]
+
+    df = df_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh").copy()
+    df["End_Use"] = df["End_Use"].apply(lambda x: _canon_enduse_name(str(x)))
+    if selected:
+        df = df[df["End_Use"].isin(set(selected))].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
+    df["kWh"] = pd.to_numeric(df["kWh"], errors="coerce").fillna(0.0)
+    annual_by_enduse = df.groupby("End_Use", as_index=True)["kWh"].sum()
+
+    eff_y = {str(u): _to_float_lcc(eff_base.get(str(u), 1.0), 1.0) for u in annual_by_enduse.index.tolist()}
+    src_y = {str(u): str(src_base.get(str(u), "Electricity")) for u in annual_by_enduse.index.tolist()}
+
+    for ym, eu, val in measures.get("eff_measures", []):
+        if int(ym) <= int(year):
+            eff_y[str(eu)] = float(val)
+    for ym, eu, src in measures.get("src_measures", []):
+        if int(ym) <= int(year):
+            src_y[str(eu)] = str(src)
+
+    pv_annual_override_y = None
+    for ym, val in measures.get("pv_measures", []):
+        if int(ym) <= int(year):
+            pv_annual_override_y = float(val)
+
+    onsite_enduses = set(get_onsite_generation_enduses(annual_by_enduse.index.tolist()))
+    pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
+
+    rows = []
+    for eu, raw_kwh in annual_by_enduse.items():
+        eu = str(eu)
+        effv = float(eff_y.get(eu, 1.0) or 1.0)
+        if effv == 0:
+            effv = 1.0
+        kwh_adj = float(raw_kwh) / effv
+
+        if eu in onsite_enduses:
+            # On-site generation is modelled as an electricity cost offset.
+            if pv_annual_override_y is not None:
+                kwh_adj = -abs(float(pv_annual_override_y))
+            else:
+                kwh_adj = -abs(float(kwh_adj)) * float(pv_scale)
+            src = "Electricity"
+        else:
+            kwh_adj = max(float(kwh_adj), 0.0)
+            src = str(src_y.get(eu, "Electricity"))
+            if src not in ENERGY_SOURCE_ORDER:
+                src = "Electricity"
+
+        tariff_y = _lcc_tariff_at_year(
+            src,
+            int(year),
+            int(project_year),
+            base_tariffs,
+            energy_inflation_pct or {},
+            measures.get("tariff_measures", {}),
+        )
+        rows.append({
+            "End_Use": eu,
+            "Energy_Source": src,
+            "kWh": float(kwh_adj),
+            "Tariff": float(tariff_y),
+            "Annual Cost": float(kwh_adj) * float(tariff_y),
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
+    return pd.DataFrame(rows)[["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"]]
+
+
 def compute_lcc_cashflow_table(
         df_energy: pd.DataFrame,
         payload: dict,
@@ -1827,29 +2064,39 @@ def compute_lcc_cashflow_table(
     rows = []
 
     # Operational energy cost, escalated independently per energy source.
-    energy_rows = _lcc_energy_rows_for_payload(df_energy, payload, selected_end_uses)
-    if not energy_rows.empty:
-        grouped_energy = energy_rows.groupby(["End_Use", "Energy_Source"], as_index=False).agg(
-            kWh=("kWh", "sum"),
-            Annual_Base_Cost=("Annual Cost", "sum"),
+    # CRREM Decarbonization Path measures are also applied here when they affect LCC:
+    # source reassignment, efficiency factors, energy tariffs and on-site generation.
+    parsed_crrem_lcc_measures = _parse_crrem_measures_for_lcc(payload, max_year=years[-1])
+    for y in years:
+        offset = int(y - start_year)
+        energy_rows_y = _lcc_energy_rows_for_payload_year(
+            df_energy,
+            payload,
+            selected_end_uses,
+            int(y),
+            int(start_year),
+            energy_inflation_pct=energy_inf,
+            parsed_crrem_lcc_measures=parsed_crrem_lcc_measures,
         )
-        for y in years:
-            offset = int(y - start_year)
-            for _, r in grouped_energy.iterrows():
-                src = str(r["Energy_Source"])
-                rate = _to_float_lcc(energy_inf.get(src, 0.0), 0.0) / 100.0
-                nominal = float(r["Annual_Base_Cost"]) * ((1.0 + rate) ** offset)
-                discounted = nominal / ((1.0 + discount_rate) ** offset) if (1.0 + discount_rate) != 0 else nominal
-                rows.append({
-                    "Year": int(y),
-                    "Year Offset": offset,
-                    "Cost Type": "Energy",
-                    "End_Use": str(r["End_Use"]),
-                    "Energy_Source": src,
-                    "Measure Name": "Operational energy",
-                    "Nominal Cost": nominal,
-                    "Discounted Cost": discounted,
-                })
+        if energy_rows_y is None or energy_rows_y.empty:
+            continue
+        grouped_energy_y = energy_rows_y.groupby(["End_Use", "Energy_Source"], as_index=False).agg(
+            kWh=("kWh", "sum"),
+            Nominal_Cost=("Annual Cost", "sum"),
+        )
+        for _, r in grouped_energy_y.iterrows():
+            nominal = float(r["Nominal_Cost"])
+            discounted = nominal / ((1.0 + discount_rate) ** offset) if (1.0 + discount_rate) != 0 else nominal
+            rows.append({
+                "Year": int(y),
+                "Year Offset": offset,
+                "Cost Type": "Energy",
+                "End_Use": str(r["End_Use"]),
+                "Energy_Source": str(r["Energy_Source"]),
+                "Measure Name": "Operational energy",
+                "Nominal Cost": nominal,
+                "Discounted Cost": discounted,
+            })
 
     # Investments, annual maintenance and replacement.
     # Measures can be assigned to several end uses; CAPEX/O&M/replacement costs are allocated equally.
@@ -1957,7 +2204,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.34"
+REPORT_VERSION = "2.2.35"
 
 
 def _report_sanitize_filename(text: str) -> str:
