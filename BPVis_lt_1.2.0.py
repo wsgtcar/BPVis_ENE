@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.33",
+    page_title="WSGT_BPVis_ENE 2.2.34",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.33")
+st.sidebar.write("Version 2.2.34")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1517,6 +1517,50 @@ def _get_lcc_global_state_payload(end_uses: list) -> dict:
     return payload
 
 
+def _resolve_lcc_payback_reference_scenario(
+        lcc_global_payload: Optional[dict],
+        scenarios: Optional[dict],
+        active_scenario: Optional[str],
+        prefer_draft: bool = True,
+) -> str:
+    """Return the selected LCC payback reference scenario.
+
+    The LCC global form uses draft widget keys to avoid recalculating all LCC charts on every edit.
+    The payback reference scenario, however, must always be honoured by the cumulative LCC chart
+    when it is already selected/saved. Therefore, this resolver first checks the draft selectbox
+    state (which is seeded from saved project data before the widget renders) and then falls back
+    to the committed global LCC payload. Invalid, missing, or active-scenario references return an
+    empty string.
+    """
+    scenarios = scenarios if isinstance(scenarios, dict) else {}
+    active = str(active_scenario or "")
+
+    candidates = []
+    if prefer_draft:
+        try:
+            draft_value = st.session_state.get(_lcc_global_draft_key("payback_reference_scenario"), "")
+            candidates.append(draft_value)
+        except Exception:
+            pass
+
+    if isinstance(lcc_global_payload, dict):
+        candidates.append(lcc_global_payload.get("payback_reference_scenario", ""))
+
+    # Backwards compatibility: some loaded scenario payloads may still carry lcc_global.
+    try:
+        for payload in scenarios.values():
+            if isinstance(payload, dict) and isinstance(payload.get("lcc_global"), dict):
+                candidates.append(payload.get("lcc_global", {}).get("payback_reference_scenario", ""))
+    except Exception:
+        pass
+
+    for cand in candidates:
+        cand_s = str(cand or "").strip()
+        if cand_s and cand_s in scenarios and cand_s != active:
+            return cand_s
+    return ""
+
+
 def _capture_lcc_from_widgets(end_uses: list) -> dict:
     """Capture current scenario-specific LCC investment assumptions."""
     return {
@@ -1913,7 +1957,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.33"
+REPORT_VERSION = "2.2.34"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3864,6 +3908,13 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
 
     # LCC Analysis
     add_section("8. LCC-Analysis")
+    scenarios_for_lcc_report = st.session_state.get("scenarios", {}) or {}
+    ref_name = _resolve_lcc_payback_reference_scenario(
+        lcc_global,
+        scenarios_for_lcc_report,
+        active_name,
+        prefer_draft=True,
+    )
     cf = compute_lcc_cashflow_table(df_energy, payload, end_uses, project_year_r, lcc_global=lcc_global)
     if cf.empty:
         story.append(Paragraph("No LCC cash-flow data available. Add LCC assumptions and investment measures in the LCC-Analysis tab.", styles["BodyText"]))
@@ -3875,16 +3926,20 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         by_end = cf.groupby("End_Use", as_index=True)["Nominal Cost"].sum()
         total_nom = float(by_year["Nominal Cost"].sum())
         total_disc = float(by_year["Discounted Cost"].sum())
-        ref_name = str(lcc_global.get("payback_reference_scenario", "") or "")
         pb = None
-        if ref_name and ref_name in st.session_state.get("scenarios", {}) and ref_name != active_name:
+        ref_cf = pd.DataFrame()
+        if ref_name and ref_name in scenarios_for_lcc_report and ref_name != active_name:
             try:
-                ref_payload = st.session_state["scenarios"].get(ref_name, {}) or {}
+                ref_payload = scenarios_for_lcc_report.get(ref_name, {}) or {}
                 ref_df = get_energy_balance_df(file_bytes, filename, scenario_name=ref_name)
-                ref_cf = compute_lcc_cashflow_table(ref_df, ref_payload, end_uses, project_year_r, lcc_global=lcc_global)
+                ref_end_uses = [str(c) for c in ref_df.columns if str(c) != "Month"]
+                ref_lcc_global = _normalize_lcc_global_payload(lcc_global, ref_end_uses)
+                ref_lcc_global["payback_reference_scenario"] = ref_name
+                ref_cf = compute_lcc_cashflow_table(ref_df, ref_payload, ref_end_uses, project_year_r, lcc_global=ref_lcc_global)
                 pb = discounted_payback_period(cf, ref_cf, project_year_r)
             except Exception:
                 pb = None
+                ref_cf = pd.DataFrame()
         add_kpi_table("LCC KPIs", [
             ("Total nominal LCC", f"{currency_r} {total_nom:,.0f}"),
             ("Total discounted LCC", f"{currency_r} {total_disc:,.0f}"),
@@ -3894,7 +3949,29 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         ])
         type_df = by_type.reset_index().rename(columns={"Nominal Cost": "Cost"})
         _report_add_chart(story, styles, "Annual LCC balance", _report_stacked_monthly_chart(cf.rename(columns={"Year": "Month"}), "Nominal Cost", "Cost Type", "Annual LCC Balance", f"{currency_r}/a", LCC_COST_TYPE_COLORS), "Annual LCC balance stacks energy, investment, maintenance and replacement costs by year.")
-        _report_add_chart(story, styles, "Cumulative LCC", _report_line_chart({"Nominal": by_year["Cumulative Nominal Cost"], "Discounted": by_year["Cumulative Discounted Cost"]}, "Cumulative LCC", currency_r, {"Nominal": scenario_color, "Discounted": scenario_color}, dashed={"Discounted"}), "Nominal cost is undiscounted cash flow. Discounted cost is future cash flow converted to present value using the interest rate.")
+        lcc_report_series = {
+            f"{active_name} nominal": by_year["Cumulative Nominal Cost"],
+            f"{active_name} discounted": by_year["Cumulative Discounted Cost"],
+        }
+        lcc_report_colors = {
+            f"{active_name} nominal": scenario_color,
+            f"{active_name} discounted": scenario_color,
+        }
+        lcc_report_dashed = {f"{active_name} discounted"}
+        if isinstance(ref_cf, pd.DataFrame) and not ref_cf.empty and ref_name:
+            try:
+                ref_by_year = ref_cf.groupby("Year", as_index=True).agg({"Nominal Cost": "sum", "Discounted Cost": "sum"})
+                ref_by_year["Cumulative Nominal Cost"] = ref_by_year["Nominal Cost"].cumsum()
+                ref_by_year["Cumulative Discounted Cost"] = ref_by_year["Discounted Cost"].cumsum()
+                ref_color = colors_scenarios.get(str(ref_name), "#9ca3af") if isinstance(colors_scenarios, dict) else "#9ca3af"
+                lcc_report_series[f"{ref_name} nominal"] = ref_by_year["Cumulative Nominal Cost"]
+                lcc_report_series[f"{ref_name} discounted"] = ref_by_year["Cumulative Discounted Cost"]
+                lcc_report_colors[f"{ref_name} nominal"] = ref_color
+                lcc_report_colors[f"{ref_name} discounted"] = ref_color
+                lcc_report_dashed.add(f"{ref_name} discounted")
+            except Exception:
+                pass
+        _report_add_chart(story, styles, "Cumulative LCC", _report_line_chart(lcc_report_series, "Cumulative LCC", currency_r, lcc_report_colors, dashed=lcc_report_dashed), "Nominal cost is undiscounted cash flow. Discounted cost is future cash flow converted to present value using the interest rate. When a payback reference scenario is selected, its cumulative LCC is shown as an additional pair of lines.")
         _report_add_chart(story, styles, "LCC by cost type", _report_pie_chart(by_type["Nominal Cost"], "Nominal LCC by Cost Type", f"{currency_r} {total_nom:,.0f}", LCC_COST_TYPE_COLORS), "Cost-type shares use total nominal cost over the analysis period.")
         _report_add_chart(story, styles, "LCC by assigned end use", _report_pie_chart(by_end / project_area_r if project_area_r else by_end, "Nominal LCC per m² by End Use", f"{currency_r} {total_nom / project_area_r:,.0f}\n/m²" if project_area_r else f"{currency_r} {total_nom:,.0f}", colors_eu), "Costs assigned to multiple end uses are allocated equally across the assigned end uses.")
     add_input_table("Relevant inputs", [
@@ -3902,6 +3979,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         ("Interest / discount rate", f"{float(lcc_global.get('interest_rate_pct', 0.0)):,.2f} %"),
         ("CAPEX/O&M inflation", f"{float(lcc_global.get('capex_inflation_pct', 0.0)):,.2f} %"),
         ("Operational end-use filter", ", ".join([ui_name(u) for u in lcc_global.get("selected_operational_end_uses", [])])),
+        ("Discounted payback reference", ref_name if ref_name else "None"),
         ("Energy inflation", ", ".join([f"{src}: {float((lcc_global.get('energy_inflation_pct', {}) or {}).get(src, 0.0)):,.2f}%" for src in ENERGY_SOURCE_ORDER])),
     ])
 
@@ -6607,6 +6685,21 @@ if uploaded_file:
             st.session_state["model_inputs_qa_df"] = default_model_inputs_qa_df()
 
     if st.session_state.get("_loaded_workbook_token") != wb_token:
+        # Reset committed/draft LCC global state on a new workbook upload so saved
+        # LCC_Global values (including the payback reference scenario) are loaded
+        # from the workbook instead of reusing stale values from the previous session.
+        try:
+            st.session_state.pop(LCC_GLOBAL_STATE_KEY, None)
+            st.session_state.pop("_lcc_global_initialized", None)
+            for _k_lcc in list(st.session_state.keys()):
+                if str(_k_lcc).startswith(LCC_GLOBAL_DRAFT_PREFIX):
+                    try:
+                        del st.session_state[_k_lcc]
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         if preloaded.get("name"):
             st.session_state["project_name"] = str(preloaded["name"])
 
@@ -9860,7 +9953,19 @@ with tab_lcc:
             type_totals = dict(zip(by_type_lcc["Cost Type"], by_type_lcc["Nominal_Cost"]))
 
             # Discounted payback vs reference scenario.
-            ref_scenario_lcc = str(lcc_global_active.get("payback_reference_scenario", "") or "")
+            # Resolve the reference from the selected dropdown/draft first, then from
+            # the committed global LCC payload. This guarantees the cumulative LCC
+            # chart always pulls the selected reference scenario when it was already
+            # saved/loaded, without requiring the user to click Update LCC Inputs again.
+            ref_scenario_lcc = _resolve_lcc_payback_reference_scenario(
+                lcc_global_active,
+                scenarios_lcc,
+                active_selected,
+                prefer_draft=True,
+            )
+            if ref_scenario_lcc:
+                lcc_global_active = deepcopy(lcc_global_active)
+                lcc_global_active["payback_reference_scenario"] = ref_scenario_lcc
             ref_lcc_cashflow = pd.DataFrame()
             payback_value = None
             if ref_scenario_lcc and ref_scenario_lcc in scenarios_lcc and ref_scenario_lcc != active_selected:
