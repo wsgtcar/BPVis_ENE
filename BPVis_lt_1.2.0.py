@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.19",
+    page_title="WSGT_BPVis_ENE 2.2.20",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.19")
+st.sidebar.write("Version 2.2.20")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -1913,7 +1913,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.19"
+REPORT_VERSION = "2.2.20"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9137,8 +9137,9 @@ with tab7:
                                 "Cumulative Net CO₂ (t)": float(_cum_emissions_series_t.loc[_y_cmp]),
                             })
 
-                    # Scenario radar diagram (lower KPI values are better; transformed to a 0-100 performance score
-                    # so better scenarios form a larger polygon). Fixed 50-year horizon for LCC/emissions KPIs.
+                    # Scenario radar diagram. Each KPI axis shows the scenario value as a percentage of
+                    # the highest scenario value for that KPI (highest = 100%). Fixed 50-year horizon for
+                    # LCC/emissions KPIs.
                     try:
                         radar_rows_raw = []
                         if _area and float(_area) > 0 and scenario_order:
@@ -9249,18 +9250,20 @@ with tab7:
                                 _finite_vals = _vals[np.isfinite(_vals)]
                                 if _finite_vals.empty:
                                     continue
-                                _vmin = float(_finite_vals.min())
+
+                                # New radar logic: express each scenario value as a percentage of the
+                                # highest value found for the same KPI. This avoids collapsing the worst
+                                # scenario to the center and keeps all scenario polygons visible.
+                                # Example: if Scenario B EUI = 26% of Scenario A EUI, it is plotted at 26.
                                 _vmax = float(_finite_vals.max())
                                 for _i_r, _r_radar in _sub.iterrows():
                                     _val = _r_radar.get("Value")
                                     if pd.isna(_val) or not np.isfinite(float(_val)):
                                         _score = np.nan
-                                    elif abs(_vmax - _vmin) < 1e-12:
+                                    elif abs(_vmax) < 1e-12:
                                         _score = 100.0
                                     else:
-                                        # Lower KPI values are better. Use an inverted normalized score so
-                                        # the best/lower scenarios are plotted further away from the center.
-                                        _score = 100.0 * (_vmax - float(_val)) / (_vmax - _vmin)
+                                        _score = 100.0 * float(_val) / _vmax
                                     radar_score_rows.append({
                                         "Scenario": str(_r_radar.get("Scenario", "")),
                                         "KPI": str(_r_radar.get("KPI", "")),
@@ -9285,14 +9288,14 @@ with tab7:
                                 height=650,
                             )
                             fig_radar.update_traces(
-                                fill=None,
-                                line=dict(width=3.2),
+                                fill="none",
+                                line=dict(width=3.6),
                                 marker=dict(size=7),
                                 hovertemplate=(
                                     "<b>%{customdata[0]}</b><br>"
                                     "%{theta}<br>"
                                     "Actual KPI: %{customdata[1]} %{customdata[2]}<br>"
-                                    "Performance score: %{r:.1f}/100"
+                                    "Relative to highest: %{r:.1f}%"
                                     "<extra></extra>"
                                 ),
                             )
@@ -9301,7 +9304,7 @@ with tab7:
                                     radialaxis=dict(
                                         range=[0, 100],
                                         tickvals=[0, 25, 50, 75, 100],
-                                        ticktext=["Worst", "25", "50", "75", "Best"],
+                                        ticktext=["0%", "25%", "50%", "75%", "Highest"],
                                         showline=True,
                                     ),
                                 ),
@@ -9311,8 +9314,9 @@ with tab7:
                             )
                             st_plotly_chart(fig_radar, use_container_width=True, key="scenario_performance_radar")
                             st.caption(
-                                "The radar uses an inverted normalized score for each KPI: lower actual KPI values plot further outwards, "
-                                "so better-performing scenarios form a larger polygon. LCC and total emissions use a fixed 50-year horizon."
+                                "The radar shows each scenario value as a percentage of the highest scenario value for that KPI. "
+                                "Example: 26% means the scenario value is 26% of the highest value among the compared scenarios. "
+                                "LCC and total emissions use a fixed 50-year horizon."
                             )
                             show_radar_data = st.checkbox(
                                 "Show radar KPI input data",
