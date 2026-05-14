@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.45",
+    page_title="WSGT_BPVis_ENE 2.2.46",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -304,7 +304,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.45")
+st.sidebar.write("Version 2.2.46")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2223,7 +2223,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.45"
+REPORT_VERSION = "2.2.46"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9444,6 +9444,24 @@ with tab6:
             )
             target_id = "1.5C" if target_label.startswith("1.5") else "2C"
 
+            pt_df = crrem["property_types"].copy()
+            use_options = pt_df["app_use"].dropna().astype(str).tolist()
+            # keep Mixed Use last (if present)
+            if "Mixed Use" in use_options:
+                use_options = [u for u in use_options if u != "Mixed Use"] + ["Mixed Use"]
+            # Default CRREM use: Office if not available / invalid (backwards compatible)
+            if "crrem_use_type" not in st.session_state or st.session_state.get("crrem_use_type") not in use_options:
+                st.session_state["crrem_use_type"] = "Office" if "Office" in use_options else (
+                    use_options[0] if use_options else "Office")
+
+            crrem_use = st.selectbox(
+                "CRREM Use Type",
+                use_options,
+                index=use_options.index(st.session_state["crrem_use_type"]) if st.session_state[
+                                                                                   "crrem_use_type"] in use_options else 0,
+                key="crrem_use_type",
+            )
+
             with st.expander("Emission factor decarbonization settings", expanded=False):
                 st.caption(
                     "Each energy source can either follow the CRREM grid decarbonization ratio or use a custom "
@@ -9495,24 +9513,6 @@ with tab6:
                         st.success("Emission factor decarbonization settings updated.")
                     except Exception:
                         st.warning("Emission factor decarbonization settings were updated for the current session, but could not be written to the scenario payload.")
-
-            pt_df = crrem["property_types"].copy()
-            use_options = pt_df["app_use"].dropna().astype(str).tolist()
-            # keep Mixed Use last (if present)
-            if "Mixed Use" in use_options:
-                use_options = [u for u in use_options if u != "Mixed Use"] + ["Mixed Use"]
-            # Default CRREM use: Office if not available / invalid (backwards compatible)
-            if "crrem_use_type" not in st.session_state or st.session_state.get("crrem_use_type") not in use_options:
-                st.session_state["crrem_use_type"] = "Office" if "Office" in use_options else (
-                    use_options[0] if use_options else "Office")
-
-            crrem_use = st.selectbox(
-                "CRREM Use Type",
-                use_options,
-                index=use_options.index(st.session_state["crrem_use_type"]) if st.session_state[
-                                                                                   "crrem_use_type"] in use_options else 0,
-                key="crrem_use_type",
-            )
 
             mixed_components = None
             if crrem_use == "Mixed Use":
@@ -10626,9 +10626,9 @@ with tab6:
                                 overlay_baseline=(carbon_asset, eui_asset_series) if show_overlay else None,
                             )
 
-                            # --- Emission savings from decarbonization measures
+                            # --- Savings from decarbonization measures
                             # Savings are calculated as baseline/no-measures minus with-measures.
-                            # Positive values mean the measures reduce emissions; negative values mean the measures increase emissions.
+                            # Left column: emission savings. Right column: end-energy savings.
                             savings_col1, savings_col2 = st.columns(2)
                             try:
                                 annual_emission_savings_t = (
@@ -10638,6 +10638,13 @@ with tab6:
                                 )
                                 cumulative_emission_savings_t = annual_emission_savings_t.cumsum()
 
+                                annual_end_energy_savings_mwh = (
+                                    (eui_asset_series.reindex(years_avail).astype(float) - eui_meas_s.reindex(years_avail).astype(float))
+                                    * float(project_area_val)
+                                    / 1000.0
+                                )
+                                cumulative_end_energy_savings_mwh = annual_end_energy_savings_mwh.cumsum()
+
                                 with savings_col1:
                                     st.write("#### Annual emission savings")
                                     fig_sav_ann = go.Figure()
@@ -10645,7 +10652,7 @@ with tab6:
                                         x=years_avail,
                                         y=annual_emission_savings_t.values,
                                         mode="lines+markers",
-                                        name="Annual savings",
+                                        name="Annual emission savings",
                                         line=dict(color=CRREM_COLOR_MEASURES, width=3),
                                         marker=dict(color=CRREM_COLOR_MEASURES, size=8),
                                         hovertemplate="Year: %{x}<br>Savings: %{y:,.2f} tCO₂e/a<extra></extra>",
@@ -10660,14 +10667,13 @@ with tab6:
                                     )
                                     st_plotly_chart(fig_sav_ann, use_container_width=True, key="crrem_annual_emission_savings")
 
-                                with savings_col2:
                                     st.write("#### Cumulative emission savings")
                                     fig_sav_cum = go.Figure()
                                     fig_sav_cum.add_trace(go.Scatter(
                                         x=years_avail,
                                         y=cumulative_emission_savings_t.values,
                                         mode="lines+markers",
-                                        name="Cumulative savings",
+                                        name="Cumulative emission savings",
                                         line=dict(color=CRREM_COLOR_MEASURES, width=3),
                                         marker=dict(color=CRREM_COLOR_MEASURES, size=8),
                                         fill="tozeroy",
@@ -10684,26 +10690,7 @@ with tab6:
                                     )
                                     st_plotly_chart(fig_sav_cum, use_container_width=True, key="crrem_cumulative_emission_savings")
 
-                                st.caption(
-                                    "Emission savings are calculated as baseline/no-measures emissions minus with-measures emissions. "
-                                    "Positive values indicate avoided emissions; negative values indicate an increase compared with the baseline path."
-                                )
-                            except Exception as _e:
-                                st.warning("Emission savings charts could not be generated for the current measures setup.")
-
-                            # --- End energy savings from decarbonization measures
-                            # Savings are calculated as baseline/no-measures end energy minus with-measures end energy.
-                            # Positive values mean the measures reduce end energy demand; negative values mean the measures increase it.
-                            energy_savings_col1, energy_savings_col2 = st.columns(2)
-                            try:
-                                annual_end_energy_savings_mwh = (
-                                    (eui_asset_series.reindex(years_avail).astype(float) - eui_meas_s.reindex(years_avail).astype(float))
-                                    * float(project_area_val)
-                                    / 1000.0
-                                )
-                                cumulative_end_energy_savings_mwh = annual_end_energy_savings_mwh.cumsum()
-
-                                with energy_savings_col1:
+                                with savings_col2:
                                     st.write("#### Annual End Energy Savings")
                                     fig_energy_sav_ann = go.Figure()
                                     fig_energy_sav_ann.add_trace(go.Scatter(
@@ -10725,7 +10712,6 @@ with tab6:
                                     )
                                     st_plotly_chart(fig_energy_sav_ann, use_container_width=True, key="crrem_annual_end_energy_savings")
 
-                                with energy_savings_col2:
                                     st.write("#### Cumulative End Energy Savings")
                                     fig_energy_sav_cum = go.Figure()
                                     fig_energy_sav_cum.add_trace(go.Scatter(
@@ -10750,11 +10736,11 @@ with tab6:
                                     st_plotly_chart(fig_energy_sav_cum, use_container_width=True, key="crrem_cumulative_end_energy_savings")
 
                                 st.caption(
-                                    "End energy savings are calculated as baseline/no-measures end energy minus with-measures end energy. "
-                                    "Positive values indicate reduced end energy demand; negative values indicate an increase compared with the baseline path."
+                                    "Savings are calculated as baseline/no-measures minus with-measures. "
+                                    "Positive values indicate avoided emissions or reduced end energy demand; negative values indicate an increase compared with the baseline path."
                                 )
                             except Exception as _e:
-                                st.warning("End energy savings charts could not be generated for the current measures setup.")
+                                st.warning("CRREM savings charts could not be generated for the current measures setup.")
 
 
                     st.caption(
