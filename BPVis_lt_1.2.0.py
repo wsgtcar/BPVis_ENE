@@ -64,7 +64,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.48",
+    page_title="WSGT_BPVis_ENE 2.2.49",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -73,7 +73,7 @@ st.set_page_config(
 # =========================
 # Access control — simple Excel-backed login
 # =========================
-AUTH_USERS_FILENAME = "../../../../car_local folder/98_Apps/BPVis_ENE/users.xlsx"
+AUTH_USERS_FILENAME = "users.xlsx"
 AUTH_SESSION_KEY = "_bpvis_authenticated"
 AUTH_EMAIL_KEY = "_bpvis_authenticated_email"
 
@@ -86,9 +86,69 @@ def _auth_app_dir() -> Path:
         return Path.cwd()
 
 
+def _auth_users_file_candidates() -> list:
+    """Return reasonable locations for users.xlsx in local and Streamlit Cloud deployments.
+
+    Streamlit Cloud usually runs from the repository root, but the selected
+    Streamlit script may be located in a subfolder. Therefore we check both the
+    script folder and the current working directory/repository root. We also
+    check a few parent folders of the script to support common repo layouts.
+    """
+    candidates = []
+
+    def _add(path_like):
+        try:
+            p = Path(path_like).resolve()
+            if p not in candidates:
+                candidates.append(p)
+        except Exception:
+            pass
+
+    app_dir = _auth_app_dir()
+    cwd = Path.cwd()
+
+    _add(app_dir / AUTH_USERS_FILENAME)
+    _add(cwd / AUTH_USERS_FILENAME)
+
+    # Support deployments where the app script is inside a subfolder, but
+    # users.xlsx was committed to the repository root. Limit traversal to avoid
+    # scanning arbitrary system locations.
+    try:
+        for parent in list(app_dir.parents)[:4]:
+            _add(parent / AUTH_USERS_FILENAME)
+    except Exception:
+        pass
+
+    return candidates
+
+
 def _auth_users_file_path() -> Path:
-    """Path to the Excel user database expected by the app."""
-    return _auth_app_dir() / AUTH_USERS_FILENAME
+    """Return the first existing Excel user database, or the preferred path."""
+    candidates = _auth_users_file_candidates()
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except Exception:
+            continue
+    return candidates[0] if candidates else Path(AUTH_USERS_FILENAME)
+
+
+def _auth_users_file_help_text() -> str:
+    """Actionable help text for admins without exposing local development paths."""
+    try:
+        candidates = _auth_users_file_candidates()
+        display_paths = []
+        for p in candidates[:3]:
+            try:
+                display_paths.append(f"`{p.name}` in `{p.parent}`")
+            except Exception:
+                pass
+        if display_paths:
+            return "Place `users.xlsx` in one of these locations: " + "; ".join(display_paths) + "."
+    except Exception:
+        pass
+    return "Place `users.xlsx` next to the Streamlit app file or in the repository root."
 
 
 def _auth_clean_cell(value) -> str:
@@ -161,9 +221,10 @@ def _render_login_page() -> None:
 
         users_path = _auth_users_file_path()
         if not users_path.exists():
-            st.error(
-                f"Login user file not found. Create `{AUTH_USERS_FILENAME}` in the app folder "
-                "with the columns `email` and `password`."
+            st.error("Login user file not found.")
+            st.info(
+                _auth_users_file_help_text()
+                + " The workbook must contain the columns `email` and `password`."
             )
             st.stop()
 
@@ -438,7 +499,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.48")
+st.sidebar.write("Version 2.2.49")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2381,7 +2442,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.48"
+REPORT_VERSION = "2.2.49"
 
 
 def _report_sanitize_filename(text: str) -> str:
