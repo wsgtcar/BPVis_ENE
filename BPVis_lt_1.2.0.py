@@ -8,6 +8,7 @@ import streamlit as st
 import json
 import re
 from copy import deepcopy
+from datetime import date, datetime
 
 # --- CRREM chart colors (synced across CRREM diagrams)
 CRREM_COLOR_LIMIT = "#c02419"  # light red
@@ -64,7 +65,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.49",
+    page_title="WSGT_BPVis_ENE 2.2.51",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -76,6 +77,8 @@ st.set_page_config(
 AUTH_USERS_FILENAME = "users.xlsx"
 AUTH_SESSION_KEY = "_bpvis_authenticated"
 AUTH_EMAIL_KEY = "_bpvis_authenticated_email"
+AUTH_EXPIRY_KEY = "_bpvis_authenticated_expiration_date"
+AUTH_REQUIRED_COLUMNS = {"email", "password", "expiration_date"}
 
 
 def _auth_app_dir() -> Path:
@@ -166,41 +169,185 @@ def _auth_clean_cell(value) -> str:
     return str(value).strip()
 
 
+def _auth_parse_expiration_date(value):
+    """Return a Python date for expiration_date cells, or None for no expiration.
+
+    Accepted inputs include real Excel dates, ISO dates (YYYY-MM-DD),
+    common European dates (DD.MM.YYYY / DD/MM/YYYY), and Excel serial dates.
+    Empty cells mean no expiration date.
+    """
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    if value is None:
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    s = str(value).strip()
+    if not s:
+        return None
+
+    # Numeric Excel serial date fallback. pandas normally converts formatted
+    # Excel date cells automatically, but this supports manually entered serials.
+    try:
+        if re.fullmatch(r"\d+(\.0+)?", s):
+            serial = float(s)
+            if 20000 <= serial <= 80000:
+                return pd.to_datetime(serial, unit="D", origin="1899-12-30").date()
+    except Exception:
+        pass
+
+    # Prefer unambiguous ISO-style parsing; then support common EU day-first input.
+    for dayfirst in (False, True):
+        try:
+            parsed = pd.to_datetime(s, errors="raise", dayfirst=dayfirst)
+            if pd.isna(parsed):
+                break
+            return parsed.date()
+        except Exception:
+            continue
+
+    raise ValueError(f"Invalid expiration_date value: {s!r}")
+
+
+def _auth_is_expired(expiration_date) -> bool:
+    """Return True when today's date is after the user's expiration date.
+
+    The expiration date itself is still valid; access is denied starting the
+    following day. Empty expiration dates never expire.
+    """
+    if expiration_date is None or expiration_date == "":
+        return False
+    try:
+        if isinstance(expiration_date, str):
+            expiration_date = _auth_parse_expiration_date(expiration_date)
+        return date.today() > expiration_date
+    except Exception:
+        return True
+
+
+def _auth_format_expiration(expiration_date) -> str:
+    if expiration_date is None or expiration_date == "":
+        return "No expiration"
+    try:
+        if isinstance(expiration_date, str):
+            expiration_date = _auth_parse_expiration_date(expiration_date)
+        return expiration_date.isoformat()
+    except Exception:
+        return str(expiration_date)
+
+
 @st.cache_data(show_spinner=False)
 def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
     """Load login users from users.xlsx.
 
-    Required columns are: email, password.
+    Required columns are: email, password, expiration_date.
     The mtime argument is intentionally part of the cache key so edits to the
     workbook are picked up after saving the file.
     """
     df_users = pd.read_excel(users_path_str)
     df_users.columns = [str(c).strip().lower() for c in df_users.columns]
-    if not {"email", "password"}.issubset(set(df_users.columns)):
-        raise ValueError("users.xlsx must contain the columns: email and password")
-    df_users = df_users[["email", "password"]].copy()
+    missing = AUTH_REQUIRED_COLUMNS.difference(set(df_users.columns))
+    if missing:
+        raise ValueError(
+            "users.xlsx must contain the columns: email, password, expiration_date. "
+            f"Missing: {', '.join(sorted(missing))}"
+        )
+
+    df_users = df_users[["email", "password", "expiration_date"]].copy()
     df_users["email"] = df_users["email"].apply(_auth_clean_cell).str.lower()
     df_users["password"] = df_users["password"].apply(_auth_clean_cell)
+
+    parsed_expirations = []
+    invalid_rows = []
+    for idx, row in df_users.iterrows():
+        try:
+            parsed_expirations.append(_auth_parse_expiration_date(row.get("expiration_date")))
+        except Exception as exc:
+            invalid_rows.append(f"row {idx + 2} ({row.get('email', '')}): {exc}")
+            parsed_expirations.append(None)
+    if invalid_rows:
+        raise ValueError("Invalid expiration_date value(s): " + "; ".join(invalid_rows[:5]))
+
+    df_users["expiration_date"] = parsed_expirations
     df_users = df_users[(df_users["email"] != "") & (df_users["password"] != "")]
+    df_users["is_expired"] = df_users["expiration_date"].apply(_auth_is_expired)
+    df_users["expiration_label"] = df_users["expiration_date"].apply(_auth_format_expiration)
     return df_users
 
 
-def _auth_credentials_valid(email: str, password: str) -> bool:
-    """Validate credentials against users.xlsx."""
+def _auth_credentials_status(email: str, password: str) -> Tuple[bool, str, Optional[str]]:
+    """Validate credentials and return (is_valid, message, expiration_label)."""
     path = _auth_users_file_path()
     if not path.exists():
-        return False
+        return False, "Login user file not found.", None
     try:
         users = _auth_load_users(str(path), path.stat().st_mtime)
-    except Exception:
-        return False
+    except Exception as exc:
+        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None
 
     email_norm = str(email or "").strip().lower()
     password_norm = str(password or "")
     if not email_norm or not password_norm:
-        return False
-    matches = users.loc[users["email"] == email_norm, "password"].astype(str).tolist()
-    return any(password_norm == p for p in matches)
+        return False, "Invalid email or password.", None
+
+    email_rows = users.loc[users["email"] == email_norm].copy()
+    if email_rows.empty:
+        return False, "Invalid email or password.", None
+
+    credential_rows = email_rows.loc[email_rows["password"].astype(str) == password_norm].copy()
+    if credential_rows.empty:
+        return False, "Invalid email or password.", None
+
+    active_rows = credential_rows.loc[~credential_rows["is_expired"].astype(bool)].copy()
+    if active_rows.empty:
+        expirations = credential_rows["expiration_label"].dropna().astype(str).unique().tolist()
+        exp_msg = expirations[0] if expirations else "the configured expiration date"
+        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg
+
+    expiration_label = str(active_rows.iloc[0].get("expiration_label", "No expiration"))
+    return True, "Login successful.", expiration_label
+
+
+def _auth_credentials_valid(email: str, password: str) -> bool:
+    """Backwards-compatible bool wrapper for credential checks."""
+    ok, _, _ = _auth_credentials_status(email, password)
+    return ok
+
+
+def _auth_session_still_valid() -> Tuple[bool, str, Optional[str]]:
+    """Re-check an already authenticated user against the current users.xlsx file."""
+    email_norm = str(st.session_state.get(AUTH_EMAIL_KEY, "") or "").strip().lower()
+    if not email_norm:
+        return False, "Session expired. Please log in again.", None
+
+    path = _auth_users_file_path()
+    if not path.exists():
+        return False, "Login user file not found. Please contact the app administrator.", None
+    try:
+        users = _auth_load_users(str(path), path.stat().st_mtime)
+    except Exception as exc:
+        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None
+
+    rows = users.loc[users["email"] == email_norm].copy()
+    if rows.empty:
+        return False, "This user is no longer authorized.", None
+    active_rows = rows.loc[~rows["is_expired"].astype(bool)].copy()
+    if active_rows.empty:
+        expirations = rows["expiration_label"].dropna().astype(str).unique().tolist()
+        exp_msg = expirations[0] if expirations else "the configured expiration date"
+        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg
+    expiration_label = str(active_rows.iloc[0].get("expiration_label", "No expiration"))
+    st.session_state[AUTH_EXPIRY_KEY] = expiration_label
+    return True, "Session valid.", expiration_label
 
 
 def _render_login_page() -> None:
@@ -224,7 +371,7 @@ def _render_login_page() -> None:
             st.error("Login user file not found.")
             st.info(
                 _auth_users_file_help_text()
-                + " The workbook must contain the columns `email` and `password`."
+                + " The workbook must contain the columns `email`, `password`, and `expiration_date`."
             )
             st.stop()
 
@@ -232,7 +379,7 @@ def _render_login_page() -> None:
             # Validate file structure early so admins get an actionable message.
             _auth_load_users(str(users_path), users_path.stat().st_mtime)
         except Exception as exc:
-            st.error(f"Could not read `{AUTH_USERS_FILENAME}`. Required columns: `email`, `password`.")
+            st.error(f"Could not read `{AUTH_USERS_FILENAME}`. Required columns: `email`, `password`, `expiration_date`.")
             st.caption(str(exc))
             st.stop()
 
@@ -242,12 +389,14 @@ def _render_login_page() -> None:
             submitted = st.form_submit_button("Login", use_container_width=True)
 
         if submitted:
-            if _auth_credentials_valid(email, password):
+            ok, message, expiration_label = _auth_credentials_status(email, password)
+            if ok:
                 st.session_state[AUTH_SESSION_KEY] = True
                 st.session_state[AUTH_EMAIL_KEY] = str(email).strip().lower()
+                st.session_state[AUTH_EXPIRY_KEY] = expiration_label or "No expiration"
                 st.rerun()
             else:
-                st.error("Invalid email or password.")
+                st.error(message)
 
     st.stop()
 
@@ -255,14 +404,13 @@ def _render_login_page() -> None:
 if not st.session_state.get(AUTH_SESSION_KEY, False):
     _render_login_page()
 else:
-    # Small authenticated-session controls. The rest of the sidebar is rendered below as usual.
-    with st.sidebar:
-        st.caption(f"Logged in as {st.session_state.get(AUTH_EMAIL_KEY, '')}")
-        if st.button("Logout", key="bpvis_logout_btn", use_container_width=True):
-            st.session_state[AUTH_SESSION_KEY] = False
-            st.session_state.pop(AUTH_EMAIL_KEY, None)
-            st.rerun()
-        st.markdown("---")
+    _ok_session, _session_msg, _session_exp = _auth_session_still_valid()
+    if not _ok_session:
+        st.session_state[AUTH_SESSION_KEY] = False
+        st.session_state.pop(AUTH_EMAIL_KEY, None)
+        st.session_state.pop(AUTH_EXPIRY_KEY, None)
+        st.error(_session_msg)
+        _render_login_page()
 
 # Centralized categorical orders (used across charts)
 MONTH_ORDER = [
@@ -499,7 +647,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.49")
+st.sidebar.write("Version 2.2.51")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2442,7 +2590,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.49"
+REPORT_VERSION = "2.2.51"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -8676,7 +8824,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_2_38.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_2_51.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -8685,7 +8833,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_2_38.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_2_51.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -8704,6 +8852,15 @@ with tab1:
             st.caption("*email:* rodrigo.carvalho@wernersobek.com")
             st.caption("*Tel* +49.40.6963863-14")
             st.caption("*Mob* +49.171.964.7850")
+
+            st.markdown("---")
+            st.caption(f"Logged in as {st.session_state.get(AUTH_EMAIL_KEY, '')}")
+            st.caption(f"Access expires: {st.session_state.get(AUTH_EXPIRY_KEY, 'No expiration')}")
+            if st.button("Logout", key="bpvis_logout_btn", use_container_width=True):
+                st.session_state[AUTH_SESSION_KEY] = False
+                st.session_state.pop(AUTH_EMAIL_KEY, None)
+                st.session_state.pop(AUTH_EXPIRY_KEY, None)
+                st.rerun()
 
         # ---- Apply mapping to create Energy_Source column
         df_melted["Energy_Source"] = df_melted["End_Use"].map(mapping_dict)
