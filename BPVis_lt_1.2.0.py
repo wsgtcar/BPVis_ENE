@@ -64,10 +64,144 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.47",
+    page_title="WSGT_BPVis_ENE 2.2.48",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
+
+
+# =========================
+# Access control — simple Excel-backed login
+# =========================
+AUTH_USERS_FILENAME = "../../../../car_local folder/98_Apps/BPVis_ENE/users.xlsx"
+AUTH_SESSION_KEY = "_bpvis_authenticated"
+AUTH_EMAIL_KEY = "_bpvis_authenticated_email"
+
+
+def _auth_app_dir() -> Path:
+    """Return the folder where the Streamlit app is located."""
+    try:
+        return Path(__file__).resolve().parent
+    except Exception:
+        return Path.cwd()
+
+
+def _auth_users_file_path() -> Path:
+    """Path to the Excel user database expected by the app."""
+    return _auth_app_dir() / AUTH_USERS_FILENAME
+
+
+def _auth_clean_cell(value) -> str:
+    """Convert Excel cells to stable strings without changing password case."""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    try:
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+@st.cache_data(show_spinner=False)
+def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
+    """Load login users from users.xlsx.
+
+    Required columns are: email, password.
+    The mtime argument is intentionally part of the cache key so edits to the
+    workbook are picked up after saving the file.
+    """
+    df_users = pd.read_excel(users_path_str)
+    df_users.columns = [str(c).strip().lower() for c in df_users.columns]
+    if not {"email", "password"}.issubset(set(df_users.columns)):
+        raise ValueError("users.xlsx must contain the columns: email and password")
+    df_users = df_users[["email", "password"]].copy()
+    df_users["email"] = df_users["email"].apply(_auth_clean_cell).str.lower()
+    df_users["password"] = df_users["password"].apply(_auth_clean_cell)
+    df_users = df_users[(df_users["email"] != "") & (df_users["password"] != "")]
+    return df_users
+
+
+def _auth_credentials_valid(email: str, password: str) -> bool:
+    """Validate credentials against users.xlsx."""
+    path = _auth_users_file_path()
+    if not path.exists():
+        return False
+    try:
+        users = _auth_load_users(str(path), path.stat().st_mtime)
+    except Exception:
+        return False
+
+    email_norm = str(email or "").strip().lower()
+    password_norm = str(password or "")
+    if not email_norm or not password_norm:
+        return False
+    matches = users.loc[users["email"] == email_norm, "password"].astype(str).tolist()
+    return any(password_norm == p for p in matches)
+
+
+def _render_login_page() -> None:
+    """Render the login page and stop the app until authentication succeeds."""
+    logo_path_black = _auth_app_dir() / "Pamo_Icon_Black.png"
+    logo_path_ws = _auth_app_dir() / "WS_Logo.jpg"
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    left, middle, right = st.columns([1, 1.15, 1])
+    with middle:
+        if logo_path_black.exists():
+            st.image(str(logo_path_black), width=90)
+        elif logo_path_ws.exists():
+            st.image(str(logo_path_ws), width=320)
+
+        st.title("BPVis ENE")
+        st.caption("Please log in to access the application.")
+
+        users_path = _auth_users_file_path()
+        if not users_path.exists():
+            st.error(
+                f"Login user file not found. Create `{AUTH_USERS_FILENAME}` in the app folder "
+                "with the columns `email` and `password`."
+            )
+            st.stop()
+
+        try:
+            # Validate file structure early so admins get an actionable message.
+            _auth_load_users(str(users_path), users_path.stat().st_mtime)
+        except Exception as exc:
+            st.error(f"Could not read `{AUTH_USERS_FILENAME}`. Required columns: `email`, `password`.")
+            st.caption(str(exc))
+            st.stop()
+
+        with st.form("bpvis_login_form", clear_on_submit=False):
+            email = st.text_input("Email", key="bpvis_login_email")
+            password = st.text_input("Password", type="password", key="bpvis_login_password")
+            submitted = st.form_submit_button("Login", use_container_width=True)
+
+        if submitted:
+            if _auth_credentials_valid(email, password):
+                st.session_state[AUTH_SESSION_KEY] = True
+                st.session_state[AUTH_EMAIL_KEY] = str(email).strip().lower()
+                st.rerun()
+            else:
+                st.error("Invalid email or password.")
+
+    st.stop()
+
+
+if not st.session_state.get(AUTH_SESSION_KEY, False):
+    _render_login_page()
+else:
+    # Small authenticated-session controls. The rest of the sidebar is rendered below as usual.
+    with st.sidebar:
+        st.caption(f"Logged in as {st.session_state.get(AUTH_EMAIL_KEY, '')}")
+        if st.button("Logout", key="bpvis_logout_btn", use_container_width=True):
+            st.session_state[AUTH_SESSION_KEY] = False
+            st.session_state.pop(AUTH_EMAIL_KEY, None)
+            st.rerun()
+        st.markdown("---")
 
 # Centralized categorical orders (used across charts)
 MONTH_ORDER = [
@@ -304,7 +438,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.47")
+st.sidebar.write("Version 2.2.48")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2247,7 +2381,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.47"
+REPORT_VERSION = "2.2.48"
 
 
 def _report_sanitize_filename(text: str) -> str:
