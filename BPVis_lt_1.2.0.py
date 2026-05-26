@@ -13637,6 +13637,244 @@ with tab3:
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
 
+
+# =========================
+# Loads Analysis helpers
+# =========================
+LOAD_ANALYSIS_META_COLS = {"hoy", "doy", "day", "month", "weekday", "hour", "Grid_Injection"}
+LOAD_GHOST_COLOR = "#8a8a8a"
+
+
+def _loads_available_load_columns(df_loads: pd.DataFrame) -> list:
+    """Return numeric load columns from Loads_Balance, excluding time/meta columns."""
+    try:
+        return [str(c) for c in df_loads.columns if str(c) not in LOAD_ANALYSIS_META_COLS]
+    except Exception:
+        return []
+
+
+def _loads_color_for(load_name: str, fallback: str = "#c02419") -> str:
+    """Return the configured color for a load/end-use name."""
+    try:
+        key = str(load_name).replace("_load", "")
+        return st.session_state.get("color_map_loads", DEFAULT_COLOR_MAP_LOADS).get(
+            key,
+            st.session_state.get("color_map_enduse", DEFAULT_COLOR_MAP).get(key, color_map.get(key, fallback)),
+        )
+    except Exception:
+        return fallback
+
+
+def _loads_month_label_order_frame(df_in: pd.DataFrame) -> pd.DataFrame:
+    """Add robust month labels/order columns for Loads_Balance diagrams."""
+    out = df_in.copy()
+    if "month" not in out.columns:
+        out["_month_idx"] = np.nan
+        out["_month_label"] = "Unknown"
+        return out
+
+    raw = out["month"]
+    month_num = pd.to_numeric(raw, errors="coerce")
+    valid_num = month_num.notna() & month_num.between(1, 12)
+    month_map = dict(enumerate(MONTH_ORDER, start=1))
+
+    if valid_num.sum() >= max(1, int(0.80 * len(out))):
+        out["_month_idx"] = month_num.round().astype("Int64")
+        out["_month_label"] = out["_month_idx"].map(month_map).fillna(raw.astype(str))
+        return out
+
+    # String month fallback: accept full names and common 3-letter abbreviations.
+    order_by_name = {m.lower(): i for i, m in enumerate(MONTH_ORDER, start=1)}
+    order_by_abbr = {m[:3].lower(): i for i, m in enumerate(MONTH_ORDER, start=1)}
+
+    def _label(v):
+        s = str(v).strip()
+        sl = s.lower()
+        if sl in order_by_name:
+            return MONTH_ORDER[order_by_name[sl] - 1]
+        if sl[:3] in order_by_abbr:
+            return MONTH_ORDER[order_by_abbr[sl[:3]] - 1]
+        return s
+
+    def _idx(v):
+        lab = _label(v)
+        return order_by_name.get(str(lab).lower(), np.nan)
+
+    out["_month_label"] = raw.apply(_label)
+    out["_month_idx"] = raw.apply(_idx)
+    return out
+
+
+def _loads_weekend_mask(weekday_series: pd.Series) -> pd.Series:
+    """Return True for Saturday/Sunday, supporting text and common numeric weekday encodings."""
+    s = weekday_series.copy()
+    txt = s.astype(str).str.strip().str.lower()
+    text_mask = (
+        txt.str.startswith("sat", na=False)
+        | txt.str.startswith("sun", na=False)
+        | txt.isin({"sa", "su", "saturday", "sunday", "samstag", "sonntag", "sábado", "domingo"})
+    )
+
+    num = pd.to_numeric(s, errors="coerce")
+    numeric_mask = pd.Series(False, index=s.index)
+    finite = num.dropna()
+    if not finite.empty:
+        min_v = int(finite.min())
+        max_v = int(finite.max())
+        if min_v == 0 and max_v <= 6:
+            # Python/Pandas convention: Monday=0 ... Sunday=6
+            numeric_mask = num.isin([5, 6])
+        elif min_v >= 1 and max_v <= 7:
+            # ISO/Excel-style convention: Monday=1 ... Sunday=7
+            numeric_mask = num.isin([6, 7])
+        else:
+            numeric_mask = num.isin([6, 7])
+    return (text_mask | numeric_mask).fillna(False)
+
+
+def _loads_pivot_hour_doy(df_in: pd.DataFrame, value_col: str) -> pd.DataFrame:
+    """Return hour x day-of-year pivot table for heatmap overlays."""
+    work = df_in[["doy", "hour", value_col]].copy()
+    work["doy"] = pd.to_numeric(work["doy"], errors="coerce")
+    work["hour"] = pd.to_numeric(work["hour"], errors="coerce")
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.dropna(subset=["doy", "hour", value_col])
+    if work.empty:
+        return pd.DataFrame()
+    return work.pivot_table(index="hour", columns="doy", values=value_col, aggfunc="mean").sort_index().sort_index(axis=1)
+
+
+def _loads_add_ghost_contour(fig: go.Figure, df_loads: pd.DataFrame, ghost_load: Optional[str], name_prefix: str = "Ghost load") -> go.Figure:
+    """Overlay a gray contour representation of the ghost load on a heatmap-style figure."""
+    if not ghost_load:
+        return fig
+    try:
+        piv = _loads_pivot_hour_doy(df_loads, ghost_load)
+        if piv.empty:
+            return fig
+        fig.add_trace(go.Contour(
+            x=piv.columns.astype(float),
+            y=piv.index.astype(float),
+            z=piv.values,
+            name=f"{ui_name(ghost_load)} (ghost)",
+            showscale=False,
+            opacity=0.55,
+            contours=dict(coloring="lines", showlabels=False),
+            line=dict(color=LOAD_GHOST_COLOR, width=1.4),
+            hovertemplate=(
+                f"<b>{ui_name(ghost_load)} (ghost)</b><br>"
+                "DOY %{x}<br>Hour %{y}<br>Load %{z:.2f} kW<extra></extra>"
+            ),
+        ))
+        fig.update_layout(showlegend=True)
+    except Exception:
+        pass
+    return fig
+
+
+def _loads_typical_day_profile_figure(
+        df_loads_in: pd.DataFrame,
+        selected_load: str,
+        ghost_load: Optional[str],
+        selected_color: str,
+        exclude_weekends: bool = False,
+) -> Tuple[go.Figure, int]:
+    """Build the Typical Day by Month diagram.
+
+    Each month is a compact 24-hour average profile positioned inside that month slot.
+    The x-axis remains the 12 months; the y-axis is the average hourly load in kW.
+    """
+    work = df_loads_in.copy()
+    if exclude_weekends and "weekday" in work.columns:
+        work = work.loc[~_loads_weekend_mask(work["weekday"])].copy()
+
+    if work.empty:
+        fig = go.Figure()
+        return fig, 0
+
+    work = _loads_month_label_order_frame(work)
+    work["hour"] = pd.to_numeric(work.get("hour"), errors="coerce")
+    work[selected_load] = pd.to_numeric(work[selected_load], errors="coerce")
+    if ghost_load:
+        work[ghost_load] = pd.to_numeric(work[ghost_load], errors="coerce")
+
+    work = work.dropna(subset=["_month_idx", "hour"])
+    work = work.loc[work["_month_idx"].between(1, 12) & work["hour"].between(0, 23)].copy()
+    if work.empty:
+        return go.Figure(), 0
+
+    group_cols = ["_month_idx", "_month_label", "hour"]
+    cols_to_mean = [selected_load] + ([ghost_load] if ghost_load else [])
+    typical = work.groupby(group_cols, as_index=False, observed=True)[cols_to_mean].mean()
+    typical = typical.sort_values(["_month_idx", "hour"])
+
+    fig = go.Figure()
+    month_ticks = list(range(1, 13))
+    month_labels = MONTH_ORDER
+
+    def _profile_x(month_idx_series, hour_series):
+        # Keep the 24-hour curve inside each month slot while leaving visual separation between months.
+        return pd.to_numeric(month_idx_series, errors="coerce") + ((pd.to_numeric(hour_series, errors="coerce") - 11.5) / 34.0)
+
+    plotted_months = 0
+    for _, mdf in typical.groupby("_month_idx", sort=True):
+        if mdf.empty:
+            continue
+        month_idx = int(mdf["_month_idx"].iloc[0])
+        month_label = str(mdf["_month_label"].iloc[0])
+        x_vals = _profile_x(mdf["_month_idx"], mdf["hour"])
+        custom = np.stack([mdf["hour"].astype(float), np.repeat(month_label, len(mdf))], axis=-1)
+        fig.add_trace(go.Scatter(
+            x=x_vals,
+            y=mdf[selected_load].astype(float),
+            mode="lines+markers",
+            name=ui_name(selected_load),
+            legendgroup=selected_load,
+            showlegend=(plotted_months == 0),
+            line=dict(color=selected_color, width=3.2),
+            marker=dict(color=selected_color, size=5),
+            customdata=custom,
+            hovertemplate=(
+                f"<b>{ui_name(selected_load)}</b><br>"
+                "%{customdata[1]}<br>Hour %{customdata[0]:.0f}<br>Average load %{y:.2f} kW<extra></extra>"
+            ),
+        ))
+        if ghost_load:
+            fig.add_trace(go.Scatter(
+                x=x_vals,
+                y=mdf[ghost_load].astype(float),
+                mode="lines+markers",
+                name=f"{ui_name(ghost_load)} (ghost)",
+                legendgroup=f"ghost_{ghost_load}",
+                showlegend=(plotted_months == 0),
+                line=dict(color=LOAD_GHOST_COLOR, width=2.6, dash="dash"),
+                marker=dict(color=LOAD_GHOST_COLOR, size=4, opacity=0.65),
+                opacity=0.62,
+                customdata=custom,
+                hovertemplate=(
+                    f"<b>{ui_name(ghost_load)} (ghost)</b><br>"
+                    "%{customdata[1]}<br>Hour %{customdata[0]:.0f}<br>Average load %{y:.2f} kW<extra></extra>"
+                ),
+            ))
+        plotted_months += 1
+
+    fig.update_layout(
+        title=f"Typical Day by Month — {ui_name(selected_load)}",
+        xaxis=dict(
+            title="Month",
+            tickmode="array",
+            tickvals=month_ticks,
+            ticktext=month_labels,
+            range=[0.45, 12.55],
+        ),
+        yaxis_title="Average hourly load (kW)",
+        height=700,
+        showlegend=True,
+        legend=dict(title=""),
+    )
+    fig.update_xaxes(tickangle=45)
+    return fig, int(len(work))
+
 # =========================
 # Tab 4 — Loads Analysis (Loads Analysis Tab)
 # =========================
@@ -13646,7 +13884,7 @@ with tab4:
         df_loads = get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name)
 
         # columns that are load metrics
-        load_cols = [c for c in df_loads.columns if c not in ["hoy", "doy", "day", "month", "weekday", "hour"]]
+        load_cols = _loads_available_load_columns(df_loads)
 
         # (optional) ensure doy/hour are numeric
         df_loads["doy"] = pd.to_numeric(df_loads["doy"], errors="coerce")
@@ -13654,7 +13892,26 @@ with tab4:
 
         st.write("## Load Analysis")
         st.metric("Active Scenario", active_selected)
-        selected_load = st.selectbox("Select Load", load_cols, index=0)
+
+        if not load_cols:
+            st.warning("No load columns found in Loads_Balance. Add at least one load column to use Loads Analysis.")
+            st.stop()
+
+        load_select_col, ghost_select_col = st.columns([1, 1])
+        with load_select_col:
+            selected_load = st.selectbox("Select Load", load_cols, index=0, format_func=ui_name)
+        with ghost_select_col:
+            ghost_options = ["None"] + [c for c in load_cols if c != selected_load]
+            ghost_load_option = st.selectbox(
+                "Ghost load overlay",
+                ghost_options,
+                index=0,
+                format_func=lambda x: "None" if x == "None" else ui_name(x),
+                help="Optional secondary load shown in gray/dashed form for visual comparison."
+            )
+        ghost_load = None if ghost_load_option == "None" else ghost_load_option
+        if ghost_load:
+            st.caption(f"Ghost overlay active: {ui_name(ghost_load)} is shown in gray on Loads Analysis diagrams where the chart type supports an overlay.")
 
         load_heatmap = px.density_heatmap(
             df_loads,
@@ -13673,6 +13930,7 @@ with tab4:
             coloraxis_colorbar=dict(title=selected_load),
             height=700,
         )
+        load_heatmap = _loads_add_ghost_contour(load_heatmap, df_loads, ghost_load)
 
         sum_load = pd.to_numeric(df_loads[selected_load], errors="coerce")  # ensure numeric
         total_load_selected = sum_load.sum()
@@ -13699,11 +13957,26 @@ with tab4:
         )
 
         key = selected_load.replace("_load", "")  # in case the name still has the suffix
-        bar_color = color_map_loads.get(key, color_map.get(key, "#c02419"))  # fallback color
+        bar_color = _loads_color_for(key, "#c02419")  # fallback color
 
         monthly_total_load_bar.update_traces(textfont_size=14, textfont_color="white")
 
-        monthly_total_load_bar.update_traces(marker_color=bar_color, name=selected_load, showlegend=True)
+        monthly_total_load_bar.update_traces(marker_color=bar_color, name=ui_name(selected_load), showlegend=True, opacity=0.95)
+        if ghost_load:
+            ghost_totals_by_month = df_loads.groupby("month", as_index=False)[ghost_load].sum()
+            ghost_totals_by_month["month"] = pd.Categorical(ghost_totals_by_month["month"], ordered=True)
+            ghost_totals_by_month = ghost_totals_by_month.sort_values("month")
+            monthly_total_load_bar.add_trace(go.Bar(
+                x=ghost_totals_by_month["month"],
+                y=ghost_totals_by_month[ghost_load],
+                name=f"{ui_name(ghost_load)} (ghost)",
+                marker=dict(color=LOAD_GHOST_COLOR),
+                opacity=0.35,
+                text=[f"{v:,.0f}" for v in ghost_totals_by_month[ghost_load]],
+                textposition="outside",
+                hovertemplate=f"<b>{ui_name(ghost_load)} (ghost)</b><br>Month %{{x}}<br>Load %{{y:,.0f}} kWh<extra></extra>",
+            ))
+            monthly_total_load_bar.update_layout(barmode="overlay")
         monthly_total_load_bar.update_layout(showlegend=True, legend=dict(title=""))
 
         col1, col2 = st.columns([3, 1])
@@ -13748,6 +14021,28 @@ with tab4:
             coloraxis_colorbar=dict(title="Exceed"),
             height=700
         )
+        if ghost_load:
+            try:
+                df_ghost_bool = df_loads.copy()
+                df_ghost_bool["ghost_exceed"] = (pd.to_numeric(df_ghost_bool[ghost_load], errors="coerce") > thr).astype(int)
+                ghost_exceed_piv = _loads_pivot_hour_doy(df_ghost_bool, "ghost_exceed")
+                if not ghost_exceed_piv.empty:
+                    exceed_heatmap.add_trace(go.Heatmap(
+                        x=ghost_exceed_piv.columns.astype(float),
+                        y=ghost_exceed_piv.index.astype(float),
+                        z=ghost_exceed_piv.values,
+                        name=f"{ui_name(ghost_load)} (ghost)",
+                        colorscale=[[0.0, "rgba(0,0,0,0)"], [1.0, "rgba(120,120,120,0.55)"]],
+                        showscale=False,
+                        opacity=0.40,
+                        hovertemplate=(
+                            f"<b>{ui_name(ghost_load)} (ghost)</b><br>"
+                            "DOY %{x}<br>Hour %{y}<br>Above threshold: %{z}<extra></extra>"
+                        ),
+                    ))
+                    exceed_heatmap.update_layout(showlegend=True)
+            except Exception:
+                pass
         st_plotly_chart(exceed_heatmap, use_container_width=True)
 
         st.caption(f"Total Exceeded Hours {total_exceedance:,.1f}")
@@ -13795,10 +14090,13 @@ with tab4:
             date_label = f"{month_val} {int(day_val)} (DOY {peak_doy})"
 
         # --- Hourly profile for that peak day ---
-        day_profile = (df_loads.loc[df_loads["doy"] == peak_doy, ["hour", selected_load]]
+        profile_cols = ["hour", selected_load] + ([ghost_load] if ghost_load else [])
+        day_profile = (df_loads.loc[df_loads["doy"] == peak_doy, profile_cols]
                        .copy())
         day_profile["hour"] = pd.to_numeric(day_profile["hour"], errors="coerce")
         day_profile[selected_load] = pd.to_numeric(day_profile[selected_load], errors="coerce")
+        if ghost_load:
+            day_profile[ghost_load] = pd.to_numeric(day_profile[ghost_load], errors="coerce")
         day_profile = day_profile.sort_values("hour")
 
         # --- Plot: x=hour, y=load (line + markers) ---
@@ -13807,24 +14105,63 @@ with tab4:
             x="hour",
             y=selected_load,
             markers=True,
-            title=f"Peak Day Profile — {selected_load} | {date_label}"
+            title=f"Peak Day Profile — {ui_name(selected_load)} | {date_label}"
         )
-        peak_day_fig.update_traces(line=dict(width=6, color=bar_color), marker=dict(size=12))
+        peak_day_fig.update_traces(line=dict(width=6, color=bar_color), marker=dict(size=12), name=ui_name(selected_load), showlegend=bool(ghost_load))
         peak_day_fig.update_layout(
             xaxis_title="Hour of Day",
-            yaxis_title=f"{selected_load} (kW)",
+            yaxis_title=f"{ui_name(selected_load)} (kW)",
             xaxis=dict(dtick=1),
             height=700,
-            showlegend=False
+            showlegend=bool(ghost_load)
         )
 
         r, g, b = pcolors.hex_to_rgb(bar_color)
         peak_day_fig.update_traces(marker_color=bar_color, fill="tozeroy",
                                    fillcolor=f"rgba({r},{g},{b},0.25)")
+        if ghost_load:
+            peak_day_fig.add_trace(go.Scatter(
+                x=day_profile["hour"],
+                y=day_profile[ghost_load],
+                mode="lines+markers",
+                name=f"{ui_name(ghost_load)} (ghost)",
+                line=dict(color=LOAD_GHOST_COLOR, width=4, dash="dash"),
+                marker=dict(color=LOAD_GHOST_COLOR, size=8),
+                opacity=0.62,
+                hovertemplate=f"<b>{ui_name(ghost_load)} (ghost)</b><br>Hour %{{x}}<br>Load %{{y:.2f}} kW<extra></extra>",
+            ))
 
-        st.subheader(f"Peak Day — {selected_load}")
+        st.subheader(f"Peak Day — {ui_name(selected_load)}")
         st_plotly_chart(peak_day_fig, use_container_width=True)
         st.caption(f"Daily Total on {date_label}: {peak_total:,.1f}")
+
+        # --- Typical day by month (average of all same-month days by hour) ---
+        exclude_weekends_typical = st.checkbox(
+            "Exclude weekend days from typical-day averaging",
+            value=False,
+            key=f"loads_typical_exclude_weekends_{selected_load}",
+            help="When enabled, Saturday and Sunday are excluded before averaging each hourly load profile within each month."
+        )
+        if exclude_weekends_typical and "weekday" not in df_loads.columns:
+            st.warning("Weekend exclusion requires a 'weekday' column in Loads_Balance. The typical-day diagram uses all days.")
+
+        typical_day_fig, typical_day_row_count = _loads_typical_day_profile_figure(
+            df_loads,
+            selected_load=selected_load,
+            ghost_load=ghost_load,
+            selected_color=bar_color,
+            exclude_weekends=bool(exclude_weekends_typical and "weekday" in df_loads.columns),
+        )
+        st.subheader(f"Typical Day by Month — {ui_name(selected_load)}")
+        if typical_day_row_count <= 0:
+            st.warning("No valid rows are available to calculate the typical-day monthly profiles.")
+        else:
+            st_plotly_chart(typical_day_fig, use_container_width=True)
+            _weekday_note = "weekdays only" if exclude_weekends_typical and "weekday" in df_loads.columns else "all days"
+            st.caption(
+                f"Each month profile is calculated as the average load for each hour across {_weekday_note} in that month. "
+                "The 24-hour curve is positioned within the month slot; hover over markers to see the hour."
+            )
 
         # --- Load Duration Curve (percentage of hours vs load) ---
         # Ensure numeric and drop NaNs
@@ -13847,18 +14184,31 @@ with tab4:
             y=f"{selected_load} (kW)",
             title=f"Load Duration Curve — {selected_load}"
         )
-        ldc_fig.update_traces(line=dict(width=6, color=bar_color))
+        ldc_fig.update_traces(line=dict(width=6, color=bar_color), name=ui_name(selected_load), showlegend=bool(ghost_load))
         r, g, b = pcolors.hex_to_rgb(bar_color)
         ldc_fig.update_traces(fill="tozeroy", fillcolor=f"rgba({r},{g},{b},0.25)")
+        if ghost_load:
+            ghost_ldc_vals = pd.to_numeric(df_loads[ghost_load], errors="coerce").dropna()
+            ghost_ldc_sorted = ghost_ldc_vals.sort_values(ascending=False).reset_index(drop=True)
+            ghost_ldc_pct = (np.arange(1, len(ghost_ldc_sorted) + 1) / len(ghost_ldc_sorted)) * 100 if len(ghost_ldc_sorted) else []
+            ldc_fig.add_trace(go.Scatter(
+                x=ghost_ldc_pct,
+                y=ghost_ldc_sorted.values,
+                mode="lines",
+                name=f"{ui_name(ghost_load)} (ghost)",
+                line=dict(width=4, color=LOAD_GHOST_COLOR, dash="dash"),
+                opacity=0.62,
+                hovertemplate=f"<b>{ui_name(ghost_load)} (ghost)</b><br>Hours %{{x:.1f}}%<br>Load %{{y:.2f}} kW<extra></extra>",
+            ))
         ldc_fig.update_layout(
             xaxis_title="Percentage of Hours (%)",
-            yaxis_title=f"{selected_load} (kW)",
+            yaxis_title=f"{ui_name(selected_load)} (kW)",
             xaxis=dict(range=[0, 100], dtick=10, ticksuffix="%"),
             height=700,
-            showlegend=False
+            showlegend=bool(ghost_load)
         )
 
-        st.subheader(f"Load Duration Curve — {selected_load}")
+        st.subheader(f"Load Duration Curve — {ui_name(selected_load)}")
         st_plotly_chart(ldc_fig, use_container_width=True)
 
         # -------------------------
@@ -13938,7 +14288,18 @@ with tab4:
 
                 fig_pv = go.Figure()
                 fig_pv.add_trace(go.Scatter(x=day_profile["hour"], y=day_profile[selected_load], mode="lines+markers",
-                                            name="Load", line=dict(color=bar_color, width=6)))
+                                            name=ui_name(selected_load), line=dict(color=bar_color, width=6)))
+                if ghost_load:
+                    fig_pv.add_trace(go.Scatter(
+                        x=day_profile["hour"],
+                        y=day_profile[ghost_load],
+                        mode="lines+markers",
+                        name=f"{ui_name(ghost_load)} (ghost)",
+                        line=dict(color=LOAD_GHOST_COLOR, width=4, dash="dash"),
+                        marker=dict(color=LOAD_GHOST_COLOR, size=7),
+                        opacity=0.55,
+                        hovertemplate=f"<b>{ui_name(ghost_load)} (ghost)</b><br>Hour %{{x}}<br>Load %{{y:.2f}} kW<extra></extra>",
+                    ))
                 fig_pv.add_trace(go.Scatter(x=pv_day["hour"], y=pv_day[pv_col], mode="lines+markers",
                                             name=ONSITE_GENERATION_LABEL,
                                             line=dict(color=color_map.get("On-site_Generation", "#a9c724"), width=5,
@@ -13946,7 +14307,7 @@ with tab4:
                 fig_pv.add_trace(go.Scatter(x=day_profile["hour"], y=net_day, mode="lines",
                                             name="Net import", line=dict(color="black", width=5)))
                 fig_pv.update_layout(
-                    title=f"On-site Generation Matching on Peak Day — {selected_load} | {date_label}",
+                    title=f"On-site Generation Matching on Peak Day — {ui_name(selected_load)} | {date_label}",
                     xaxis_title="Hour of Day",
                     yaxis_title="kW",
                     xaxis=dict(dtick=1),
