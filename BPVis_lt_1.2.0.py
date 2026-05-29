@@ -65,7 +65,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.2.51",
+    page_title="WSGT_BPVis_ENE 2.3.0",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -647,7 +647,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.2.51")
+st.sidebar.write("Version 2.3.0")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2940,7 +2940,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.2.51"
+REPORT_VERSION = "2.3.0"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -4734,7 +4734,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     end_uses = [str(c) for c in base_df.columns if str(c) != "Month"]
     active_name, payload = _report_active_payload(end_uses)
     df_energy = get_energy_balance_df(file_bytes, filename, scenario_name=active_name)
-    df_loads = get_loads_balance_df(file_bytes, filename)
+    df_loads = get_loads_balance_df(file_bytes, filename, scenario_name=active_name)
 
     project_name_r = str(st.session_state.get("project_name", "Building Performance Dashboard") or "Building Performance Dashboard")
     project_area_r = float(st.session_state.get("project_area", 0.0) or 0.0)
@@ -9325,7 +9325,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_2_51.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_3_0.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -9334,7 +9334,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_2_51.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_3_0.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -14714,6 +14714,91 @@ with tab4:
         st.subheader(f"Peak Day — {ui_name(selected_load)}")
         st_plotly_chart(peak_day_fig, use_container_width=True)
         st.caption(f"Daily Total on {date_label}: {peak_total:,.1f}")
+
+
+        # --- Peak moment day (by highest hourly value of the selected load) ---
+        peak_moment_source = df_loads.loc[:, [c for c in ["doy", "hour", "month", "day", selected_load] if c in df_loads.columns]].copy()
+        peak_moment_source["doy"] = pd.to_numeric(peak_moment_source.get("doy"), errors="coerce")
+        peak_moment_source["hour"] = pd.to_numeric(peak_moment_source.get("hour"), errors="coerce")
+        peak_moment_source[selected_load] = pd.to_numeric(peak_moment_source[selected_load], errors="coerce")
+        peak_moment_source = peak_moment_source.dropna(subset=["doy", "hour", selected_load]).copy()
+
+        if peak_moment_source.empty:
+            st.warning("No valid hourly load values are available to calculate the peak-moment day profile.")
+        else:
+            peak_moment_idx = peak_moment_source[selected_load].idxmax()
+            peak_moment_doy = int(peak_moment_source.loc[peak_moment_idx, "doy"])
+            peak_moment_hour = float(peak_moment_source.loc[peak_moment_idx, "hour"])
+            peak_moment_value = float(peak_moment_source.loc[peak_moment_idx, selected_load])
+
+            peak_moment_date_label = f"DOY {peak_moment_doy}"
+            if {"month", "day"}.issubset(df_loads.columns):
+                try:
+                    _peak_moment_date_rows = df_loads.loc[df_loads["doy"] == peak_moment_doy]
+                    if not _peak_moment_date_rows.empty:
+                        month_val_moment = _peak_moment_date_rows["month"].iloc[0]
+                        day_val_moment = _peak_moment_date_rows["day"].iloc[0]
+                        if pd.api.types.is_numeric_dtype(type(month_val_moment)) or str(month_val_moment).isdigit():
+                            month_order = ["January", "February", "March", "April", "May", "June",
+                                           "July", "August", "September", "October", "November", "December"]
+                            month_map = dict(enumerate(month_order, start=1))
+                            try:
+                                month_val_moment = month_map[int(month_val_moment)]
+                            except Exception:
+                                pass
+                        peak_moment_date_label = f"{month_val_moment} {int(day_val_moment)} (DOY {peak_moment_doy})"
+                except Exception:
+                    peak_moment_date_label = f"DOY {peak_moment_doy}"
+
+            peak_moment_day_profile = (df_loads.loc[df_loads["doy"] == peak_moment_doy, ["hour", selected_load]]
+                                       .copy())
+            peak_moment_day_profile["hour"] = pd.to_numeric(peak_moment_day_profile["hour"], errors="coerce")
+            peak_moment_day_profile[selected_load] = pd.to_numeric(peak_moment_day_profile[selected_load], errors="coerce")
+            peak_moment_day_profile = peak_moment_day_profile.dropna(subset=["hour", selected_load]).sort_values("hour")
+
+            ghost_peak_moment_day_profile = pd.DataFrame(columns=["hour", ghost_load] if ghost_load else ["hour"])
+            if ghost_load and {"doy", "hour", ghost_load}.issubset(df_ghost_loads.columns):
+                ghost_peak_moment_day_profile = (df_ghost_loads.loc[df_ghost_loads["doy"] == peak_moment_doy, ["hour", ghost_load]]
+                                                 .copy())
+                ghost_peak_moment_day_profile["hour"] = pd.to_numeric(ghost_peak_moment_day_profile["hour"], errors="coerce")
+                ghost_peak_moment_day_profile[ghost_load] = pd.to_numeric(ghost_peak_moment_day_profile[ghost_load], errors="coerce")
+                ghost_peak_moment_day_profile = ghost_peak_moment_day_profile.dropna(subset=["hour", ghost_load]).sort_values("hour")
+
+            peak_moment_day_fig = px.line(
+                peak_moment_day_profile,
+                x="hour",
+                y=selected_load,
+                markers=True,
+                title=f"Peak Moment Day Profile — {ui_name(selected_load)} | {peak_moment_date_label}"
+            )
+            peak_moment_day_fig.update_traces(line=dict(width=6, color=bar_color), marker=dict(size=12), name=ui_name(selected_load), showlegend=bool(ghost_load))
+            peak_moment_day_fig.update_layout(
+                xaxis_title="Hour of Day",
+                yaxis_title=f"{ui_name(selected_load)} (kW)",
+                xaxis=dict(dtick=1),
+                height=700,
+                showlegend=bool(ghost_load)
+            )
+
+            r, g, b = pcolors.hex_to_rgb(bar_color)
+            peak_moment_day_fig.update_traces(marker_color=bar_color, fill="tozeroy",
+                                              fillcolor=f"rgba({r},{g},{b},0.25)")
+            if ghost_load and not ghost_peak_moment_day_profile.empty:
+                peak_moment_day_fig.add_trace(go.Scatter(
+                    x=ghost_peak_moment_day_profile["hour"],
+                    y=ghost_peak_moment_day_profile[ghost_load],
+                    mode="lines+markers",
+                    name=ghost_label,
+                    line=dict(color=LOAD_GHOST_COLOR, width=4, dash="dash"),
+                    marker=dict(color=LOAD_GHOST_COLOR, size=8),
+                    opacity=0.62,
+                    hovertemplate=f"<b>{ghost_label}</b><br>Hour %{{x}}<br>Load %{{y:.2f}} kW<extra></extra>",
+                ))
+
+            st.subheader(f"Peak Moment Day — {ui_name(selected_load)}")
+            st_plotly_chart(peak_moment_day_fig, use_container_width=True)
+            _peak_hour_label = f"{int(peak_moment_hour)}" if float(peak_moment_hour).is_integer() else f"{peak_moment_hour:.1f}"
+            st.caption(f"Highest hourly load on {peak_moment_date_label}: {peak_moment_value:,.1f} kW at hour {_peak_hour_label}.")
 
         # --- Typical day by month (average of all same-month days by hour) ---
         exclude_weekends_typical = st.checkbox(
