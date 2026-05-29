@@ -65,7 +65,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.3.0",
+    page_title="WSGT_BPVis_ENE 2.3.1",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -647,7 +647,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.3.0")
+st.sidebar.write("Version 2.3.1")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2940,7 +2940,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.3.0"
+REPORT_VERSION = "2.3.1"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9325,7 +9325,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_3_0.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_3_1.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -9334,7 +9334,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_3_0.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_3_1.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -14256,6 +14256,82 @@ def _loads_ghost_trace_label(ghost_load: Optional[str], ghost_scenario: Optional
     return f"{load_label} (ghost)"
 
 
+def _loads_daily_total_for_doy(df_in: pd.DataFrame, doy_value, load_col: str) -> float:
+    """Return the daily load sum for one day-of-year in kWh-equivalent hourly sum."""
+    try:
+        if df_in is None or df_in.empty or load_col not in df_in.columns or "doy" not in df_in.columns:
+            return 0.0
+        work = df_in[["doy", load_col]].copy()
+        work["doy"] = pd.to_numeric(work["doy"], errors="coerce")
+        work[load_col] = pd.to_numeric(work[load_col], errors="coerce")
+        target_doy = float(doy_value)
+        return float(work.loc[work["doy"] == target_doy, load_col].sum())
+    except Exception:
+        return 0.0
+
+
+def _loads_daily_profile_customdata(profile_df: pd.DataFrame, daily_total_kwh: float, date_label: str) -> np.ndarray:
+    """Return customdata columns used by daily load-profile hover templates."""
+    try:
+        n = len(profile_df) if profile_df is not None else 0
+    except Exception:
+        n = 0
+    return np.column_stack([
+        np.full(n, float(daily_total_kwh), dtype=float),
+        np.full(n, str(date_label), dtype=object),
+    ])
+
+
+def _loads_daily_profile_fill_trace(
+        profile_df: pd.DataFrame,
+        load_col: str,
+        fillcolor: str,
+        trace_label: str,
+        daily_total_kwh: float,
+        date_label: str,
+) -> Optional[go.Scatter]:
+    """Return a hoverable filled-area trace for daily load profiles.
+
+    Plotly's native ``fill="tozeroy"`` on a line trace does not reliably expose
+    the fill hover in Streamlit. This helper creates an explicit closed polygon
+    below the visible line so hovering anywhere on the coloured area can show
+    the daily energy sum.
+    """
+    try:
+        if profile_df is None or profile_df.empty or load_col not in profile_df.columns or "hour" not in profile_df.columns:
+            return None
+        area = profile_df[["hour", load_col]].copy()
+        area["hour"] = pd.to_numeric(area["hour"], errors="coerce")
+        area[load_col] = pd.to_numeric(area[load_col], errors="coerce")
+        area = area.dropna(subset=["hour", load_col]).sort_values("hour")
+        if area.empty:
+            return None
+        x_vals = area["hour"].astype(float).tolist()
+        y_vals = area[load_col].astype(float).tolist()
+        x_poly = x_vals + list(reversed(x_vals))
+        y_poly = y_vals + [0.0] * len(y_vals)
+        hover_text = (
+            f"<b>{trace_label}</b><br>"
+            f"{date_label}<br>"
+            f"Daily total load: {float(daily_total_kwh):,.1f} kWh"
+            "<extra></extra>"
+        )
+        return go.Scatter(
+            x=x_poly,
+            y=y_poly,
+            mode="none",
+            fill="toself",
+            fillcolor=fillcolor,
+            line=dict(color="rgba(0,0,0,0)", width=0),
+            name=f"{trace_label} daily area",
+            showlegend=False,
+            hoveron="fills",
+            hovertemplate=hover_text,
+        )
+    except Exception:
+        return None
+
+
 def _loads_add_ghost_contour(
         fig: go.Figure,
         df_loads: pd.DataFrame,
@@ -14696,10 +14772,32 @@ with tab4:
             showlegend=bool(ghost_load)
         )
 
+        peak_day_customdata = _loads_daily_profile_customdata(day_profile, peak_total, date_label)
         r, g, b = pcolors.hex_to_rgb(bar_color)
-        peak_day_fig.update_traces(marker_color=bar_color, fill="tozeroy",
-                                   fillcolor=f"rgba({r},{g},{b},0.25)")
+        peak_day_fig.update_traces(
+            marker_color=bar_color,
+            customdata=peak_day_customdata,
+            hovertemplate=(
+                f"<b>{ui_name(selected_load)}</b><br>"
+                "%{customdata[1]}<br>"
+                "Hour %{x:g}<br>"
+                "Load %{y:.2f} kW<br>"
+                "Daily total load: %{customdata[0]:,.1f} kWh<extra></extra>"
+            ),
+        )
+        peak_day_area_trace = _loads_daily_profile_fill_trace(
+            day_profile,
+            selected_load,
+            f"rgba({r},{g},{b},0.25)",
+            ui_name(selected_load),
+            peak_total,
+            date_label,
+        )
+        if peak_day_area_trace is not None:
+            peak_day_fig.add_trace(peak_day_area_trace)
+            peak_day_fig.data = (peak_day_fig.data[-1],) + peak_day_fig.data[:-1]
         if ghost_load and not ghost_day_profile.empty:
+            ghost_peak_day_total = _loads_daily_total_for_doy(df_ghost_loads, peak_doy, ghost_load)
             peak_day_fig.add_trace(go.Scatter(
                 x=ghost_day_profile["hour"],
                 y=ghost_day_profile[ghost_load],
@@ -14708,12 +14806,30 @@ with tab4:
                 line=dict(color=LOAD_GHOST_COLOR, width=4, dash="dash"),
                 marker=dict(color=LOAD_GHOST_COLOR, size=8),
                 opacity=0.62,
-                hovertemplate=f"<b>{ghost_label}</b><br>Hour %{{x}}<br>Load %{{y:.2f}} kW<extra></extra>",
+                customdata=_loads_daily_profile_customdata(ghost_day_profile, ghost_peak_day_total, date_label),
+                hovertemplate=(
+                    f"<b>{ghost_label}</b><br>"
+                    "%{customdata[1]}<br>"
+                    "Hour %{x:g}<br>"
+                    "Load %{y:.2f} kW<br>"
+                    "Daily total load: %{customdata[0]:,.1f} kWh<extra></extra>"
+                ),
             ))
 
         st.subheader(f"Peak Day — {ui_name(selected_load)}")
         st_plotly_chart(peak_day_fig, use_container_width=True)
-        st.caption(f"Daily Total on {date_label}: {peak_total:,.1f}")
+        st.caption(f"Load sum of presented Peak Day: {peak_total:,.1f} kWh.")
+        try:
+            _peak_day_hourly_idx = day_profile[selected_load].idxmax()
+            _peak_day_hourly_value = float(day_profile.loc[_peak_day_hourly_idx, selected_load])
+            _peak_day_hourly_hour = float(day_profile.loc[_peak_day_hourly_idx, "hour"])
+            _peak_day_hourly_hour_label = f"{int(_peak_day_hourly_hour)}" if float(_peak_day_hourly_hour).is_integer() else f"{_peak_day_hourly_hour:.1f}"
+            st.caption(
+                f"Peak daily load on {date_label}: {peak_total:,.1f} kWh. "
+                f"Highest hourly value in the presented day: {_peak_day_hourly_value:,.1f} kW at hour {_peak_day_hourly_hour_label}."
+            )
+        except Exception:
+            st.caption(f"Peak daily load on {date_label}: {peak_total:,.1f} kWh.")
 
 
         # --- Peak moment day (by highest hourly value of the selected load) ---
@@ -14780,10 +14896,37 @@ with tab4:
                 showlegend=bool(ghost_load)
             )
 
+            peak_moment_day_total = _loads_daily_total_for_doy(df_loads, peak_moment_doy, selected_load)
+            peak_moment_day_customdata = _loads_daily_profile_customdata(
+                peak_moment_day_profile,
+                peak_moment_day_total,
+                peak_moment_date_label,
+            )
             r, g, b = pcolors.hex_to_rgb(bar_color)
-            peak_moment_day_fig.update_traces(marker_color=bar_color, fill="tozeroy",
-                                              fillcolor=f"rgba({r},{g},{b},0.25)")
+            peak_moment_day_fig.update_traces(
+                marker_color=bar_color,
+                customdata=peak_moment_day_customdata,
+                hovertemplate=(
+                    f"<b>{ui_name(selected_load)}</b><br>"
+                    "%{customdata[1]}<br>"
+                    "Hour %{x:g}<br>"
+                    "Load %{y:.2f} kW<br>"
+                    "Daily total load: %{customdata[0]:,.1f} kWh<extra></extra>"
+                ),
+            )
+            peak_moment_day_area_trace = _loads_daily_profile_fill_trace(
+                peak_moment_day_profile,
+                selected_load,
+                f"rgba({r},{g},{b},0.25)",
+                ui_name(selected_load),
+                peak_moment_day_total,
+                peak_moment_date_label,
+            )
+            if peak_moment_day_area_trace is not None:
+                peak_moment_day_fig.add_trace(peak_moment_day_area_trace)
+                peak_moment_day_fig.data = (peak_moment_day_fig.data[-1],) + peak_moment_day_fig.data[:-1]
             if ghost_load and not ghost_peak_moment_day_profile.empty:
+                ghost_peak_moment_day_total = _loads_daily_total_for_doy(df_ghost_loads, peak_moment_doy, ghost_load)
                 peak_moment_day_fig.add_trace(go.Scatter(
                     x=ghost_peak_moment_day_profile["hour"],
                     y=ghost_peak_moment_day_profile[ghost_load],
@@ -14792,13 +14935,28 @@ with tab4:
                     line=dict(color=LOAD_GHOST_COLOR, width=4, dash="dash"),
                     marker=dict(color=LOAD_GHOST_COLOR, size=8),
                     opacity=0.62,
-                    hovertemplate=f"<b>{ghost_label}</b><br>Hour %{{x}}<br>Load %{{y:.2f}} kW<extra></extra>",
+                    customdata=_loads_daily_profile_customdata(
+                        ghost_peak_moment_day_profile,
+                        ghost_peak_moment_day_total,
+                        peak_moment_date_label,
+                    ),
+                    hovertemplate=(
+                        f"<b>{ghost_label}</b><br>"
+                        "%{customdata[1]}<br>"
+                        "Hour %{x:g}<br>"
+                        "Load %{y:.2f} kW<br>"
+                        "Daily total: %{customdata[0]:,.1f} kWh<extra></extra>"
+                    ),
                 ))
 
             st.subheader(f"Peak Moment Day — {ui_name(selected_load)}")
             st_plotly_chart(peak_moment_day_fig, use_container_width=True)
+            st.caption(f"Load sum of presented Peak Load Day: {peak_moment_day_total:,.1f} kWh.")
             _peak_hour_label = f"{int(peak_moment_hour)}" if float(peak_moment_hour).is_integer() else f"{peak_moment_hour:.1f}"
-            st.caption(f"Highest hourly load on {peak_moment_date_label}: {peak_moment_value:,.1f} kW at hour {_peak_hour_label}.")
+            st.caption(
+                f"Highest hourly load on {peak_moment_date_label}: {peak_moment_value:,.1f} kW at hour {_peak_hour_label}. "
+                f"Daily total load of the presented day: {peak_moment_day_total:,.1f} kWh."
+            )
 
         # --- Typical day by month (average of all same-month days by hour) ---
         exclude_weekends_typical = st.checkbox(
