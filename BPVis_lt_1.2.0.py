@@ -65,7 +65,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.3.1",
+    page_title="WSGT_BPVis_ENE 2.3.2",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -647,7 +647,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.3.1")
+st.sidebar.write("Version 2.3.2")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -2940,7 +2940,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.3.1"
+REPORT_VERSION = "2.3.2"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -14629,7 +14629,52 @@ with tab4:
             monthly_total_load_bar.update_layout(barmode="overlay")
         monthly_total_load_bar.update_layout(showlegend=True, legend=dict(title=""))
 
-        col1, col2 = st.columns([3, 1])
+        annual_total_load_fig = go.Figure()
+        annual_total_load_fig.add_trace(go.Bar(
+            x=["Active"],
+            y=[float(total_load_selected)],
+            name=ui_name(selected_load),
+            marker=dict(color=bar_color),
+            text=[f"{float(total_load_selected):,.0f}"],
+            textposition="auto",
+            hovertemplate=(
+                f"<b>{ui_name(selected_load)}</b><br>"
+                f"Scenario: {active_scenario_loads}<br>"
+                "Annual load: %{y:,.0f} kWh<extra></extra>"
+            ),
+            showlegend=False,
+        ))
+        if ghost_load:
+            try:
+                ghost_annual_total_load = float(pd.to_numeric(df_ghost_loads[ghost_load], errors="coerce").sum())
+                annual_total_load_fig.add_trace(go.Bar(
+                    x=["Ghost"],
+                    y=[ghost_annual_total_load],
+                    name=ghost_label,
+                    marker=dict(color=LOAD_GHOST_COLOR),
+                    opacity=0.45,
+                    text=[f"{ghost_annual_total_load:,.0f}"],
+                    textposition="auto",
+                    hovertemplate=(
+                        f"<b>{ghost_label}</b><br>"
+                        "Annual load: %{y:,.0f} kWh<extra></extra>"
+                    ),
+                    showlegend=False,
+                ))
+                annual_total_load_fig.update_layout(barmode="group")
+            except Exception:
+                pass
+        annual_total_load_fig.update_layout(
+            xaxis_title="",
+            yaxis_title="kWh/a",
+            height=700,
+            showlegend=False,
+            margin=dict(l=40, r=10, t=45, b=45),
+            title=dict(text="Annual Total", x=0.5, xanchor="center"),
+        )
+        annual_total_load_fig.update_yaxes(tickformat=",.0f")
+
+        col1, col2, col3 = st.columns([4, 1, 1])
 
         with col1:
 
@@ -14637,6 +14682,11 @@ with tab4:
             st_plotly_chart(monthly_total_load_bar, use_container_width=True)
 
         with col2:
+
+            st.subheader("Annual Total")
+            st_plotly_chart(annual_total_load_fig, use_container_width=True)
+
+        with col3:
 
             st.subheader("Load KPI's")
             st.metric("Total Load", f"{total_load_selected:,.0f} kWh")
