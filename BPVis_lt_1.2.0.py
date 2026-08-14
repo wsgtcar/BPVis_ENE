@@ -38,12 +38,12 @@ def _parse_float_locale(s, default):
         return float(default)
 
 
-def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None, help=None):
+def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None, help=None, disabled=False):
     txt_key = f"{key}_txt"
     if txt_key not in st.session_state:
         st.session_state[txt_key] = (fmt.format(default) if fmt else str(default)) if hasattr(fmt, "format") else (
                 fmt or str(default))
-    val = st.text_input(label, key=txt_key, help=help)
+    val = st.text_input(label, key=txt_key, help=help, disabled=disabled)
     v = _parse_float_locale(val, default)
     if (min_value is not None) and (v < min_value):
         v = min_value
@@ -65,7 +65,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.4.1",
+    page_title="WSGT_BPVis_ENE 2.4.2",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -78,7 +78,9 @@ AUTH_USERS_FILENAME = "users.xlsx"
 AUTH_SESSION_KEY = "_bpvis_authenticated"
 AUTH_EMAIL_KEY = "_bpvis_authenticated_email"
 AUTH_EXPIRY_KEY = "_bpvis_authenticated_expiration_date"
-AUTH_REQUIRED_COLUMNS = {"email", "password", "expiration_date"}
+AUTH_MODE_KEY = "_bpvis_authenticated_access_mode"
+AUTH_REQUIRED_COLUMNS = {"email", "password", "expiration_date", "access_mode"}
+AUTH_ACCESS_MODES = {"edit mode", "viewer mode"}
 
 
 def _auth_app_dir() -> Path:
@@ -169,6 +171,23 @@ def _auth_clean_cell(value) -> str:
     return str(value).strip()
 
 
+def _auth_normalize_access_mode(value) -> str:
+    """Normalize access mode values from users.xlsx and fail closed on invalid entries."""
+    raw = _auth_clean_cell(value).strip().lower()
+    aliases = {
+        "edit": "edit mode",
+        "editor": "edit mode",
+        "edit mode": "edit mode",
+        "viewer": "viewer mode",
+        "view": "viewer mode",
+        "viewer mode": "viewer mode",
+    }
+    mode = aliases.get(raw, raw)
+    if mode not in AUTH_ACCESS_MODES:
+        raise ValueError("access_mode must be either 'edit mode' or 'viewer mode'")
+    return mode
+
+
 def _auth_parse_expiration_date(value):
     """Return a Python date for expiration_date cells, or None for no expiration.
 
@@ -249,7 +268,7 @@ def _auth_format_expiration(expiration_date) -> str:
 def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
     """Load login users from users.xlsx.
 
-    Required columns are: email, password, expiration_date.
+    Required columns are: email, password, expiration_date, access_mode.
     The mtime argument is intentionally part of the cache key so edits to the
     workbook are picked up after saving the file.
     """
@@ -258,13 +277,29 @@ def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
     missing = AUTH_REQUIRED_COLUMNS.difference(set(df_users.columns))
     if missing:
         raise ValueError(
-            "users.xlsx must contain the columns: email, password, expiration_date. "
+            "users.xlsx must contain the columns: email, password, expiration_date, access_mode. "
             f"Missing: {', '.join(sorted(missing))}"
         )
 
-    df_users = df_users[["email", "password", "expiration_date"]].copy()
+    df_users = df_users[["email", "password", "expiration_date", "access_mode"]].copy()
     df_users["email"] = df_users["email"].apply(_auth_clean_cell).str.lower()
     df_users["password"] = df_users["password"].apply(_auth_clean_cell)
+
+    parsed_modes = []
+    invalid_mode_rows = []
+    for idx, row in df_users.iterrows():
+        # Ignore completely unused rows if Excel happens to preserve formatting below the user table.
+        if not _auth_clean_cell(row.get("email", "")) and not _auth_clean_cell(row.get("password", "")):
+            parsed_modes.append("viewer mode")
+            continue
+        try:
+            parsed_modes.append(_auth_normalize_access_mode(row.get("access_mode")))
+        except Exception as exc:
+            invalid_mode_rows.append(f"row {idx + 2} ({row.get('email', '')}): {exc}")
+            parsed_modes.append("viewer mode")
+    if invalid_mode_rows:
+        raise ValueError("Invalid access_mode value(s): " + "; ".join(invalid_mode_rows[:5]))
+    df_users["access_mode"] = parsed_modes
 
     parsed_expirations = []
     invalid_rows = []
@@ -284,70 +319,73 @@ def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
     return df_users
 
 
-def _auth_credentials_status(email: str, password: str) -> Tuple[bool, str, Optional[str]]:
-    """Validate credentials and return (is_valid, message, expiration_label)."""
+def _auth_credentials_status(email: str, password: str) -> Tuple[bool, str, Optional[str], Optional[str]]:
+    """Validate credentials and return (is_valid, message, expiration_label, access_mode)."""
     path = _auth_users_file_path()
     if not path.exists():
-        return False, "Login user file not found.", None
+        return False, "Login user file not found.", None, None
     try:
         users = _auth_load_users(str(path), path.stat().st_mtime)
     except Exception as exc:
-        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None
+        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None
 
     email_norm = str(email or "").strip().lower()
     password_norm = str(password or "")
     if not email_norm or not password_norm:
-        return False, "Invalid email or password.", None
+        return False, "Invalid email or password.", None, None
 
     email_rows = users.loc[users["email"] == email_norm].copy()
     if email_rows.empty:
-        return False, "Invalid email or password.", None
+        return False, "Invalid email or password.", None, None
 
     credential_rows = email_rows.loc[email_rows["password"].astype(str) == password_norm].copy()
     if credential_rows.empty:
-        return False, "Invalid email or password.", None
+        return False, "Invalid email or password.", None, None
 
     active_rows = credential_rows.loc[~credential_rows["is_expired"].astype(bool)].copy()
     if active_rows.empty:
         expirations = credential_rows["expiration_label"].dropna().astype(str).unique().tolist()
         exp_msg = expirations[0] if expirations else "the configured expiration date"
-        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg
+        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg, None
 
     expiration_label = str(active_rows.iloc[0].get("expiration_label", "No expiration"))
-    return True, "Login successful.", expiration_label
+    access_mode = _auth_normalize_access_mode(active_rows.iloc[0].get("access_mode", "viewer mode"))
+    return True, "Login successful.", expiration_label, access_mode
 
 
 def _auth_credentials_valid(email: str, password: str) -> bool:
     """Backwards-compatible bool wrapper for credential checks."""
-    ok, _, _ = _auth_credentials_status(email, password)
+    ok, _, _, _ = _auth_credentials_status(email, password)
     return ok
 
 
-def _auth_session_still_valid() -> Tuple[bool, str, Optional[str]]:
+def _auth_session_still_valid() -> Tuple[bool, str, Optional[str], Optional[str]]:
     """Re-check an already authenticated user against the current users.xlsx file."""
     email_norm = str(st.session_state.get(AUTH_EMAIL_KEY, "") or "").strip().lower()
     if not email_norm:
-        return False, "Session expired. Please log in again.", None
+        return False, "Session expired. Please log in again.", None, None
 
     path = _auth_users_file_path()
     if not path.exists():
-        return False, "Login user file not found. Please contact the app administrator.", None
+        return False, "Login user file not found. Please contact the app administrator.", None, None
     try:
         users = _auth_load_users(str(path), path.stat().st_mtime)
     except Exception as exc:
-        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None
+        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None
 
     rows = users.loc[users["email"] == email_norm].copy()
     if rows.empty:
-        return False, "This user is no longer authorized.", None
+        return False, "This user is no longer authorized.", None, None
     active_rows = rows.loc[~rows["is_expired"].astype(bool)].copy()
     if active_rows.empty:
         expirations = rows["expiration_label"].dropna().astype(str).unique().tolist()
         exp_msg = expirations[0] if expirations else "the configured expiration date"
-        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg
+        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg, None
     expiration_label = str(active_rows.iloc[0].get("expiration_label", "No expiration"))
+    access_mode = _auth_normalize_access_mode(active_rows.iloc[0].get("access_mode", "viewer mode"))
     st.session_state[AUTH_EXPIRY_KEY] = expiration_label
-    return True, "Session valid.", expiration_label
+    st.session_state[AUTH_MODE_KEY] = access_mode
+    return True, "Session valid.", expiration_label, access_mode
 
 
 def _render_login_page() -> None:
@@ -371,7 +409,7 @@ def _render_login_page() -> None:
             st.error("Login user file not found.")
             st.info(
                 _auth_users_file_help_text()
-                + " The workbook must contain the columns `email`, `password`, and `expiration_date`."
+                + " The workbook must contain the columns `email`, `password`, `expiration_date`, and `access_mode`."
             )
             st.stop()
 
@@ -379,7 +417,7 @@ def _render_login_page() -> None:
             # Validate file structure early so admins get an actionable message.
             _auth_load_users(str(users_path), users_path.stat().st_mtime)
         except Exception as exc:
-            st.error(f"Could not read `{AUTH_USERS_FILENAME}`. Required columns: `email`, `password`, `expiration_date`.")
+            st.error(f"Could not read `{AUTH_USERS_FILENAME}`. Required columns: `email`, `password`, `expiration_date`, `access_mode`.")
             st.caption(str(exc))
             st.stop()
 
@@ -389,11 +427,12 @@ def _render_login_page() -> None:
             submitted = st.form_submit_button("Login", use_container_width=True)
 
         if submitted:
-            ok, message, expiration_label = _auth_credentials_status(email, password)
+            ok, message, expiration_label, access_mode = _auth_credentials_status(email, password)
             if ok:
                 st.session_state[AUTH_SESSION_KEY] = True
                 st.session_state[AUTH_EMAIL_KEY] = str(email).strip().lower()
                 st.session_state[AUTH_EXPIRY_KEY] = expiration_label or "No expiration"
+                st.session_state[AUTH_MODE_KEY] = access_mode or "viewer mode"
                 st.rerun()
             else:
                 st.error(message)
@@ -404,13 +443,23 @@ def _render_login_page() -> None:
 if not st.session_state.get(AUTH_SESSION_KEY, False):
     _render_login_page()
 else:
-    _ok_session, _session_msg, _session_exp = _auth_session_still_valid()
+    _ok_session, _session_msg, _session_exp, _session_mode = _auth_session_still_valid()
     if not _ok_session:
         st.session_state[AUTH_SESSION_KEY] = False
         st.session_state.pop(AUTH_EMAIL_KEY, None)
         st.session_state.pop(AUTH_EXPIRY_KEY, None)
+        st.session_state.pop(AUTH_MODE_KEY, None)
         st.error(_session_msg)
         _render_login_page()
+
+# Viewer / edit permission state. Invalid or missing state fails closed to Viewer Mode.
+CURRENT_ACCESS_MODE = str(st.session_state.get(AUTH_MODE_KEY, "viewer mode") or "viewer mode").strip().lower()
+IS_VIEWER_MODE = CURRENT_ACCESS_MODE == "viewer mode"
+VIEWER_PERMISSION_HELP = "You don't have permission to edit it"
+
+def _viewer_widget_help(existing_help=None):
+    """Return the permission tooltip in Viewer Mode, otherwise preserve the original widget help."""
+    return VIEWER_PERMISSION_HELP if IS_VIEWER_MODE else existing_help
 
 # Centralized categorical orders (used across charts)
 MONTH_ORDER = [
@@ -687,18 +736,21 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.4.1")
+st.sidebar.write("Version 2.4.2")
+if IS_VIEWER_MODE:
+    st.sidebar.write("**Viewer Mode**")
 
-st.sidebar.markdown("### Download Template")
-template_path = Path("templates/energy_database_complete_template.xlsx")
-if template_path.exists():
-    with open(template_path, "rb") as file:
-        st.sidebar.download_button(
-            label="Download Excel Template",
-            data=file.read(),
-            file_name="../../Downloads/energy_database_complete_template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+if not IS_VIEWER_MODE:
+    st.sidebar.markdown("### Download Template")
+    template_path = Path("templates/energy_database_complete_template.xlsx")
+    if template_path.exists():
+        with open(template_path, "rb") as file:
+            st.sidebar.download_button(
+                label="Download Excel Template",
+                data=file.read(),
+                file_name="../../Downloads/energy_database_complete_template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 st.sidebar.markdown("---")
 st.sidebar.write("### Upload Data")
@@ -3040,7 +3092,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.4.1"
+REPORT_VERSION = "2.4.2"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -8613,9 +8665,21 @@ st.title(st.session_state["project_name"])
 # =========================
 # Tabs
 # =========================
-tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab_lcc, tab7, tab_model_qa, tab8 = st.tabs(
-    ["Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)", "Energy Cost (with Factors)", "Loads Analysis", "Benchmark",
-     "CRREM-Analysis", "LCC-Analysis", "Scenarios", "Model Inputs QA", "Raw Data"])
+if IS_VIEWER_MODE:
+    # Viewer Mode exposes only the nine analysis/comparison tabs. Edit-only tabs are not created.
+    tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab_lcc, tab7 = st.tabs(
+        ["Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)", "Energy Cost (with Factors)", "Loads Analysis", "Benchmark",
+         "CRREM-Analysis", "LCC-Analysis", "Scenarios"]
+    )
+    # Dummy empty containers keep the existing downstream `with tab_...` blocks structurally intact.
+    # Their bodies are permission-gated and render nothing in Viewer Mode.
+    tab_model_qa = st.container()
+    tab8 = st.container()
+else:
+    tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab_lcc, tab7, tab_model_qa, tab8 = st.tabs(
+        ["Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)", "Energy Cost (with Factors)", "Loads Analysis", "Benchmark",
+         "CRREM-Analysis", "LCC-Analysis", "Scenarios", "Model Inputs QA", "Raw Data"]
+    )
 
 # =========================
 # Tab 1 — Energy Balance (Energy Balance Tab)
@@ -8794,7 +8858,7 @@ with tab1:
                 st.rerun()
 
             # Scenario actions (stacked vertically for clarity)
-            if st.button("New", use_container_width=True, key="scenario_btn_new"):
+            if st.button("New", use_container_width=True, key="scenario_btn_new", disabled=IS_VIEWER_MODE, help=_viewer_widget_help()) :
                 _save_current_scenario_payload(current_active)
                 base_name = "Scenario"
                 n = 1
@@ -8829,7 +8893,7 @@ with tab1:
                 _activate_scenario(new_name)
                 st.rerun()
 
-            if st.button("Duplicate", use_container_width=True, key="scenario_btn_duplicate"):
+            if st.button("Duplicate", use_container_width=True, key="scenario_btn_duplicate", disabled=IS_VIEWER_MODE, help=_viewer_widget_help()) :
                 _save_current_scenario_payload(current_active)
                 base_name = f"{current_active} Copy"
                 new_name = base_name
@@ -8866,8 +8930,8 @@ with tab1:
                 _activate_scenario(new_name)
                 st.rerun()
 
-            rename_to = st.text_input("Rename to", value="", key="scenario_rename_to")
-            if st.button("Rename", use_container_width=True, key="scenario_btn_rename"):
+            rename_to = st.text_input("Rename to", value="", key="scenario_rename_to", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
+            if st.button("Rename", use_container_width=True, key="scenario_btn_rename", disabled=IS_VIEWER_MODE, help=_viewer_widget_help()) :
                 rename_to_clean = str(rename_to).strip()
                 if rename_to_clean and rename_to_clean not in scenarios and current_active in scenarios:
                     _save_current_scenario_payload(current_active)
@@ -8919,7 +8983,7 @@ with tab1:
                 elif rename_to_clean in scenarios:
                     st.warning("A scenario with this name already exists.")
 
-            if st.button("Delete", use_container_width=True, key="scenario_btn_delete"):
+            if st.button("Delete", use_container_width=True, key="scenario_btn_delete", disabled=IS_VIEWER_MODE, help=_viewer_widget_help()) :
                 if len(scenarios) > 1 and current_active in scenarios:
                     # Choose the next available scenario in the current ordering.
                     old_names = list(scenarios.keys())
@@ -8981,8 +9045,8 @@ with tab1:
                 default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
 
             # keep title reactive via session_state
-            project_name = st.text_input("Project Name", value=str(default_name), key="project_name")
-            project_area = numeric_input("Project Area", float(default_area), key="project_area", min_value=0.0)
+            project_name = st.text_input("Project Name", value=str(default_name), key="project_name", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
+            project_area = numeric_input("Project Area", float(default_area), key="project_area", min_value=0.0, disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
             default_year = st.session_state.get("project_year")
             if default_year is None:
@@ -8998,6 +9062,8 @@ with tab1:
                 step=1,
                 format="%d",
                 key="project_year",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
             )
 
             # Country (CRREM-aligned). Stored as full name. Default: Germany.
@@ -9016,6 +9082,8 @@ with tab1:
                 index=(country_options.index(default_country) if (
                         country_options and default_country in country_options) else 0),
                 key="project_country",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
             )
 
             latitude = numeric_input(
@@ -9025,6 +9093,8 @@ with tab1:
                 min_value=-90.0,
                 max_value=90.0,
                 fmt="{:.6f}",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
             )
             longitude = numeric_input(
                 "Project Longitude",
@@ -9033,6 +9103,8 @@ with tab1:
                 min_value=-180.0,
                 max_value=180.0,
                 fmt="{:.6f}",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
             )
 
             # building use dropdown unchanged...
@@ -9041,7 +9113,7 @@ with tab1:
             building_use_index = building_use_options.index(
                 default_building_use) if default_building_use in building_use_options else 0
             building_use = st.selectbox("Building Use", building_use_options, index=building_use_index,
-                                        key="building_use")
+                                        key="building_use", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
@@ -9051,7 +9123,8 @@ with tab1:
             st.checkbox(
                 "Adopt CRREM Standard Electricity Emission Factors",
                 key="crrem_use_standard_electricity_ef",
-                help="If active, electricity uses the selected country's CRREM grid emission factor for the project year and follows the CRREM grid decarbonization pathway. Other sources still use user-entered initial factors."
+                help=_viewer_widget_help("If active, electricity uses the selected country's CRREM grid emission factor for the project year and follows the CRREM grid decarbonization pathway. Other sources still use user-entered initial factors."),
+                disabled=IS_VIEWER_MODE,
             )
 
             _crrem_elec_ef_preview = None
@@ -9089,20 +9162,22 @@ with tab1:
                 min_value=0.0,
                 max_value=1.0,
                 fmt="{:.5f}",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
             )
             co2_Emissions_Green_Electricity = numeric_input("CO2 Factor Green Electricity",
                                                             float(def_f.get("Green Electricity", 0.000)),
                                                             key="co2_Emissions_Green_Electricity", min_value=0.0,
-                                                            max_value=1.0, fmt="{:.5f}")
+                                                            max_value=1.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             co2_emissions_dh = numeric_input("CO2 Factor District Heating", float(def_f.get("District Heating", 0.260)),
-                                             key="co2_emissions_dh", min_value=0.0, max_value=1.0, fmt="{:.5f}")
+                                             key="co2_emissions_dh", min_value=0.0, max_value=1.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             co2_emissions_dc = numeric_input("CO2 Factor District Cooling", float(def_f.get("District Cooling", 0.280)),
-                                             key="co2_emissions_dc", min_value=0.0, max_value=1.0, fmt="{:.5f}")
+                                             key="co2_emissions_dc", min_value=0.0, max_value=1.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             co2_emissions_gas = numeric_input("CO2 Factor Gas", float(def_f.get("Gas", 0.180)), key="co2_emissions_gas",
-                                              min_value=0.0, max_value=1.0, fmt="{:.5f}")
+                                              min_value=0.0, max_value=1.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             co2_emissions_biomass = numeric_input("CO2 Factor Biomass", float(def_f.get("Biomass", 0.000)),
                                                   key="co2_emissions_biomass",
-                                                  min_value=0.0, max_value=5.0, fmt="{:.5f}")
+                                                  min_value=0.0, max_value=5.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
         # --- Energy Cost (€/kWh) ---
         with st.sidebar.expander("Energy Tariffs"):
@@ -9110,27 +9185,27 @@ with tab1:
             default_currency = preloaded["currency"] if (
                     preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
             currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency),
-                                           key="currency_symbol")
+                                           key="currency_symbol", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
             def_t = preloaded["tariffs"] if preloaded else {}
             cost_electricity = numeric_input(f"Cost Electricity ({currency_symbol}/kWh)",
                                              float(def_t.get("Electricity", 0.3500)), key="cost_electricity",
-                                             min_value=0.0, max_value=100.0, fmt="{:.5f}")
+                                             min_value=0.0, max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             cost_green_electricity = numeric_input(f"Cost Green Electricity ({currency_symbol}/kWh)",
                                                    float(def_t.get("Green Electricity", 0.4000)),
                                                    key="cost_green_electricity", min_value=0.0, max_value=100.0,
-                                                   fmt="{:.5f}")
+                                                   fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             cost_dh = numeric_input(f"Cost District Heating ({currency_symbol}/kWh)",
                                     float(def_t.get("District Heating", 0.1600)), key="cost_dh", min_value=0.0,
-                                    max_value=100.0, fmt="{:.5f}")
+                                    max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             cost_dc = numeric_input(f"Cost District Cooling ({currency_symbol}/kWh)",
                                     float(def_t.get("District Cooling", 0.1600)), key="cost_dc", min_value=0.0,
-                                    max_value=100.0, fmt="{:.5f}")
+                                    max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.1200)), key="cost_gas",
-                                     min_value=0.0, max_value=100.0, fmt="{:.5f}")
+                                     min_value=0.0, max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             cost_biomass = numeric_input(f"Cost Biomass ({currency_symbol}/kWh)", float(def_t.get("Biomass", 0.1000)),
                                          key="cost_biomass",
-                                         min_value=0.0, max_value=100.0, fmt="{:.5f}")
+                                         min_value=0.0, max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
         # ---- Sidebar: efficiency factors per End_Use (used in 'Energy Balance with Factors' tab)
         with st.sidebar.expander("Efficiency Factors"):
@@ -9144,6 +9219,8 @@ with tab1:
                     min_value=0.0001,
                     max_value=1000.0,
                     fmt="{:.5f}",
+                    disabled=IS_VIEWER_MODE,
+                    help=_viewer_widget_help(),
                 )
 
         # ---- Sidebar: map End_Use -> Energy_Source (user-controlled)
@@ -9165,6 +9242,8 @@ with tab1:
                     ENERGY_SOURCE_ORDER,
                     index=idx,
                     key=f"source_{use}",  # distinct widget keys
+                    disabled=IS_VIEWER_MODE,
+                    help=_viewer_widget_help(),
                 )
                 mapping_dict[use] = source
 
@@ -9242,7 +9321,7 @@ with tab1:
                 _tok_short = "default"
 
             # Reset button — restores original palettes defined in the app code
-            if st.button("Reset Colors", use_container_width=True, key=f"reset_colors_{_tok_short}"):
+            if st.button("Reset Colors", use_container_width=True, key=f"reset_colors_{_tok_short}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help()) :
                 st.session_state["color_map_enduse"] = dict(DEFAULT_COLOR_MAP)
                 st.session_state["color_map_sources"] = dict(DEFAULT_COLOR_MAP_SOURCES)
                 st.session_state["color_map_loads"] = dict(DEFAULT_COLOR_MAP_LOADS)
@@ -9263,7 +9342,7 @@ with tab1:
             for _eu in end_uses:
                 _key = f"cp_eu_{_tok_short}_{_k_safe(_eu)}"
                 _val = st.session_state["color_map_enduse"].get(_eu, _rand_hex(f"enduse::{_eu}"))
-                _new = st.color_picker(ui_name(str(_eu)), value=_val, key=_key)
+                _new = st.color_picker(ui_name(str(_eu)), value=_val, key=_key, disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
                 st.session_state["color_map_enduse"][_eu] = _new
 
             st.markdown("---")
@@ -9271,7 +9350,7 @@ with tab1:
             for _src in _sources_in_use:
                 _key = f"cp_src_{_tok_short}_{_k_safe(_src)}"
                 _val = st.session_state["color_map_sources"].get(_src, _rand_hex(f"source::{_src}"))
-                _new = st.color_picker(str(_src), value=_val, key=_key)
+                _new = st.color_picker(str(_src), value=_val, key=_key, disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
                 st.session_state["color_map_sources"][_src] = _new
 
             st.markdown("---")
@@ -9280,7 +9359,7 @@ with tab1:
                 for _ld in _load_cols:
                     _key = f"cp_ld_{_tok_short}_{_k_safe(_ld)}"
                     _val = st.session_state["color_map_loads"].get(_ld, _rand_hex(f"load::{_ld}"))
-                    _new = st.color_picker(ui_name(str(_ld)), value=_val, key=_key)
+                    _new = st.color_picker(ui_name(str(_ld)), value=_val, key=_key, disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
                     st.session_state["color_map_loads"][_ld] = _new
             else:
                 st.caption("No Loads_Balance sheet found (or no load columns detected).")
@@ -9291,7 +9370,7 @@ with tab1:
                 for _sc in _scenario_names_for_colors:
                     _key = f"cp_sc_{_tok_short}_{_k_safe(_sc)}"
                     _val = st.session_state["color_map_scenarios"].get(_sc, _rand_hex(f"scenario::{_sc}"))
-                    _new = st.color_picker(str(_sc), value=_val, key=_key)
+                    _new = st.color_picker(str(_sc), value=_val, key=_key, disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
                     st.session_state["color_map_scenarios"][_sc] = _new
             else:
                 st.caption("No scenarios found yet.")
@@ -9311,7 +9390,7 @@ with tab1:
 
         # ---- Save Project button (exports current inputs into the workbook)
         with st.sidebar:
-            if st.button("Save Project", use_container_width=True):
+            if (not IS_VIEWER_MODE) and st.button("Save Project", use_container_width=True):
                 # Ensure the active scenario payload is up-to-date (including CRREM measures)
                 try:
                     if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state[
@@ -9453,7 +9532,7 @@ with tab1:
 
 
             # ---- Generate Report button (active scenario only)
-            if st.button("Generate Report", use_container_width=True, key="btn_generate_report"):
+            if (not IS_VIEWER_MODE) and st.button("Generate Report", use_container_width=True, key="btn_generate_report"):
                 try:
                     with st.spinner("Generating A4 PDF report for the active scenario..."):
                         if "scenarios" in st.session_state and st.session_state.get("active_scenario") in st.session_state["scenarios"]:
@@ -9462,16 +9541,16 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_1.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_2.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
 
-            if st.session_state.get("_generated_report_pdf"):
+            if (not IS_VIEWER_MODE) and st.session_state.get("_generated_report_pdf"):
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_1.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_2.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -9727,7 +9806,7 @@ with tab1:
 # Tab 5b — Model Inputs QA
 # =========================
 with tab_model_qa:
-    if uploaded_file:
+    if (not IS_VIEWER_MODE) and uploaded_file:
         st.write("## Model Inputs QA")
         st.metric("Active Scenario", active_selected)
 
@@ -10495,7 +10574,7 @@ The QA is intended as traceability and model-quality control. It does not replac
             except Exception:
                 st.dataframe(qa_eval[qa_cols], use_container_width=True, height=560)
 
-    if not uploaded_file:
+    if (not IS_VIEWER_MODE) and (not uploaded_file):
         st.write("### ← Please upload data on sidebar")
 
 
@@ -10522,6 +10601,8 @@ with tab6:
                 _crrem_target_options,
                 index=_crrem_target_options.index(st.session_state.get("crrem_target_select", "1.5°C")),
                 key="crrem_target_select",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
             )
             target_id = "1.5C" if target_label.startswith("1.5") else "2C"
 
@@ -10551,6 +10632,8 @@ with tab6:
                 index=use_options.index(st.session_state["crrem_use_type"]) if st.session_state[
                                                                                    "crrem_use_type"] in use_options else 0,
                 key="crrem_use_type",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
             )
 
             with st.expander("Emission factor decarbonization settings", expanded=False):
@@ -10572,10 +10655,11 @@ with tab6:
                             st.checkbox(
                                 "Use custom rate",
                                 key=f"crrem_use_custom_decarb_{_sk}",
-                                help=(
+                                help=_viewer_widget_help(
                                     f"If checked, {_src} uses the annual reduction rate below. "
                                     "If unchecked, it follows the CRREM grid decarbonization ratio."
                                 ),
+                                disabled=IS_VIEWER_MODE,
                             )
                             numeric_input(
                                 f"{_src} decarbonization (%/a)",
@@ -10584,12 +10668,15 @@ with tab6:
                                 min_value=-100.0,
                                 max_value=100.0,
                                 fmt="{:.3f}",
-                                help="Used only when 'Use custom rate' is checked for this energy source."
+                                help=_viewer_widget_help("Used only when 'Use custom rate' is checked for this energy source."),
+                                disabled=IS_VIEWER_MODE,
                             )
 
                     _crrem_ef_submit = st.form_submit_button(
                         "Update emission factor decarbonization settings",
                         use_container_width=False,
+                        disabled=IS_VIEWER_MODE,
+                        help=_viewer_widget_help(),
                     )
 
                 if _crrem_ef_submit:
@@ -11923,6 +12010,8 @@ with tab_lcc:
                         step=1,
                         format="%d",
                         key=_lcc_global_draft_key("analysis_period"),
+                        disabled=IS_VIEWER_MODE,
+                        help=_viewer_widget_help(),
                     )
                 with p2:
                     numeric_input(
@@ -11932,6 +12021,8 @@ with tab_lcc:
                         min_value=-100.0,
                         max_value=100.0,
                         fmt="{:.4f}",
+                        disabled=IS_VIEWER_MODE,
+                        help=_viewer_widget_help(),
                     )
                 with p3:
                     numeric_input(
@@ -11941,6 +12032,8 @@ with tab_lcc:
                         min_value=-100.0,
                         max_value=100.0,
                         fmt="{:.4f}",
+                        disabled=IS_VIEWER_MODE,
+                        help=_viewer_widget_help(),
                     )
 
                 st.write("### Energy inflation rate by source")
@@ -11955,6 +12048,8 @@ with tab_lcc:
                             min_value=-100.0,
                             max_value=100.0,
                             fmt="{:.4f}",
+                            disabled=IS_VIEWER_MODE,
+                            help=_viewer_widget_help(),
                         )
 
                 st.write("### Operational cost filter")
@@ -11964,7 +12059,8 @@ with tab_lcc:
                     default=st.session_state.get(_lcc_global_draft_key("selected_operational_end_uses"), _lcc_default_selected_enduses(valid_enduses_lcc)),
                     format_func=ui_name,
                     key=_lcc_global_draft_key("selected_operational_end_uses"),
-                    help="Only the selected End Uses are included in the operational energy-cost part of the LCC analysis.",
+                    help=_viewer_widget_help("Only the selected End Uses are included in the operational energy-cost part of the LCC analysis."),
+                    disabled=IS_VIEWER_MODE,
                 )
 
                 st.selectbox(
@@ -15953,7 +16049,7 @@ with tab5:
 # Tab 8 — Raw Data (editable Energy_Balance + Loads_Balance)
 # =========================
 with tab8:
-    if uploaded_file:
+    if (not IS_VIEWER_MODE) and uploaded_file:
         file_bytes = uploaded_file.getvalue()
         wb_hash = hashlib.md5(file_bytes).hexdigest()[:10]
 
@@ -16486,5 +16582,5 @@ with tab8:
                 st.session_state[loads_flash_key] = "updated"
                 st.rerun()
 
-    else:
+    elif not IS_VIEWER_MODE:
         st.write("### ← Please upload data on side bar")
