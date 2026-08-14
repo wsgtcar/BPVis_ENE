@@ -12114,8 +12114,6 @@ with tab_lcc:
                         step=1,
                         format="%d",
                         key=_lcc_global_draft_key("analysis_period"),
-                        disabled=IS_VIEWER_MODE,
-                        help=_viewer_widget_help(),
                     )
                 with p2:
                     numeric_input(
@@ -12192,9 +12190,10 @@ with tab_lcc:
                 )
 
                 editor_kwargs_lcc = {
-                    "num_rows": "dynamic",
+                    "num_rows": "fixed" if IS_VIEWER_MODE else "dynamic",
                     "use_container_width": True,
                     "key": "lcc_investments_editor",
+                    "disabled": IS_VIEWER_MODE,
                 }
                 if hasattr(st, "column_config"):
                     editor_kwargs_lcc["column_config"] = {
