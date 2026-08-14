@@ -65,7 +65,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.4.2",
+    page_title="WSGT_BPVis_ENE 2.4.3",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -79,8 +79,10 @@ AUTH_SESSION_KEY = "_bpvis_authenticated"
 AUTH_EMAIL_KEY = "_bpvis_authenticated_email"
 AUTH_EXPIRY_KEY = "_bpvis_authenticated_expiration_date"
 AUTH_MODE_KEY = "_bpvis_authenticated_access_mode"
-AUTH_REQUIRED_COLUMNS = {"email", "password", "expiration_date", "access_mode"}
+AUTH_DATA_SOURCE_KEY = "_bpvis_authenticated_data_source_file"
+AUTH_REQUIRED_COLUMNS = {"email", "password", "expiration_date", "access_mode", "data_source_file"}
 AUTH_ACCESS_MODES = {"edit mode", "viewer mode"}
+VIEWER_EXTERNAL_FOLDER = "External"
 
 
 def _auth_app_dir() -> Path:
@@ -188,6 +190,71 @@ def _auth_normalize_access_mode(value) -> str:
     return mode
 
 
+def _auth_normalize_data_source_file(value) -> str:
+    """Return a safe Viewer project filename from users.xlsx.
+
+    Viewer assignments are filenames only. Absolute paths, parent traversal, nested
+    paths, and non-XLSX files are rejected so users.xlsx cannot point outside the
+    app's dedicated External folder. Edit-mode users may leave this field blank.
+    """
+    raw = _auth_clean_cell(value).strip()
+    if not raw:
+        return ""
+    p = Path(raw)
+    if p.is_absolute() or p.name != raw or raw in {".", ".."} or ".." in p.parts:
+        raise ValueError("data_source_file must be a filename only, without a path")
+    if p.suffix.lower() != ".xlsx":
+        raise ValueError("data_source_file must reference an .xlsx file")
+    return raw
+
+
+def _viewer_external_folder_path() -> Path:
+    """Return the dedicated folder used for Viewer project workbooks."""
+    return _auth_app_dir() / VIEWER_EXTERNAL_FOLDER
+
+
+def _viewer_external_project_path(data_source_file: str) -> Path:
+    """Resolve a validated Viewer project filename inside External/."""
+    safe_name = _auth_normalize_data_source_file(data_source_file)
+    if not safe_name:
+        raise ValueError("No data source file is assigned to this Viewer account.")
+    external_dir = _viewer_external_folder_path().resolve()
+    candidate = (external_dir / safe_name).resolve()
+    try:
+        candidate.relative_to(external_dir)
+    except Exception:
+        raise ValueError("Invalid Viewer data source assignment.")
+    return candidate
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def _viewer_read_project_bytes_cached(project_path_str: str, project_mtime_ns: int, project_size: int) -> bytes:
+    """Read an External project workbook once per file revision."""
+    return Path(project_path_str).read_bytes()
+
+
+class _ViewerProjectFile:
+    """Minimal UploadedFile-compatible wrapper used by the existing BPVis data flow."""
+    def __init__(self, name: str, file_bytes: bytes):
+        self.name = str(name)
+        self._file_bytes = file_bytes
+
+    def getvalue(self) -> bytes:
+        return self._file_bytes
+
+
+def _viewer_project_file_from_assignment(data_source_file: str):
+    """Return a file-like project object for the current Viewer assignment."""
+    project_path = _viewer_external_project_path(data_source_file)
+    if not project_path.exists() or not project_path.is_file():
+        raise FileNotFoundError(
+            f"Assigned Viewer project file was not found in the {VIEWER_EXTERNAL_FOLDER} folder."
+        )
+    stat = project_path.stat()
+    file_bytes = _viewer_read_project_bytes_cached(str(project_path), int(stat.st_mtime_ns), int(stat.st_size))
+    return _ViewerProjectFile(project_path.name, file_bytes)
+
+
 def _auth_parse_expiration_date(value):
     """Return a Python date for expiration_date cells, or None for no expiration.
 
@@ -268,7 +335,7 @@ def _auth_format_expiration(expiration_date) -> str:
 def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
     """Load login users from users.xlsx.
 
-    Required columns are: email, password, expiration_date, access_mode.
+    Required columns are: email, password, expiration_date, access_mode, data_source_file.
     The mtime argument is intentionally part of the cache key so edits to the
     workbook are picked up after saving the file.
     """
@@ -277,13 +344,14 @@ def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
     missing = AUTH_REQUIRED_COLUMNS.difference(set(df_users.columns))
     if missing:
         raise ValueError(
-            "users.xlsx must contain the columns: email, password, expiration_date, access_mode. "
+            "users.xlsx must contain the columns: email, password, expiration_date, access_mode, data_source_file. "
             f"Missing: {', '.join(sorted(missing))}"
         )
 
-    df_users = df_users[["email", "password", "expiration_date", "access_mode"]].copy()
+    df_users = df_users[["email", "password", "expiration_date", "access_mode", "data_source_file"]].copy()
     df_users["email"] = df_users["email"].apply(_auth_clean_cell).str.lower()
     df_users["password"] = df_users["password"].apply(_auth_clean_cell)
+    df_users["data_source_file"] = df_users["data_source_file"].apply(_auth_clean_cell)
 
     parsed_modes = []
     invalid_mode_rows = []
@@ -300,6 +368,18 @@ def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
     if invalid_mode_rows:
         raise ValueError("Invalid access_mode value(s): " + "; ".join(invalid_mode_rows[:5]))
     df_users["access_mode"] = parsed_modes
+
+    invalid_source_rows = []
+    normalized_sources = []
+    for idx, row in df_users.iterrows():
+        try:
+            normalized_sources.append(_auth_normalize_data_source_file(row.get("data_source_file")))
+        except Exception as exc:
+            invalid_source_rows.append(f"row {idx + 2} ({row.get('email', '')}): {exc}")
+            normalized_sources.append("")
+    if invalid_source_rows:
+        raise ValueError("Invalid data_source_file value(s): " + "; ".join(invalid_source_rows[:5]))
+    df_users["data_source_file"] = normalized_sources
 
     parsed_expirations = []
     invalid_rows = []
@@ -319,73 +399,80 @@ def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
     return df_users
 
 
-def _auth_credentials_status(email: str, password: str) -> Tuple[bool, str, Optional[str], Optional[str]]:
-    """Validate credentials and return (is_valid, message, expiration_label, access_mode)."""
+def _auth_credentials_status(email: str, password: str) -> Tuple[bool, str, Optional[str], Optional[str], Optional[str]]:
+    """Validate credentials and return (is_valid, message, expiration_label, access_mode, data_source_file)."""
     path = _auth_users_file_path()
     if not path.exists():
-        return False, "Login user file not found.", None, None
+        return False, "Login user file not found.", None, None, None
     try:
         users = _auth_load_users(str(path), path.stat().st_mtime)
     except Exception as exc:
-        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None
+        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None, None
 
     email_norm = str(email or "").strip().lower()
     password_norm = str(password or "")
     if not email_norm or not password_norm:
-        return False, "Invalid email or password.", None, None
+        return False, "Invalid email or password.", None, None, None
 
     email_rows = users.loc[users["email"] == email_norm].copy()
     if email_rows.empty:
-        return False, "Invalid email or password.", None, None
+        return False, "Invalid email or password.", None, None, None
 
     credential_rows = email_rows.loc[email_rows["password"].astype(str) == password_norm].copy()
     if credential_rows.empty:
-        return False, "Invalid email or password.", None, None
+        return False, "Invalid email or password.", None, None, None
 
     active_rows = credential_rows.loc[~credential_rows["is_expired"].astype(bool)].copy()
     if active_rows.empty:
         expirations = credential_rows["expiration_label"].dropna().astype(str).unique().tolist()
         exp_msg = expirations[0] if expirations else "the configured expiration date"
-        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg, None
+        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg, None, None
 
     expiration_label = str(active_rows.iloc[0].get("expiration_label", "No expiration"))
     access_mode = _auth_normalize_access_mode(active_rows.iloc[0].get("access_mode", "viewer mode"))
-    return True, "Login successful.", expiration_label, access_mode
+    data_source_file = _auth_normalize_data_source_file(active_rows.iloc[0].get("data_source_file", ""))
+    if access_mode == "viewer mode" and not data_source_file:
+        return False, "No project data source is assigned to this Viewer account.", expiration_label, access_mode, None
+    return True, "Login successful.", expiration_label, access_mode, data_source_file
 
 
 def _auth_credentials_valid(email: str, password: str) -> bool:
     """Backwards-compatible bool wrapper for credential checks."""
-    ok, _, _, _ = _auth_credentials_status(email, password)
+    ok, _, _, _, _ = _auth_credentials_status(email, password)
     return ok
 
 
-def _auth_session_still_valid() -> Tuple[bool, str, Optional[str], Optional[str]]:
+def _auth_session_still_valid() -> Tuple[bool, str, Optional[str], Optional[str], Optional[str]]:
     """Re-check an already authenticated user against the current users.xlsx file."""
     email_norm = str(st.session_state.get(AUTH_EMAIL_KEY, "") or "").strip().lower()
     if not email_norm:
-        return False, "Session expired. Please log in again.", None, None
+        return False, "Session expired. Please log in again.", None, None, None
 
     path = _auth_users_file_path()
     if not path.exists():
-        return False, "Login user file not found. Please contact the app administrator.", None, None
+        return False, "Login user file not found. Please contact the app administrator.", None, None, None
     try:
         users = _auth_load_users(str(path), path.stat().st_mtime)
     except Exception as exc:
-        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None
+        return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None, None
 
     rows = users.loc[users["email"] == email_norm].copy()
     if rows.empty:
-        return False, "This user is no longer authorized.", None, None
+        return False, "This user is no longer authorized.", None, None, None
     active_rows = rows.loc[~rows["is_expired"].astype(bool)].copy()
     if active_rows.empty:
         expirations = rows["expiration_label"].dropna().astype(str).unique().tolist()
         exp_msg = expirations[0] if expirations else "the configured expiration date"
-        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg, None
+        return False, f"Access denied. This user expired on {exp_msg}.", exp_msg, None, None
     expiration_label = str(active_rows.iloc[0].get("expiration_label", "No expiration"))
     access_mode = _auth_normalize_access_mode(active_rows.iloc[0].get("access_mode", "viewer mode"))
+    data_source_file = _auth_normalize_data_source_file(active_rows.iloc[0].get("data_source_file", ""))
+    if access_mode == "viewer mode" and not data_source_file:
+        return False, "No project data source is assigned to this Viewer account.", expiration_label, access_mode, None
     st.session_state[AUTH_EXPIRY_KEY] = expiration_label
     st.session_state[AUTH_MODE_KEY] = access_mode
-    return True, "Session valid.", expiration_label, access_mode
+    st.session_state[AUTH_DATA_SOURCE_KEY] = data_source_file
+    return True, "Session valid.", expiration_label, access_mode, data_source_file
 
 
 def _render_login_page() -> None:
@@ -409,7 +496,7 @@ def _render_login_page() -> None:
             st.error("Login user file not found.")
             st.info(
                 _auth_users_file_help_text()
-                + " The workbook must contain the columns `email`, `password`, `expiration_date`, and `access_mode`."
+                + " The workbook must contain the columns `email`, `password`, `expiration_date`, `access_mode`, and `data_source_file`."
             )
             st.stop()
 
@@ -417,7 +504,7 @@ def _render_login_page() -> None:
             # Validate file structure early so admins get an actionable message.
             _auth_load_users(str(users_path), users_path.stat().st_mtime)
         except Exception as exc:
-            st.error(f"Could not read `{AUTH_USERS_FILENAME}`. Required columns: `email`, `password`, `expiration_date`, `access_mode`.")
+            st.error(f"Could not read `{AUTH_USERS_FILENAME}`. Required columns: `email`, `password`, `expiration_date`, `access_mode`, `data_source_file`.")
             st.caption(str(exc))
             st.stop()
 
@@ -427,12 +514,13 @@ def _render_login_page() -> None:
             submitted = st.form_submit_button("Login", use_container_width=True)
 
         if submitted:
-            ok, message, expiration_label, access_mode = _auth_credentials_status(email, password)
+            ok, message, expiration_label, access_mode, data_source_file = _auth_credentials_status(email, password)
             if ok:
                 st.session_state[AUTH_SESSION_KEY] = True
                 st.session_state[AUTH_EMAIL_KEY] = str(email).strip().lower()
                 st.session_state[AUTH_EXPIRY_KEY] = expiration_label or "No expiration"
                 st.session_state[AUTH_MODE_KEY] = access_mode or "viewer mode"
+                st.session_state[AUTH_DATA_SOURCE_KEY] = data_source_file or ""
                 st.rerun()
             else:
                 st.error(message)
@@ -443,12 +531,13 @@ def _render_login_page() -> None:
 if not st.session_state.get(AUTH_SESSION_KEY, False):
     _render_login_page()
 else:
-    _ok_session, _session_msg, _session_exp, _session_mode = _auth_session_still_valid()
+    _ok_session, _session_msg, _session_exp, _session_mode, _session_data_source = _auth_session_still_valid()
     if not _ok_session:
         st.session_state[AUTH_SESSION_KEY] = False
         st.session_state.pop(AUTH_EMAIL_KEY, None)
         st.session_state.pop(AUTH_EXPIRY_KEY, None)
         st.session_state.pop(AUTH_MODE_KEY, None)
+        st.session_state.pop(AUTH_DATA_SOURCE_KEY, None)
         st.error(_session_msg)
         _render_login_page()
 
@@ -736,7 +825,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.4.2")
+st.sidebar.write("Version 2.4.3")
 if IS_VIEWER_MODE:
     st.sidebar.write("**Viewer Mode**")
 
@@ -753,10 +842,25 @@ if not IS_VIEWER_MODE:
             )
 
 st.sidebar.markdown("---")
-st.sidebar.write("### Upload Data")
 
-# Upload Excel File (xlsx)
-uploaded_file = st.sidebar.file_uploader("Upload Excel File", type="xlsx")
+# Project data source:
+# - Edit Mode: user uploads the workbook as before.
+# - Viewer Mode: workbook is assigned per user in users.xlsx and loaded server-side from External/.
+if IS_VIEWER_MODE:
+    uploaded_file = None
+    try:
+        uploaded_file = _viewer_project_file_from_assignment(st.session_state.get(AUTH_DATA_SOURCE_KEY, ""))
+        st.sidebar.caption("Project data loaded automatically")
+    except Exception as exc:
+        st.sidebar.error(str(exc))
+        st.error(
+            "The project assigned to this Viewer account could not be loaded. "
+            "Please contact the app administrator."
+        )
+        st.stop()
+else:
+    st.sidebar.write("### Upload Data")
+    uploaded_file = st.sidebar.file_uploader("Upload Excel File", type="xlsx")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Project Information")
@@ -3092,7 +3196,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.4.2"
+REPORT_VERSION = "2.4.3"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -9541,7 +9645,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_2.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_3.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -9550,7 +9654,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_2.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_3.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
