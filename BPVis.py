@@ -1,4 +1,6 @@
 import io
+import os
+import sys
 from pathlib import Path
 import hashlib
 import pandas as pd
@@ -53,6 +55,30 @@ def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None,
     return v
 
 
+def _form_submit_button_compat(label, *, key=None, **kwargs):
+    """Render a form submit button across old and new Streamlit versions.
+
+    Newer Streamlit versions support ``key=`` on ``st.form_submit_button`` while
+    older versions raise ``TypeError`` for that keyword. BPVis needs explicit
+    uniqueness for repeated Model Inputs buttons, so the fallback appends an
+    invisible deterministic Unicode token to the label instead of exposing a
+    visible suffix to the user.
+    """
+    if key is None:
+        return st.form_submit_button(label, **kwargs)
+    try:
+        return st.form_submit_button(label, key=key, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument 'key'" not in str(exc):
+            raise
+        # Encode a short hash as zero-width characters. This keeps the displayed
+        # label unchanged while giving legacy Streamlit a unique widget identity.
+        digest = hashlib.md5(str(key).encode("utf-8")).digest()[:4]
+        bits = "".join(f"{b:08b}" for b in digest)
+        invisible = "\u2063" + "".join("\u200b" if bit == "0" else "\u200c" for bit in bits)
+        return st.form_submit_button(f"{label}{invisible}", **kwargs)
+
+
 import numpy as np
 import plotly.colors as pcolors
 from typing import Optional, Tuple, Dict
@@ -65,7 +91,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.4.4",
+    page_title="WSGT_BPVis_ENE 2.4.6",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -86,76 +112,193 @@ VIEWER_EXTERNAL_FOLDER = "External"
 
 
 def _auth_app_dir() -> Path:
-    """Return the folder where the Streamlit app is located."""
+    """Return the physical folder containing the Python entrypoint when available.
+
+    Some hosted Streamlit launchers stage or symlink the entrypoint into a temporary
+    directory. Therefore this path is useful as one hint, but it is deliberately not
+    treated as the repository root.
+    """
     try:
         return Path(__file__).resolve().parent
     except Exception:
-        return Path.cwd()
+        return Path.cwd().resolve()
+
+
+def _auth_candidate_roots() -> list:
+    """Return plausible application/repository roots across local and hosted runs.
+
+    Streamlit Community Cloud normally starts the app with the repository root as
+    the working directory. Some deployment/staging environments, however, expose the
+    entrypoint from a temporary folder such as /mount/Downloads. To make BPVis robust
+    in both cases, collect roots from cwd, the entrypoint, environment variables,
+    Python's import path, and the standard Community Cloud /mount/src location.
+    """
+    roots = []
+
+    def _add_root(path_like):
+        try:
+            if path_like is None or str(path_like).strip() == "":
+                return
+            p = Path(path_like).expanduser().resolve()
+            if p.is_file():
+                p = p.parent
+            if p not in roots:
+                roots.append(p)
+        except Exception:
+            pass
+
+    app_dir = _auth_app_dir()
+    cwd = Path.cwd().resolve()
+    _add_root(cwd)
+    _add_root(app_dir)
+
+    # Explicit/host-provided repository roots, when available. BPVIS_ROOT is an
+    # optional override that can also be used in non-Community-Cloud deployments.
+    for env_name in ("BPVIS_ROOT", "GITHUB_WORKSPACE", "STREAMLIT_REPO_ROOT", "REPO_ROOT"):
+        _add_root(os.environ.get(env_name))
+
+    # Parent directories cover the common case where the entrypoint sits in a
+    # subfolder of the repository.
+    for base in (cwd, app_dir):
+        try:
+            for parent in list(base.parents)[:6]:
+                _add_root(parent)
+        except Exception:
+            pass
+
+    # Python import paths can still point at the checked-out repository even if
+    # the entrypoint itself was copied/symlinked elsewhere by the host.
+    for item in list(sys.path):
+        try:
+            if item:
+                _add_root(item)
+        except Exception:
+            pass
+
+    # Streamlit Community Cloud repositories are conventionally mounted below
+    # /mount/src/<repository>. Probe only a bounded depth to avoid broad filesystem
+    # scans while still supporting an entrypoint inside a repository subfolder.
+    mount_src = Path("/mount/src")
+    try:
+        if mount_src.exists() and mount_src.is_dir():
+            _add_root(mount_src)
+            for repo_dir in mount_src.iterdir():
+                if not repo_dir.is_dir():
+                    continue
+                _add_root(repo_dir)
+                try:
+                    for child in repo_dir.iterdir():
+                        if child.is_dir() and not child.name.startswith("."):
+                            _add_root(child)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return roots
 
 
 def _auth_users_file_candidates() -> list:
-    """Return reasonable locations for users.xlsx in local and Streamlit Cloud deployments.
+    """Return candidate users.xlsx paths across local and hosted Streamlit runs.
 
-    Streamlit Cloud usually runs from the repository root, but the selected
-    Streamlit script may be located in a subfolder. Therefore we check both the
-    script folder and the current working directory/repository root. We also
-    check a few parent folders of the script to support common repo layouts.
+    Direct repository/script candidates are tried first. If those fail, BPVis performs
+    a bounded discovery under common deployment roots. This avoids depending on a
+    particular Community Cloud filesystem layout and also supports an entrypoint that
+    lives in a repository subfolder.
     """
     candidates = []
 
     def _add(path_like):
         try:
-            p = Path(path_like).resolve()
+            if path_like is None or str(path_like).strip() == "":
+                return
+            p = Path(path_like).expanduser().resolve()
             if p not in candidates:
                 candidates.append(p)
         except Exception:
             pass
 
-    app_dir = _auth_app_dir()
-    cwd = Path.cwd()
+    roots = _auth_candidate_roots()
+    for root in roots:
+        _add(root / AUTH_USERS_FILENAME)
 
-    _add(app_dir / AUTH_USERS_FILENAME)
-    _add(cwd / AUTH_USERS_FILENAME)
+    if any(p.exists() and p.is_file() for p in candidates):
+        return candidates
 
-    # Support deployments where the app script is inside a subfolder, but
-    # users.xlsx was committed to the repository root. Limit traversal to avoid
-    # scanning arbitrary system locations.
-    try:
-        for parent in list(app_dir.parents)[:4]:
-            _add(parent / AUTH_USERS_FILENAME)
-    except Exception:
-        pass
+    # Hosted environments do not guarantee one universal checkout location.
+    # Search only a small set of plausible roots and cap traversal depth.
+    discovery_roots = list(roots)
+    for extra in (
+        "/mount", "/mount/src", "/workspace", "/app", "/repo", "/src",
+        "/home/adminuser", "/home/appuser", "/opt/render/project/src",
+    ):
+        try:
+            p = Path(extra)
+            if p.exists() and p.is_dir() and p.resolve() not in discovery_roots:
+                discovery_roots.append(p.resolve())
+        except Exception:
+            pass
+
+    skip_dirs = {
+        ".git", ".venv", "venv", "env", "node_modules", "site-packages",
+        "__pycache__", ".cache", ".streamlit",
+    }
+
+    for base in discovery_roots:
+        try:
+            base = Path(base).resolve()
+            if not base.exists() or not base.is_dir():
+                continue
+            base_depth = len(base.parts)
+            for root_str, dirnames, filenames in os.walk(base):
+                root_path = Path(root_str)
+                depth = len(root_path.parts) - base_depth
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in skip_dirs and not d.startswith(".") and depth < 5
+                ]
+                if AUTH_USERS_FILENAME in filenames:
+                    _add(root_path / AUTH_USERS_FILENAME)
+        except Exception:
+            continue
 
     return candidates
 
-
 def _auth_users_file_path() -> Path:
-    """Return the first existing Excel user database, or the preferred path."""
+    """Return the first existing users.xlsx file, preferring the actual repository copy."""
     candidates = _auth_users_file_candidates()
     for candidate in candidates:
         try:
-            if candidate.exists():
+            if candidate.exists() and candidate.is_file():
                 return candidate
         except Exception:
             continue
-    return candidates[0] if candidates else Path(AUTH_USERS_FILENAME)
+    # Keep a deterministic fallback for the login error path.
+    return (Path.cwd() / AUTH_USERS_FILENAME).resolve()
+
+
+def _auth_project_root() -> Path:
+    """Return the BPVis project root used for users.xlsx and External/.
+
+    Once users.xlsx is located, its parent is authoritative. This is important on
+    hosted deployments where __file__ may point to a transient staging directory.
+    """
+    users_path = _auth_users_file_path()
+    try:
+        if users_path.exists() and users_path.is_file():
+            return users_path.parent.resolve()
+    except Exception:
+        pass
+    return Path.cwd().resolve()
 
 
 def _auth_users_file_help_text() -> str:
-    """Actionable help text for admins without exposing local development paths."""
-    try:
-        candidates = _auth_users_file_candidates()
-        display_paths = []
-        for p in candidates[:3]:
-            try:
-                display_paths.append(f"`{p.name}` in `{p.parent}`")
-            except Exception:
-                pass
-        if display_paths:
-            return "Place `users.xlsx` in one of these locations: " + "; ".join(display_paths) + "."
-    except Exception:
-        pass
-    return "Place `users.xlsx` next to the Streamlit app file or in the repository root."
+    """Return deployment-oriented guidance without advertising transient paths."""
+    return (
+        "Place `users.xlsx` in the root of the deployed GitHub repository (the same "
+        "project root that contains the `External` folder). If the file is already "
+        "there, make sure it is committed to the same branch used by the Streamlit app."
+    )
 
 
 def _auth_clean_cell(value) -> str:
@@ -210,7 +353,7 @@ def _auth_normalize_data_source_file(value) -> str:
 
 def _viewer_external_folder_path() -> Path:
     """Return the dedicated folder used for Viewer project workbooks."""
-    return _auth_app_dir() / VIEWER_EXTERNAL_FOLDER
+    return _auth_project_root() / VIEWER_EXTERNAL_FOLDER
 
 
 def _viewer_external_project_path(data_source_file: str) -> Path:
@@ -480,8 +623,12 @@ def _auth_session_still_valid() -> Tuple[bool, str, Optional[str], Optional[str]
 
 def _render_login_page() -> None:
     """Render the login page and stop the app until authentication succeeds."""
-    logo_path_black = _auth_app_dir() / "Pamo_Icon_Black.png"
-    logo_path_ws = _auth_app_dir() / "WS_Logo.jpg"
+    # Resolve login assets from the detected repository root. Hosted launchers may
+    # stage the Python entrypoint elsewhere even though repository assets remain
+    # in the checked-out project directory.
+    login_root = _auth_project_root()
+    logo_path_black = login_root / "Pamo_Icon_Black.png"
+    logo_path_ws = login_root / "WS_Logo.jpg"
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     left, middle, right = st.columns([1, 1.15, 1])
@@ -501,6 +648,7 @@ def _render_login_page() -> None:
                 _auth_users_file_help_text()
                 + " The workbook must contain the columns `email`, `password`, `expiration_date`, `access_mode`, and `data_source_file`."
             )
+            st.caption("Running BPVis version 2.4.6. If another version is shown here, update the Streamlit Community Cloud app's configured entrypoint file.")
             st.stop()
 
         try:
@@ -543,6 +691,17 @@ else:
         st.session_state.pop(AUTH_DATA_SOURCE_KEY, None)
         st.error(_session_msg)
         _render_login_page()
+
+# Align relative project-resource paths with the repository that contains users.xlsx.
+# On normal Streamlit Community Cloud deployments this is already the current working
+# directory. The explicit alignment protects deployments where the entrypoint is staged
+# in a temporary /Downloads-style folder while the GitHub checkout lives elsewhere.
+try:
+    _bpvis_project_root = _auth_project_root()
+    if _bpvis_project_root.exists() and _bpvis_project_root.is_dir():
+        os.chdir(_bpvis_project_root)
+except Exception:
+    pass
 
 # Viewer / edit permission state. Invalid or missing state fails closed to Viewer Mode.
 CURRENT_ACCESS_MODE = str(st.session_state.get(AUTH_MODE_KEY, "viewer mode") or "viewer mode").strip().lower()
@@ -828,7 +987,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.4.4")
+st.sidebar.write("Version 2.4.6")
 if IS_VIEWER_MODE:
     st.sidebar.write("**Viewer Mode**")
 
@@ -3199,7 +3358,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.4.4"
+REPORT_VERSION = "2.4.6"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -10260,7 +10419,7 @@ with tab_model_qa:
                             key=item_duplicate_name_key,
                             help="Edit this name before clicking Duplicate. If the name already exists, the app adds a numeric suffix automatically.",
                         )
-                        duplicate_item = st.form_submit_button(
+                        duplicate_item = _form_submit_button_compat(
                             "Duplicate this complete object",
                             key=item_duplicate_key,
                             use_container_width=True,
@@ -10273,14 +10432,14 @@ with tab_model_qa:
                             key=item_rename_name_key,
                             help="Edit this name and click Rename. If the name already exists, the app adds a numeric suffix automatically.",
                         )
-                        rename_item = st.form_submit_button(
+                        rename_item = _form_submit_button_compat(
                             "Rename this complete object",
                             key=item_rename_key,
                             use_container_width=True,
                             help="Renames this object and keeps all parameter values, references, assumptions and QA justifications.",
                         )
 
-                        remove_item = st.form_submit_button(
+                        remove_item = _form_submit_button_compat(
                             "Remove this complete object",
                             key=item_delete_key,
                             use_container_width=True,
@@ -10320,7 +10479,7 @@ with tab_model_qa:
                         key=f"{custom_key_prefix}_source",
                     )
                     custom_param_ref = st.text_input("Source document / reference", value="", key=f"{custom_key_prefix}_source_ref")
-                    custom_param_submit = st.form_submit_button(
+                    custom_param_submit = _form_submit_button_compat(
                         "Add custom parameter to this object",
                         key=f"{custom_key_prefix}_submit",
                         use_container_width=True,
