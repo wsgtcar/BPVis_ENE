@@ -1,6 +1,4 @@
 import io
-import os
-import sys
 from pathlib import Path
 import hashlib
 import pandas as pd
@@ -55,30 +53,6 @@ def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None,
     return v
 
 
-def _form_submit_button_compat(label, *, key=None, **kwargs):
-    """Render a form submit button across old and new Streamlit versions.
-
-    Newer Streamlit versions support ``key=`` on ``st.form_submit_button`` while
-    older versions raise ``TypeError`` for that keyword. BPVis needs explicit
-    uniqueness for repeated Model Inputs buttons, so the fallback appends an
-    invisible deterministic Unicode token to the label instead of exposing a
-    visible suffix to the user.
-    """
-    if key is None:
-        return st.form_submit_button(label, **kwargs)
-    try:
-        return st.form_submit_button(label, key=key, **kwargs)
-    except TypeError as exc:
-        if "unexpected keyword argument 'key'" not in str(exc):
-            raise
-        # Encode a short hash as zero-width characters. This keeps the displayed
-        # label unchanged while giving legacy Streamlit a unique widget identity.
-        digest = hashlib.md5(str(key).encode("utf-8")).digest()[:4]
-        bits = "".join(f"{b:08b}" for b in digest)
-        invisible = "\u2063" + "".join("\u200b" if bit == "0" else "\u200c" for bit in bits)
-        return st.form_submit_button(f"{label}{invisible}", **kwargs)
-
-
 import numpy as np
 import plotly.colors as pcolors
 from typing import Optional, Tuple, Dict
@@ -91,7 +65,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.4.7",
+    page_title="WSGT_BPVis_ENE 2.4.3",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -100,7 +74,7 @@ st.set_page_config(
 # =========================
 # Access control — simple Excel-backed login
 # =========================
-AUTH_USERS_FILENAME = "../../Downloads/users.xlsx"
+AUTH_USERS_FILENAME = "users.xlsx"
 AUTH_SESSION_KEY = "_bpvis_authenticated"
 AUTH_EMAIL_KEY = "_bpvis_authenticated_email"
 AUTH_EXPIRY_KEY = "_bpvis_authenticated_expiration_date"
@@ -112,209 +86,76 @@ VIEWER_EXTERNAL_FOLDER = "External"
 
 
 def _auth_app_dir() -> Path:
-    """Return the directory of the Streamlit entrypoint file."""
+    """Return the folder where the Streamlit app is located."""
     try:
         return Path(__file__).resolve().parent
     except Exception:
-        return Path.cwd().resolve()
-
-
-def _auth_secret_or_env(name: str) -> str:
-    """Read an optional deployment override from environment or Streamlit secrets."""
-    try:
-        value = os.environ.get(name, "")
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    except Exception:
-        pass
-    try:
-        value = st.secrets.get(name, "")
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    except Exception:
-        pass
-    return ""
-
-
-def _auth_nearest_marker_root(start_dir: Path) -> Optional[Path]:
-    """Return the nearest plausible BPVis/Git repository root above *start_dir*.
-
-    Community Cloud executes Streamlit from the repository root. Locally, IDEs can
-    use a different working directory. Looking for project markers lets BPVis recover
-    the root without depending on one launcher-specific path.
-    """
-    try:
-        p = Path(start_dir).resolve()
-    except Exception:
-        return None
-    for candidate in [p] + list(p.parents):
-        try:
-            if (candidate / ".git").exists():
-                return candidate
-            # External + templates is a strong BPVis project marker even when the
-            # local checkout does not expose the .git directory.
-            if (candidate / VIEWER_EXTERNAL_FOLDER).is_dir() and (candidate / "templates").is_dir():
-                return candidate
-        except Exception:
-            continue
-    return None
-
-
-def _auth_candidate_roots() -> list:
-    """Return deterministic roots that can legitimately contain users.xlsx.
-
-    Important: this intentionally avoids walking arbitrary filesystem roots. On
-    Streamlit Community Cloud, ``Path.cwd()`` is the checked-out Git repository root.
-    Locally we additionally inspect the entrypoint directory and their nearest Git/BPVis
-    roots. ``BPVIS_ROOT`` can be supplied as an environment variable or Streamlit secret
-    for unusual launchers.
-    """
-    roots = []
-
-    def _add(value):
-        try:
-            if value is None or not str(value).strip():
-                return
-            p = Path(value).expanduser().resolve()
-            if p.is_file():
-                p = p.parent
-            if p not in roots:
-                roots.append(p)
-        except Exception:
-            pass
-
-    override = _auth_secret_or_env("BPVIS_ROOT")
-    _add(override)
-
-    cwd = Path.cwd().resolve()
-    app_dir = _auth_app_dir()
-    _add(cwd)
-    _add(app_dir)
-
-    for base in (cwd, app_dir):
-        marker_root = _auth_nearest_marker_root(base)
-        _add(marker_root)
-        try:
-            # A shallow parent search supports an entrypoint inside one or two
-            # subdirectories without ever scanning the whole drive.
-            for parent in list(base.parents)[:4]:
-                _add(parent)
-        except Exception:
-            pass
-
-    # Official Community Cloud checkout location is below /mount/src. cwd should
-    # already be the repository root, but these direct children are a safe fallback
-    # for stale launch contexts and do not recursively scan the filesystem.
-    mount_src = Path("/mount/src")
-    try:
-        if mount_src.is_dir():
-            for child in mount_src.iterdir():
-                if child.is_dir():
-                    _add(child)
-    except Exception:
-        pass
-
-    return roots
-
-
-def _auth_case_insensitive_file(directory: Path, filename: str) -> Optional[Path]:
-    """Return a direct child matching *filename* case-insensitively.
-
-    This makes a GitHub file accidentally committed as ``Users.xlsx`` work on Linux
-    while still keeping the file constrained to the resolved project root.
-    """
-    try:
-        directory = Path(directory)
-        exact = directory / filename
-        if exact.is_file():
-            return exact.resolve()
-        if directory.is_dir():
-            wanted = filename.lower()
-            for child in directory.iterdir():
-                if child.is_file() and child.name.lower() == wanted:
-                    return child.resolve()
-    except Exception:
-        pass
-    return None
+        return Path.cwd()
 
 
 def _auth_users_file_candidates() -> list:
-    """Return direct users.xlsx candidates in priority order."""
+    """Return reasonable locations for users.xlsx in local and Streamlit Cloud deployments.
+
+    Streamlit Cloud usually runs from the repository root, but the selected
+    Streamlit script may be located in a subfolder. Therefore we check both the
+    script folder and the current working directory/repository root. We also
+    check a few parent folders of the script to support common repo layouts.
+    """
     candidates = []
 
-    # Optional explicit file override for environments where users.xlsx must live
-    # outside the application root. This is intended for administrators only.
-    explicit_file = _auth_secret_or_env("BPVIS_USERS_FILE")
-    if explicit_file:
+    def _add(path_like):
         try:
-            candidates.append(Path(explicit_file).expanduser().resolve())
+            p = Path(path_like).resolve()
+            if p not in candidates:
+                candidates.append(p)
         except Exception:
             pass
 
-    for root in _auth_candidate_roots():
-        match = _auth_case_insensitive_file(root, AUTH_USERS_FILENAME)
-        if match is not None and match not in candidates:
-            candidates.append(match)
-        else:
-            try:
-                p = (Path(root) / AUTH_USERS_FILENAME).resolve()
-                if p not in candidates:
-                    candidates.append(p)
-            except Exception:
-                pass
+    app_dir = _auth_app_dir()
+    cwd = Path.cwd()
+
+    _add(app_dir / AUTH_USERS_FILENAME)
+    _add(cwd / AUTH_USERS_FILENAME)
+
+    # Support deployments where the app script is inside a subfolder, but
+    # users.xlsx was committed to the repository root. Limit traversal to avoid
+    # scanning arbitrary system locations.
+    try:
+        for parent in list(app_dir.parents)[:4]:
+            _add(parent / AUTH_USERS_FILENAME)
+    except Exception:
+        pass
+
     return candidates
 
 
 def _auth_users_file_path() -> Path:
-    """Return the first existing users.xlsx candidate."""
-    for candidate in _auth_users_file_candidates():
+    """Return the first existing Excel user database, or the preferred path."""
+    candidates = _auth_users_file_candidates()
+    for candidate in candidates:
         try:
-            if candidate.is_file():
-                return candidate.resolve()
+            if candidate.exists():
+                return candidate
         except Exception:
             continue
-    # Deterministic fallback used only for diagnostics.
-    return (Path.cwd() / AUTH_USERS_FILENAME).resolve()
-
-
-def _auth_project_root() -> Path:
-    """Return the authoritative BPVis project root.
-
-    The parent of the resolved users.xlsx is authoritative because the Viewer
-    ``External`` folder is intentionally colocated with the authentication database.
-    """
-    users_path = _auth_users_file_path()
-    try:
-        if users_path.is_file():
-            return users_path.parent.resolve()
-    except Exception:
-        pass
-    marker = _auth_nearest_marker_root(Path.cwd()) or _auth_nearest_marker_root(_auth_app_dir())
-    if marker is not None:
-        return marker.resolve()
-    return Path.cwd().resolve()
-
-
-def _auth_runtime_diagnostics() -> dict:
-    """Small, non-recursive diagnostics for deployment troubleshooting."""
-    try:
-        roots = [str(p) for p in _auth_candidate_roots()]
-    except Exception:
-        roots = []
-    return {
-        "cwd": str(Path.cwd()),
-        "entrypoint_dir": str(_auth_app_dir()),
-        "searched_roots": roots,
-    }
+    return candidates[0] if candidates else Path(AUTH_USERS_FILENAME)
 
 
 def _auth_users_file_help_text() -> str:
-    return (
-        "BPVis could not see `users.xlsx` in the runtime project root. On Streamlit "
-        "Community Cloud the working directory is the root of the deployed Git repository. "
-        "Keep `users.xlsx` there, or set the administrator-only `BPVIS_ROOT` / "
-        "`BPVIS_USERS_FILE` override in Streamlit secrets for a non-standard layout."
-    )
+    """Actionable help text for admins without exposing local development paths."""
+    try:
+        candidates = _auth_users_file_candidates()
+        display_paths = []
+        for p in candidates[:3]:
+            try:
+                display_paths.append(f"`{p.name}` in `{p.parent}`")
+            except Exception:
+                pass
+        if display_paths:
+            return "Place `users.xlsx` in one of these locations: " + "; ".join(display_paths) + "."
+    except Exception:
+        pass
+    return "Place `users.xlsx` next to the Streamlit app file or in the repository root."
 
 
 def _auth_clean_cell(value) -> str:
@@ -369,7 +210,7 @@ def _auth_normalize_data_source_file(value) -> str:
 
 def _viewer_external_folder_path() -> Path:
     """Return the dedicated folder used for Viewer project workbooks."""
-    return _auth_project_root() / VIEWER_EXTERNAL_FOLDER
+    return _auth_app_dir() / VIEWER_EXTERNAL_FOLDER
 
 
 def _viewer_external_project_path(data_source_file: str) -> Path:
@@ -386,13 +227,9 @@ def _viewer_external_project_path(data_source_file: str) -> Path:
     return candidate
 
 
-def _viewer_read_project_bytes_current(project_path_str: str) -> bytes:
-    """Read the current External project workbook bytes from disk.
-
-    This read is intentionally not cached. The expensive Excel parsing remains cached downstream
-    by the workbook bytes themselves, but reading the source file fresh prevents stale Viewer
-    projects when a deployment/sync process replaces an XLSX while preserving its size or timestamp.
-    """
+@st.cache_data(show_spinner=False, max_entries=16)
+def _viewer_read_project_bytes_cached(project_path_str: str, project_mtime_ns: int, project_size: int) -> bytes:
+    """Read an External project workbook once per file revision."""
     return Path(project_path_str).read_bytes()
 
 
@@ -413,7 +250,8 @@ def _viewer_project_file_from_assignment(data_source_file: str):
         raise FileNotFoundError(
             f"Assigned Viewer project file was not found in the {VIEWER_EXTERNAL_FOLDER} folder."
         )
-    file_bytes = _viewer_read_project_bytes_current(str(project_path))
+    stat = project_path.stat()
+    file_bytes = _viewer_read_project_bytes_cached(str(project_path), int(stat.st_mtime_ns), int(stat.st_size))
     return _ViewerProjectFile(project_path.name, file_bytes)
 
 
@@ -494,13 +332,14 @@ def _auth_format_expiration(expiration_date) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def _auth_parse_users_bytes(users_bytes: bytes) -> pd.DataFrame:
-    """Parse users.xlsx from immutable bytes.
+def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
+    """Load login users from users.xlsx.
 
-    Caching by file contents avoids stale authentication data when a deployment replaces
-    users.xlsx without changing its timestamp in a way the runtime notices.
+    Required columns are: email, password, expiration_date, access_mode, data_source_file.
+    The mtime argument is intentionally part of the cache key so edits to the
+    workbook are picked up after saving the file.
     """
-    df_users = pd.read_excel(io.BytesIO(users_bytes))
+    df_users = pd.read_excel(users_path_str)
     df_users.columns = [str(c).strip().lower() for c in df_users.columns]
     missing = AUTH_REQUIRED_COLUMNS.difference(set(df_users.columns))
     if missing:
@@ -560,19 +399,13 @@ def _auth_parse_users_bytes(users_bytes: bytes) -> pd.DataFrame:
     return df_users
 
 
-
-def _auth_load_users_from_path(path: Path) -> pd.DataFrame:
-    """Read users.xlsx fresh and cache only the expensive Excel parsing."""
-    return _auth_parse_users_bytes(Path(path).read_bytes())
-
-
 def _auth_credentials_status(email: str, password: str) -> Tuple[bool, str, Optional[str], Optional[str], Optional[str]]:
     """Validate credentials and return (is_valid, message, expiration_label, access_mode, data_source_file)."""
     path = _auth_users_file_path()
     if not path.exists():
         return False, "Login user file not found.", None, None, None
     try:
-        users = _auth_load_users_from_path(path)
+        users = _auth_load_users(str(path), path.stat().st_mtime)
     except Exception as exc:
         return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None, None
 
@@ -619,7 +452,7 @@ def _auth_session_still_valid() -> Tuple[bool, str, Optional[str], Optional[str]
     if not path.exists():
         return False, "Login user file not found. Please contact the app administrator.", None, None, None
     try:
-        users = _auth_load_users_from_path(path)
+        users = _auth_load_users(str(path), path.stat().st_mtime)
     except Exception as exc:
         return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None, None
 
@@ -644,12 +477,8 @@ def _auth_session_still_valid() -> Tuple[bool, str, Optional[str], Optional[str]
 
 def _render_login_page() -> None:
     """Render the login page and stop the app until authentication succeeds."""
-    # Resolve login assets from the detected repository root. Hosted launchers may
-    # stage the Python entrypoint elsewhere even though repository assets remain
-    # in the checked-out project directory.
-    login_root = _auth_project_root()
-    logo_path_black = login_root / "Pamo_Icon_Black.png"
-    logo_path_ws = login_root / "WS_Logo.jpg"
+    logo_path_black = _auth_app_dir() / "Pamo_Icon_Black.png"
+    logo_path_ws = _auth_app_dir() / "WS_Logo.jpg"
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     left, middle, right = st.columns([1, 1.15, 1])
@@ -669,20 +498,11 @@ def _render_login_page() -> None:
                 _auth_users_file_help_text()
                 + " The workbook must contain the columns `email`, `password`, `expiration_date`, `access_mode`, and `data_source_file`."
             )
-            diag = _auth_runtime_diagnostics()
-            with st.expander("Runtime path diagnostics"):
-                st.code(
-                    "Working directory: " + diag.get("cwd", "") + "\n"
-                    + "Entrypoint directory: " + diag.get("entrypoint_dir", "") + "\n"
-                    + "Searched roots:\n- " + "\n- ".join(diag.get("searched_roots", [])),
-                    language="text",
-                )
-            st.caption("Running BPVis version 2.4.7.")
             st.stop()
 
         try:
             # Validate file structure early so admins get an actionable message.
-            _auth_load_users_from_path(users_path)
+            _auth_load_users(str(users_path), users_path.stat().st_mtime)
         except Exception as exc:
             st.error(f"Could not read `{AUTH_USERS_FILENAME}`. Required columns: `email`, `password`, `expiration_date`, `access_mode`, `data_source_file`.")
             st.caption(str(exc))
@@ -720,17 +540,6 @@ else:
         st.session_state.pop(AUTH_DATA_SOURCE_KEY, None)
         st.error(_session_msg)
         _render_login_page()
-
-# Align relative project-resource paths with the repository that contains users.xlsx.
-# On normal Streamlit Community Cloud deployments this is already the current working
-# directory. The explicit alignment protects deployments where the entrypoint is staged
-# in a temporary /Downloads-style folder while the GitHub checkout lives elsewhere.
-try:
-    _bpvis_project_root = _auth_project_root()
-    if _bpvis_project_root.exists() and _bpvis_project_root.is_dir():
-        os.chdir(_bpvis_project_root)
-except Exception:
-    pass
 
 # Viewer / edit permission state. Invalid or missing state fails closed to Viewer Mode.
 CURRENT_ACCESS_MODE = str(st.session_state.get(AUTH_MODE_KEY, "viewer mode") or "viewer mode").strip().lower()
@@ -1016,7 +825,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.4.7")
+st.sidebar.write("Version 2.4.3")
 if IS_VIEWER_MODE:
     st.sidebar.write("**Viewer Mode**")
 
@@ -3387,7 +3196,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.4.7"
+REPORT_VERSION = "2.4.3"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -7481,14 +7290,6 @@ def parse_project_df_with_building_use(
     kv = dict(zip(df["Key"].astype(str), df["Value"]))
 
     name = kv.get("Project_Name")
-    try:
-        if name is None or pd.isna(name) or str(name).strip() == "":
-            name = None
-        else:
-            name = str(name).strip()
-    except Exception:
-        name = None if name is None else str(name).strip() or None
-
     currency = kv.get("Currency")
     building_use = kv.get("Building_Use")
     country = kv.get("Country")
@@ -8764,16 +8565,6 @@ if uploaded_file:
     #     This keeps Project Data global (not scenario-dependent) and ensures it reloads correctly from the workbook.
     wb_token = f"{uploaded_file.name}|{hashlib.md5(file_bytes).hexdigest()}"
 
-    # Viewer Mode: Project_Name is read-only and therefore the source workbook is authoritative.
-    # Refresh it on every rerun rather than relying only on the previous workbook token. This also
-    # clears a stale name if a newly assigned workbook has no valid Project_Name value.
-    if IS_VIEWER_MODE:
-        viewer_project_name = preloaded.get("name")
-        if viewer_project_name is None or str(viewer_project_name).strip() == "":
-            viewer_project_name = "Building Performance Dashboard"
-        st.session_state["project_name"] = str(viewer_project_name).strip()
-        st.session_state["_project_name_workbook_token"] = wb_token
-
     # --- Seed Raw Data (Energy_Balance / Loads_Balance) from file on each new upload (token-based)
     #     Primary scenario-specific raw data is stored in numbered duplicate sheets:
     #     Energy_Balance, Energy_Balance2, Energy_Balance3, ... and the same for Loads_Balance.
@@ -8883,11 +8674,8 @@ if uploaded_file:
         except Exception:
             pass
 
-        loaded_project_name = preloaded.get("name")
-        if loaded_project_name is None or str(loaded_project_name).strip() == "":
-            loaded_project_name = "Building Performance Dashboard"
-        st.session_state["project_name"] = str(loaded_project_name).strip()
-        st.session_state["_project_name_workbook_token"] = wb_token
+        if preloaded.get("name"):
+            st.session_state["project_name"] = str(preloaded["name"])
 
         if preloaded.get("area") is not None:
             try:
@@ -9857,7 +9645,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_4.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_3.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -9866,7 +9654,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_4.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_3.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -10448,7 +10236,7 @@ with tab_model_qa:
                             key=item_duplicate_name_key,
                             help="Edit this name before clicking Duplicate. If the name already exists, the app adds a numeric suffix automatically.",
                         )
-                        duplicate_item = _form_submit_button_compat(
+                        duplicate_item = st.form_submit_button(
                             "Duplicate this complete object",
                             key=item_duplicate_key,
                             use_container_width=True,
@@ -10461,14 +10249,14 @@ with tab_model_qa:
                             key=item_rename_name_key,
                             help="Edit this name and click Rename. If the name already exists, the app adds a numeric suffix automatically.",
                         )
-                        rename_item = _form_submit_button_compat(
+                        rename_item = st.form_submit_button(
                             "Rename this complete object",
                             key=item_rename_key,
                             use_container_width=True,
                             help="Renames this object and keeps all parameter values, references, assumptions and QA justifications.",
                         )
 
-                        remove_item = _form_submit_button_compat(
+                        remove_item = st.form_submit_button(
                             "Remove this complete object",
                             key=item_delete_key,
                             use_container_width=True,
@@ -10508,7 +10296,7 @@ with tab_model_qa:
                         key=f"{custom_key_prefix}_source",
                     )
                     custom_param_ref = st.text_input("Source document / reference", value="", key=f"{custom_key_prefix}_source_ref")
-                    custom_param_submit = _form_submit_button_compat(
+                    custom_param_submit = st.form_submit_button(
                         "Add custom parameter to this object",
                         key=f"{custom_key_prefix}_submit",
                         use_container_width=True,
@@ -12326,8 +12114,8 @@ with tab_lcc:
                         step=1,
                         format="%d",
                         key=_lcc_global_draft_key("analysis_period"),
-                        disabled=False,
-                        help="Analysis period used for the LCC calculation.",
+                        disabled=IS_VIEWER_MODE,
+                        help=_viewer_widget_help(),
                     )
                 with p2:
                     numeric_input(
@@ -12394,8 +12182,6 @@ with tab_lcc:
                     "For measures that affect several uses, enter multiple Assigned End Uses separated by commas (example: Heating, Cooling). "
                     "The measure cost is allocated equally across the assigned End Uses."
                 )
-                if IS_VIEWER_MODE:
-                    st.caption("🔒 You don't have permission to edit it")
 
                 draft_analysis_period_for_editor = max(
                     1,
@@ -12406,24 +12192,16 @@ with tab_lcc:
                 )
 
                 editor_kwargs_lcc = {
-                    "num_rows": "fixed" if IS_VIEWER_MODE else "dynamic",
+                    "num_rows": "dynamic",
                     "use_container_width": True,
                     "key": "lcc_investments_editor",
-                    "disabled": True if IS_VIEWER_MODE else False,
                 }
                 if hasattr(st, "column_config"):
-                    lcc_investment_help = (
-                        "You don't have permission to edit it" if IS_VIEWER_MODE else None
-                    )
                     editor_kwargs_lcc["column_config"] = {
-                        "Measure Name": st.column_config.TextColumn(
-                            "Measure Name",
-                            required=False,
-                            help=lcc_investment_help,
-                        ),
+                        "Measure Name": st.column_config.TextColumn("Measure Name", required=False),
                         "Assigned End Uses": st.column_config.TextColumn(
                             "Assigned End Uses",
-                            help=lcc_investment_help or "Enter one or more End Uses separated by commas, e.g. Heating, Cooling.",
+                            help="Enter one or more End Uses separated by commas, e.g. Heating, Cooling.",
                             required=True,
                         ),
                         "Investment Year": st.column_config.NumberColumn(
@@ -12433,14 +12211,12 @@ with tab_lcc:
                             step=1,
                             format="%d",
                             required=True,
-                            help=lcc_investment_help,
                         ),
                         "Investment Cost": st.column_config.NumberColumn(
                             f"Investment Cost ({currency_lcc})",
                             min_value=0.0,
                             step=1000.0,
                             format="%.2f",
-                            help=lcc_investment_help,
                         ),
                         "Annual Maintenance Cost (%)": st.column_config.NumberColumn(
                             "Annual Maintenance Cost (% of investment)",
@@ -12448,7 +12224,6 @@ with tab_lcc:
                             max_value=100.0,
                             step=0.1,
                             format="%.2f",
-                            help=lcc_investment_help,
                         ),
                         "Life Length (years)": st.column_config.NumberColumn(
                             "Life Length (years)",
@@ -12456,7 +12231,6 @@ with tab_lcc:
                             max_value=200,
                             step=1,
                             format="%d",
-                            help=lcc_investment_help,
                         ),
                     }
 
