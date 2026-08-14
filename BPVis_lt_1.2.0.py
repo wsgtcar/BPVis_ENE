@@ -65,7 +65,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.3.2",
+    page_title="WSGT_BPVis_ENE 2.4.1",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -568,17 +568,57 @@ def _apply_ui_names_plotly(fig):
     return fig
 
 
+CRREM_SHOW_BASELINE_STATE_KEY = "crrem_show_baseline_lines_global"
+if CRREM_SHOW_BASELINE_STATE_KEY not in st.session_state:
+    st.session_state[CRREM_SHOW_BASELINE_STATE_KEY] = True
+
+
+def _is_crrem_reference_trace_name(name: str) -> bool:
+    """Return True for CRREM pathway/reference traces controlled by the baseline toggle."""
+    n = re.sub(r"\s+", " ", str(name or "").strip().lower().replace("_", " "))
+    return (
+        n.startswith("crrem limit")
+        or n.startswith("crrem cumulative limit")
+        or n in {"crrem-baseline", "crrem baseline"}
+    )
+
+
+def _apply_crrem_reference_visibility(fig):
+    """Hide CRREM pathway/reference traces globally when requested by the user."""
+    try:
+        if bool(st.session_state.get(CRREM_SHOW_BASELINE_STATE_KEY, True)):
+            return fig
+        traces = []
+        for tr in list(getattr(fig, "data", []) or []):
+            if _is_crrem_reference_trace_name(getattr(tr, "name", "")):
+                continue
+            traces.append(tr)
+        fig.data = tuple(traces)
+    except Exception:
+        pass
+    return fig
+
+
+def _sync_crrem_baseline_toggle(widget_key: str) -> None:
+    try:
+        st.session_state[CRREM_SHOW_BASELINE_STATE_KEY] = bool(st.session_state.get(widget_key, True))
+    except Exception:
+        pass
+
+
 _ST_PLOTLY_CHART = st.plotly_chart
 
 
 def st_plotly_chart(*args, **kwargs):
-    """Wrapper around st.plotly_chart that applies UI label mapping before rendering."""
+    """Wrapper around st.plotly_chart that applies UI labels and CRREM-reference visibility."""
     try:
         if args and args[0] is not None:
             fig0 = _apply_ui_names_plotly(args[0])
+            fig0 = _apply_crrem_reference_visibility(fig0)
             args = (fig0,) + tuple(args[1:])
         elif "figure_or_data" in kwargs and kwargs["figure_or_data"] is not None:
-            kwargs["figure_or_data"] = _apply_ui_names_plotly(kwargs["figure_or_data"])
+            fig0 = _apply_ui_names_plotly(kwargs["figure_or_data"])
+            kwargs["figure_or_data"] = _apply_crrem_reference_visibility(fig0)
     except Exception:
         pass
     return _ST_PLOTLY_CHART(*args, **kwargs)
@@ -647,7 +687,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.3.2")
+st.sidebar.write("Version 2.4.1")
 
 st.sidebar.markdown("### Download Template")
 template_path = Path("templates/energy_database_complete_template.xlsx")
@@ -674,22 +714,35 @@ st.sidebar.markdown("### Project Information")
 # Small helper — cached loader
 # (Speeds up reruns while you tweak sidebar inputs)
 # =========================
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=4)
+def _read_all_excel_sheets_cached(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
+    """Parse an uploaded workbook once and cache all sheets for subsequent Streamlit reruns.
+
+    BPVis is a rerun-driven Streamlit app. Reading every Excel sheet repeatedly was one of the
+    largest avoidable costs on every widget interaction. The file bytes are the cache key, so
+    uploading or saving a different workbook automatically invalidates the cached result.
+    """
+    xls = pd.ExcelFile(io.BytesIO(file_bytes))
+    return {name: pd.read_excel(xls, sheet_name=name) for name in xls.sheet_names}
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
 def energy_balance_sheet(file_bytes: bytes) -> pd.DataFrame:
     """Load 'Energy_Balance' sheet and strip '_kWh' suffix from columns."""
-    xls = pd.ExcelFile(io.BytesIO(file_bytes))
-    df_ = pd.read_excel(xls, sheet_name="Energy_Balance")
+    sheets = _read_all_excel_sheets_cached(file_bytes)
+    df_ = sheets.get("Energy_Balance", pd.DataFrame()).copy(deep=True)
     df_.columns = df_.columns.str.replace("_kWh", "", regex=False)
     # Canonicalize legacy PV naming
     df_.columns = ["Month" if c == "Month" else _canon_enduse_name(c) for c in df_.columns]
     return df_
 
 
+@st.cache_data(show_spinner=False, max_entries=8)
 def loads_balace_sheet(file_bytes: bytes) -> pd.DataFrame:
     """Load 'Loads_Balance' sheet and strip '_load' suffix from columns."""
-    xls = pd.ExcelFile(io.BytesIO(file_bytes))
-    df_loads = pd.read_excel(xls, sheet_name="Loads_Balance")
-    df_loads.columns = [c.removesuffix("_load") for c in df_loads.columns]
+    sheets = _read_all_excel_sheets_cached(file_bytes)
+    df_loads = sheets.get("Loads_Balance", pd.DataFrame()).copy(deep=True)
+    df_loads.columns = [str(c).removesuffix("_load") for c in df_loads.columns]
     # Canonicalize legacy PV naming
     df_loads.columns = [_canon_enduse_name(c) for c in df_loads.columns]
     return df_loads
@@ -1425,10 +1478,14 @@ SHEET_MODEL_INPUTS_QA = "Model_Inputs_QA"
 SHEET_CRREM_EF_SETTINGS = "CRREM_EF_Settings"
 
 
+@st.cache_data(show_spinner=False, max_entries=4)
 def read_config_from_excel(file_bytes: bytes) -> Dict[str, Optional[pd.DataFrame]]:
-    """Read known config sheets if present; return dict of dataframes (or None)."""
-    xls = pd.ExcelFile(io.BytesIO(file_bytes))
-    sheets = {name: pd.read_excel(xls, sheet_name=name) for name in xls.sheet_names}
+    """Read known config sheets if present; return dict of dataframes (or None).
+
+    The underlying workbook parse is cached, which prevents the full Excel file from being
+    reparsed on every widget-triggered Streamlit rerun.
+    """
+    sheets = {name: df.copy(deep=True) for name, df in _read_all_excel_sheets_cached(file_bytes).items()}
     return {
         "project": sheets.get(SHEET_PROJECT),
         "factors": sheets.get(SHEET_FACTORS),
@@ -1692,6 +1749,10 @@ def _canon_scenario_payload(payload: dict) -> dict:
         if isinstance(selected, list):
             lcc_global["selected_operational_end_uses"] = [_canon_enduse_name(str(x)) for x in selected if str(x).strip()]
         payload["lcc_global"] = lcc_global
+
+    _target = str(payload.get("crrem_target", "1.5°C") or "1.5°C")
+    payload["crrem_target"] = _target if _target in {"1.5°C", "2°C"} else "1.5°C"
+    payload["crrem_use_type"] = str(payload.get("crrem_use_type", "Office") or "Office")
 
     if "crrem_ef" not in payload or not isinstance(payload.get("crrem_ef"), dict):
         payload["crrem_ef"] = _default_crrem_ef_payload()
@@ -2901,6 +2962,45 @@ def compute_lcc_cashflow_table(
     return out
 
 
+def _onsite_generation_cache_signature(df_energy: pd.DataFrame) -> tuple:
+    """Return the session-dependent on-site-generation signature used in cached calculations."""
+    try:
+        enduses = [str(c) for c in df_energy.columns if str(c) != "Month"]
+        return tuple(sorted(str(x) for x in get_onsite_generation_enduses(enduses)))
+    except Exception:
+        return tuple()
+
+
+_compute_lcc_cashflow_table_uncached = compute_lcc_cashflow_table
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _compute_lcc_cashflow_table_cached_impl(
+        df_energy: pd.DataFrame,
+        payload: dict,
+        end_uses: list,
+        project_year: int,
+        lcc_global: Optional[dict],
+        onsite_signature: tuple,
+) -> pd.DataFrame:
+    """Cached implementation for the expensive year-by-year LCC calculation."""
+    return _compute_lcc_cashflow_table_uncached(
+        df_energy, payload, end_uses, project_year, lcc_global=lcc_global
+    )
+
+
+def compute_lcc_cashflow_table_cached(
+        df_energy: pd.DataFrame,
+        payload: dict,
+        end_uses: list,
+        project_year: int,
+        lcc_global: Optional[dict] = None,
+) -> pd.DataFrame:
+    return _compute_lcc_cashflow_table_cached_impl(
+        df_energy, payload, end_uses, int(project_year), lcc_global, _onsite_generation_cache_signature(df_energy)
+    )
+
+
 def discounted_payback_period(active_cf: pd.DataFrame, reference_cf: pd.DataFrame, project_year: int) -> Optional[float]:
     """Return discounted payback period in years for active scenario vs reference scenario."""
     if active_cf is None or active_cf.empty or reference_cf is None or reference_cf.empty:
@@ -2940,7 +3040,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.3.2"
+REPORT_VERSION = "2.4.1"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -3661,7 +3761,7 @@ def _build_scenario_performance_radar_raw_df(
                 apply_lcc_filter=apply_lcc_filter,
             )
             radar_lcc_global_50["analysis_period"] = int(scenario_analysis_period)
-            cf_sc_50 = compute_lcc_cashflow_table(
+            cf_sc_50 = compute_lcc_cashflow_table_cached(
                 df_energy_sc_50,
                 payload_sc,
                 end_uses_sc_50,
@@ -3683,7 +3783,7 @@ def _build_scenario_performance_radar_raw_df(
         total_emissions_50_m2 = np.nan
         try:
             df_energy_em_50 = get_energy_balance_df(file_bytes, filename, scenario_name=sc_name_str)
-            emis_series_50_t = compute_crrem_like_scenario_emissions_series(
+            emis_series_50_t = compute_crrem_like_scenario_emissions_series_cached(
                 df_energy_em_50,
                 payload_sc,
                 radar_crrem,
@@ -5003,7 +5103,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         carbon_limit, eui_limit = _report_crrem_limits_for_context(crrem, target_id, crrem_use, mixed_records, years_crrem)
         if not carbon_limit.empty:
             years_crrem = list(carbon_limit.index.astype(int))
-        annual_em_t = compute_crrem_like_scenario_emissions_series(df_energy, payload, crrem, project_year_r, years_crrem).reindex(years_crrem).fillna(0.0)
+        annual_em_t = compute_crrem_like_scenario_emissions_series_cached(df_energy, payload, crrem, project_year_r, years_crrem).reindex(years_crrem).fillna(0.0)
         carbon_asset = (annual_em_t * 1000.0 / project_area_r) if project_area_r else annual_em_t * 0.0
         eui_asset = _report_eui_series_for_payload(df_energy, payload, years_crrem, project_area_r)
         stranding_c = find_stranding_year(carbon_asset, carbon_limit) if not carbon_limit.empty else None
@@ -5023,8 +5123,8 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         try:
             payload_without_measures = deepcopy(payload)
             payload_without_measures["crrem_measures"] = []
-            annual_em_without_t = compute_crrem_like_scenario_emissions_series(df_energy, payload_without_measures, crrem, project_year_r, years_crrem).reindex(years_crrem).fillna(0.0)
-            annual_em_with_t = compute_crrem_like_scenario_emissions_series(df_energy, payload, crrem, project_year_r, years_crrem).reindex(years_crrem).fillna(0.0)
+            annual_em_without_t = compute_crrem_like_scenario_emissions_series_cached(df_energy, payload_without_measures, crrem, project_year_r, years_crrem).reindex(years_crrem).fillna(0.0)
+            annual_em_with_t = compute_crrem_like_scenario_emissions_series_cached(df_energy, payload, crrem, project_year_r, years_crrem).reindex(years_crrem).fillna(0.0)
             annual_em_savings_t = annual_em_without_t - annual_em_with_t
             cumulative_em_savings_t = annual_em_savings_t.cumsum()
             eui_without = compute_crrem_like_scenario_eui_series(df_energy, payload_without_measures, project_year_r, years_crrem, project_area_r).reindex(years_crrem).fillna(0.0)
@@ -5065,7 +5165,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         active_name,
         prefer_draft=True,
     )
-    cf = compute_lcc_cashflow_table(df_energy, payload, end_uses, project_year_r, lcc_global=lcc_global)
+    cf = compute_lcc_cashflow_table_cached(df_energy, payload, end_uses, project_year_r, lcc_global=lcc_global)
     if cf.empty:
         story.append(Paragraph("No LCC cash-flow data available. Add LCC assumptions and investment measures in the LCC-Analysis tab.", styles["BodyText"]))
     else:
@@ -5085,7 +5185,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                 ref_end_uses = [str(c) for c in ref_df.columns if str(c) != "Month"]
                 ref_lcc_global = _normalize_lcc_global_payload(lcc_global, ref_end_uses)
                 ref_lcc_global["payback_reference_scenario"] = ref_name
-                ref_cf = compute_lcc_cashflow_table(ref_df, ref_payload, ref_end_uses, project_year_r, lcc_global=ref_lcc_global)
+                ref_cf = compute_lcc_cashflow_table_cached(ref_df, ref_payload, ref_end_uses, project_year_r, lcc_global=ref_lcc_global)
                 pb = discounted_payback_period(cf, ref_cf, project_year_r)
             except Exception:
                 pb = None
@@ -5240,7 +5340,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
             apply_lcc_filter=_get_scenario_comparison_apply_lcc_filter(True),
         )
         _sc_report_lcc_global["analysis_period"] = int(scenario_comparison_period_report)
-        cf_scenario_report = compute_lcc_cashflow_table(
+        cf_scenario_report = compute_lcc_cashflow_table_cached(
             df_energy,
             payload,
             _sc_report_end_uses,
@@ -5258,7 +5358,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         try:
             analysis_period = max(1, int(scenario_comparison_period_report))
             years_sc = list(range(project_year_r, project_year_r + analysis_period))
-            annual_em_sc = compute_crrem_like_scenario_emissions_series(df_energy, payload, crrem, project_year_r, years_sc).reindex(years_sc).fillna(0.0)
+            annual_em_sc = compute_crrem_like_scenario_emissions_series_cached(df_energy, payload, crrem, project_year_r, years_sc).reindex(years_sc).fillna(0.0)
             target_id = "1.5C" if str(st.session_state.get("crrem_target_select", "1.5°C")).startswith("1.5") else "2C"
             carbon_limit_sc, _ = _report_crrem_limits_for_context(crrem, target_id, str(payload.get("crrem_use_type", "Office")), payload.get("crrem_mixed_use", []), years_sc)
             crrem_total = carbon_limit_sc * project_area_r / 1000.0 if not carbon_limit_sc.empty else pd.Series(dtype=float)
@@ -5347,6 +5447,7 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
         "efficiency": {use: float(def_eff.get(use, 1.0)) for use in end_uses},
         "pv": {"enabled": False, "scale": 1.0},
         "crrem_measures": [],
+        "crrem_target": "1.5°C",
         "crrem_use_type": "Office",
         "crrem_mixed_use": [
             {"Use Type": "Office", "Area Share %": 50.0},
@@ -5384,7 +5485,8 @@ def capture_scenario_from_widgets(end_uses: list) -> dict:
             "scale": float(st.session_state.get("pv_scale", 1.0)),
         },
         "crrem_measures": _measures_df_to_records(st.session_state.get("crrem_measures_df")),
-        "crrem_use_type": str(st.session_state.get("crrem_use_type", "Office")),
+        "crrem_target": str(st.session_state.get("crrem_target_select", "1.5°C") or "1.5°C"),
+        "crrem_use_type": str(st.session_state.get("crrem_use_type", "Office") or "Office"),
         "crrem_mixed_use": _mixed_use_df_to_records(st.session_state.get("crrem_mixed_use_df")),
         "crrem_ef": _crrem_ef_payload_from_session(),
         "lcc": _capture_lcc_from_widgets(end_uses),
@@ -5450,7 +5552,12 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
     # Keep the measures editor in sync after loading a project/scenario (so the table shows saved measures)
     st.session_state["crrem_measures_draft_df"] = st.session_state["crrem_measures_df"].copy(deep=True)
 
-    # CRREM use settings (scenario-specific; defaults to Office if absent)
+    # CRREM target/use settings (scenario-specific; backwards compatible defaults).
+    try:
+        _crrem_target_loaded = str(payload.get("crrem_target", "1.5°C") or "1.5°C")
+        st.session_state["crrem_target_select"] = _crrem_target_loaded if _crrem_target_loaded in {"1.5°C", "2°C"} else "1.5°C"
+    except Exception:
+        st.session_state["crrem_target_select"] = "1.5°C"
     try:
         st.session_state["crrem_use_type"] = str(payload.get("crrem_use_type", "Office") or "Office")
     except Exception:
@@ -8091,6 +8198,36 @@ def compute_crrem_like_scenario_emissions_series(
     return pd.Series(out, dtype=float)
 
 
+_compute_crrem_like_scenario_emissions_series_uncached = compute_crrem_like_scenario_emissions_series
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _compute_crrem_like_scenario_emissions_series_cached_impl(
+        df_energy: pd.DataFrame,
+        payload: dict,
+        crrem: Optional[dict],
+        project_year: int,
+        years: list,
+        onsite_signature: tuple,
+) -> pd.Series:
+    """Cached scenario-emissions trajectory for repeated tab/rerun calculations."""
+    return _compute_crrem_like_scenario_emissions_series_uncached(
+        df_energy, payload, crrem, project_year, years
+    )
+
+
+def compute_crrem_like_scenario_emissions_series_cached(
+        df_energy: pd.DataFrame,
+        payload: dict,
+        crrem: Optional[dict],
+        project_year: int,
+        years: list,
+) -> pd.Series:
+    return _compute_crrem_like_scenario_emissions_series_cached_impl(
+        df_energy, payload, crrem, int(project_year), list(years or []), _onsite_generation_cache_signature(df_energy)
+    )
+
+
 def compute_crrem_like_scenario_eui_series(
         df_energy: pd.DataFrame,
         payload: dict,
@@ -9325,7 +9462,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_3_1.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_1.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -9334,7 +9471,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_3_1.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_1.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -10377,13 +10514,26 @@ with tab6:
             )
         else:
             # --- Controls
+            _crrem_target_options = ["1.5°C", "2°C"]
+            if st.session_state.get("crrem_target_select") not in _crrem_target_options:
+                st.session_state["crrem_target_select"] = "1.5°C"
             target_label = st.selectbox(
                 "Target (temperature pathway)",
-                ["1.5°C", "2°C"],
-                index=0,
+                _crrem_target_options,
+                index=_crrem_target_options.index(st.session_state.get("crrem_target_select", "1.5°C")),
                 key="crrem_target_select",
             )
             target_id = "1.5C" if target_label.startswith("1.5") else "2C"
+
+            _crrem_toggle_key = "crrem_show_baseline_lines_control"
+            st.session_state[_crrem_toggle_key] = bool(st.session_state.get(CRREM_SHOW_BASELINE_STATE_KEY, True))
+            st.checkbox(
+                "Show CRREM baseline / pathway lines",
+                key=_crrem_toggle_key,
+                on_change=_sync_crrem_baseline_toggle,
+                args=(_crrem_toggle_key,),
+                help="Show or hide the CRREM reference pathway in CRREM and scenario comparison diagrams.",
+            )
 
             pt_df = crrem["property_types"].copy()
             use_options = pt_df["app_use"].dropna().astype(str).tolist()
@@ -11933,7 +12083,7 @@ with tab_lcc:
             active_payload_lcc["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
             active_payload_lcc["lcc_global"] = deepcopy(lcc_global_active)
 
-        active_lcc_cashflow = compute_lcc_cashflow_table(
+        active_lcc_cashflow = compute_lcc_cashflow_table_cached(
             df_lcc_energy,
             active_payload_lcc,
             valid_enduses_lcc,
@@ -11982,7 +12132,7 @@ with tab_lcc:
                 ref_lcc_global_active = _normalize_lcc_global_payload(lcc_global_active, ref_valid_enduses_lcc)
                 ref_payload_lcc["lcc"] = _normalize_lcc_payload(ref_payload_lcc.get("lcc", {}), ref_valid_enduses_lcc)
                 ref_payload_lcc["lcc_global"] = deepcopy(ref_lcc_global_active)
-                ref_lcc_cashflow = compute_lcc_cashflow_table(
+                ref_lcc_cashflow = compute_lcc_cashflow_table_cached(
                     ref_df_lcc_energy,
                     ref_payload_lcc,
                     ref_valid_enduses_lcc,
@@ -12083,40 +12233,52 @@ with tab_lcc:
             c3, c4 = st.columns([3, 1])
             with c3:
                 st.subheader("Cumulative LCC")
+                _lcc_line_mode = st.selectbox(
+                    "Lines to show",
+                    ["Nominal+Discounted", "Only Nominal", "Only Discounted"],
+                    index=0,
+                    key="lcc_cumulative_line_mode",
+                )
+                _lcc_show_nominal = _lcc_line_mode in {"Nominal+Discounted", "Only Nominal"}
+                _lcc_show_discounted = _lcc_line_mode in {"Nominal+Discounted", "Only Discounted"}
                 fig_lcc_cum = go.Figure()
-                fig_lcc_cum.add_trace(go.Scatter(
-                    x=annual_totals["Year"],
-                    y=annual_totals["Cumulative Nominal Cost"],
-                    mode="lines+markers",
-                    name=f"{active_selected} cumulative nominal",
-                    line=dict(color=_lcc_active_color, width=3),
-                    marker=dict(color=_lcc_active_color),
-                ))
-                fig_lcc_cum.add_trace(go.Scatter(
-                    x=annual_totals["Year"],
-                    y=annual_totals["Cumulative Discounted Cost"],
-                    mode="lines+markers",
-                    name=f"{active_selected} cumulative discounted",
-                    line=dict(color=_lcc_active_color, dash="dash", width=3),
-                    marker=dict(color=_lcc_active_color),
-                ))
+                if _lcc_show_nominal:
+                    fig_lcc_cum.add_trace(go.Scatter(
+                        x=annual_totals["Year"],
+                        y=annual_totals["Cumulative Nominal Cost"],
+                        mode="lines+markers",
+                        name=f"{active_selected} cumulative nominal",
+                        line=dict(color=_lcc_active_color, width=3),
+                        marker=dict(color=_lcc_active_color),
+                    ))
+                if _lcc_show_discounted:
+                    fig_lcc_cum.add_trace(go.Scatter(
+                        x=annual_totals["Year"],
+                        y=annual_totals["Cumulative Discounted Cost"],
+                        mode="lines+markers",
+                        name=f"{active_selected} cumulative discounted",
+                        line=dict(color=_lcc_active_color, dash="dash", width=3),
+                        marker=dict(color=_lcc_active_color),
+                    ))
                 if not ref_annual_totals.empty:
-                    fig_lcc_cum.add_trace(go.Scatter(
-                        x=ref_annual_totals["Year"],
-                        y=ref_annual_totals["Cumulative Nominal Cost"],
-                        mode="lines+markers",
-                        name=f"{ref_scenario_lcc} cumulative nominal",
-                        line=dict(color=_lcc_ref_color, width=3),
-                        marker=dict(color=_lcc_ref_color),
-                    ))
-                    fig_lcc_cum.add_trace(go.Scatter(
-                        x=ref_annual_totals["Year"],
-                        y=ref_annual_totals["Cumulative Discounted Cost"],
-                        mode="lines+markers",
-                        name=f"{ref_scenario_lcc} cumulative discounted",
-                        line=dict(color=_lcc_ref_color, dash="dash", width=3),
-                        marker=dict(color=_lcc_ref_color),
-                    ))
+                    if _lcc_show_nominal:
+                        fig_lcc_cum.add_trace(go.Scatter(
+                            x=ref_annual_totals["Year"],
+                            y=ref_annual_totals["Cumulative Nominal Cost"],
+                            mode="lines+markers",
+                            name=f"{ref_scenario_lcc} cumulative nominal",
+                            line=dict(color=_lcc_ref_color, width=3),
+                            marker=dict(color=_lcc_ref_color),
+                        ))
+                    if _lcc_show_discounted:
+                        fig_lcc_cum.add_trace(go.Scatter(
+                            x=ref_annual_totals["Year"],
+                            y=ref_annual_totals["Cumulative Discounted Cost"],
+                            mode="lines+markers",
+                            name=f"{ref_scenario_lcc} cumulative discounted",
+                            line=dict(color=_lcc_ref_color, dash="dash", width=3),
+                            marker=dict(color=_lcc_ref_color),
+                        ))
                 fig_lcc_cum.update_layout(
                     height=620,
                     yaxis_title=f"Cost ({currency_lcc})",
@@ -12723,6 +12885,26 @@ with tab7:
                     "Life-cycle comparison uses the Scenarios-tab analysis period and the committed global LCC assumptions from the LCC-Analysis tab. "
                     "Scenario-specific Energy_Balance overrides and LCC investment measures are included."
                 )
+                _lc_ctrl1, _lc_ctrl2 = st.columns(2)
+                with _lc_ctrl1:
+                    _scenario_lcc_line_mode = st.selectbox(
+                        "Cumulative LCC lines",
+                        ["Nominal+Discounted", "Only Nominal", "Only Discounted"],
+                        index=0,
+                        key="scenario_cumulative_lcc_line_mode",
+                    )
+                with _lc_ctrl2:
+                    _scenario_crrem_toggle_key = "scenario_show_crrem_baseline_lines_control"
+                    st.session_state[_scenario_crrem_toggle_key] = bool(st.session_state.get(CRREM_SHOW_BASELINE_STATE_KEY, True))
+                    st.checkbox(
+                        "Show CRREM baseline / pathway lines",
+                        key=_scenario_crrem_toggle_key,
+                        on_change=_sync_crrem_baseline_toggle,
+                        args=(_scenario_crrem_toggle_key,),
+                        help="Show or hide the CRREM reference pathway in the Annual Emissions and Cumulative Emissions diagrams.",
+                    )
+                _scenario_lcc_show_nominal = _scenario_lcc_line_mode in {"Nominal+Discounted", "Only Nominal"}
+                _scenario_lcc_show_discounted = _scenario_lcc_line_mode in {"Nominal+Discounted", "Only Discounted"}
 
                 # Build one cumulative LCC trajectory per scenario. Nominal costs are shown as solid lines,
                 # discounted costs as dashed lines, using the same scenario color for both.
@@ -12764,7 +12946,7 @@ with tab7:
                         try:
                             _df_energy_sc = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(_sc_name))
                             _end_uses_sc = [_canon_enduse_name(str(c)) for c in _df_energy_sc.columns if c != "Month"]
-                            _cf_sc = compute_lcc_cashflow_table(
+                            _cf_sc = compute_lcc_cashflow_table_cached(
                                 _df_energy_sc,
                                 _payload_sc,
                                 _end_uses_sc,
@@ -12813,22 +12995,24 @@ with tab7:
                                 f"Annual Energy Cost ({_curr}/a)": float(_v_ec),
                             })
 
-                        fig_lcc_cmp.add_trace(go.Scatter(
-                            x=lcc_years_cmp,
-                            y=_cum_nominal_sc.values,
-                            mode="lines+markers",
-                            name=f"{_sc_name} — Nominal",
-                            line=dict(color=_color_sc, width=2.5, dash="solid"),
-                            marker=dict(color=_color_sc, size=5),
-                        ))
-                        fig_lcc_cmp.add_trace(go.Scatter(
-                            x=lcc_years_cmp,
-                            y=_cum_discounted_sc.values,
-                            mode="lines+markers",
-                            name=f"{_sc_name} — Discounted",
-                            line=dict(color=_color_sc, width=2.5, dash="dash"),
-                            marker=dict(color=_color_sc, size=5),
-                        ))
+                        if _scenario_lcc_show_nominal:
+                            fig_lcc_cmp.add_trace(go.Scatter(
+                                x=lcc_years_cmp,
+                                y=_cum_nominal_sc.values,
+                                mode="lines+markers",
+                                name=f"{_sc_name} — Nominal",
+                                line=dict(color=_color_sc, width=2.5, dash="solid"),
+                                marker=dict(color=_color_sc, size=5),
+                            ))
+                        if _scenario_lcc_show_discounted:
+                            fig_lcc_cmp.add_trace(go.Scatter(
+                                x=lcc_years_cmp,
+                                y=_cum_discounted_sc.values,
+                                mode="lines+markers",
+                                name=f"{_sc_name} — Discounted",
+                                line=dict(color=_color_sc, width=2.5, dash="dash"),
+                                marker=dict(color=_color_sc, size=5),
+                            ))
                         lcc_summary_rows.append({
                             "Scenario": _sc_name,
                             f"Cumulative Nominal LCC ({_curr})": float(_cum_nominal_sc.iloc[-1]) if len(_cum_nominal_sc) else 0.0,
@@ -12950,7 +13134,7 @@ with tab7:
                                 uploaded_file.name,
                                 scenario_name=str(_sc_name),
                             )
-                            _annual_emissions_series_t = compute_crrem_like_scenario_emissions_series(
+                            _annual_emissions_series_t = compute_crrem_like_scenario_emissions_series_cached(
                                 _df_energy_em_sc,
                                 _payload_sc,
                                 _crrem_cmp,
@@ -14154,6 +14338,46 @@ def _loads_available_load_columns(df_loads: pd.DataFrame) -> list:
         return []
 
 
+def _loads_energy_match_key(name: str) -> str:
+    """Normalize a load/end-use name for matching Loads_Balance to Energy_Balance.
+
+    Excel suffixes such as `_load` and `_kWh` are already removed by the loaders, but this
+    additionally tolerates common leading/trailing labels and numeric IDs without changing
+    the original user-facing names.
+    """
+    s = str(name or "").strip().lower()
+    s = re.sub(r"(?i)(?:_load|_kwh|_kw)$", "", s)
+    s = re.sub(r"(?i)^(?:load|energy|end[ _-]*use|system|annual|total)[ _-]+", "", s)
+    s = re.sub(r"(?i)[ _-]+(?:load|energy|end[ _-]*use|demand|consumption|system|annual|total|kwh|kw)$", "", s)
+    s = re.sub(r"^[0-9]+[ _.-]*", "", s)
+    s = re.sub(r"[ _.-]*[0-9]+$", "", s)
+    return re.sub(r"[^a-z0-9]+", "", s)
+
+
+def _loads_find_matching_energy_use(selected_load: str, df_energy: pd.DataFrame) -> Optional[str]:
+    """Return the best Energy_Balance column matching a selected load name."""
+    try:
+        candidates = [str(c) for c in df_energy.columns if str(c) != "Month"]
+        if not candidates:
+            return None
+        selected_key = _loads_energy_match_key(selected_load)
+        exact = [c for c in candidates if _loads_energy_match_key(c) == selected_key and selected_key]
+        if exact:
+            return exact[0]
+        # Conservative fallback for prefixed/suffixed project-specific naming: only use a unique containment match.
+        if len(selected_key) >= 4:
+            partial = [
+                c for c in candidates
+                if (_loads_energy_match_key(c) in selected_key or selected_key in _loads_energy_match_key(c))
+                and len(_loads_energy_match_key(c)) >= 4
+            ]
+            if len(partial) == 1:
+                return partial[0]
+    except Exception:
+        pass
+    return None
+
+
 def _loads_color_for(load_name: str, fallback: str = "#c02419") -> str:
     """Return the configured color for a load/end-use name."""
     try:
@@ -14520,7 +14744,20 @@ with tab4:
 
         load_select_col, ghost_scenario_col, ghost_load_col = st.columns([1, 1, 1])
         with load_select_col:
-            selected_load = st.selectbox("Select Load", load_cols, index=0, format_func=ui_name)
+            _loads_selected_key = "loads_analysis_selected_load"
+            _previous_selected_load = st.session_state.get(_loads_selected_key)
+            if _previous_selected_load not in load_cols:
+                # Preserve the same logical load after a scenario switch when naming differs only by prefix/suffix.
+                _previous_match_key = _loads_energy_match_key(_previous_selected_load) if _previous_selected_load else ""
+                _matched_loads = [c for c in load_cols if _loads_energy_match_key(c) == _previous_match_key and _previous_match_key]
+                st.session_state[_loads_selected_key] = _matched_loads[0] if _matched_loads else load_cols[0]
+            selected_load = st.selectbox(
+                "Select Load",
+                load_cols,
+                index=load_cols.index(st.session_state[_loads_selected_key]) if st.session_state.get(_loads_selected_key) in load_cols else 0,
+                format_func=ui_name,
+                key=_loads_selected_key,
+            )
 
         with ghost_scenario_col:
             ghost_scenario_option = st.selectbox(
@@ -14591,6 +14828,28 @@ with tab4:
         min_specific_load = ((min_load_selected / project_area) * 1000)
         p95_specific_load = np.percentile(specific_load.dropna(), 95)
         p80_specific_load = np.percentile(specific_load.dropna(), 80)
+
+        # Annual System Efficiency = annual load / annual energy use with the same logical name.
+        # Match is tolerant of the Excel `_load` / `_kWh` suffixes and common project prefixes/suffixes.
+        annual_system_efficiency = None
+        matched_energy_use_name = None
+        try:
+            _df_energy_for_load_kpi = get_energy_balance_df(
+                file_bytes_loads,
+                uploaded_file.name,
+                scenario_name=active_scenario_loads,
+            )
+            matched_energy_use_name = _loads_find_matching_energy_use(selected_load, _df_energy_for_load_kpi)
+            if matched_energy_use_name:
+                _annual_energy_use = float(pd.to_numeric(
+                    _df_energy_for_load_kpi[matched_energy_use_name], errors="coerce"
+                ).fillna(0.0).sum())
+                if abs(_annual_energy_use) > 1e-12:
+                    annual_system_efficiency = float(total_load_selected) / float(_annual_energy_use)
+        except Exception:
+            annual_system_efficiency = None
+            matched_energy_use_name = None
+
         totals_by_month = df_loads.groupby("month", as_index=False)[selected_load].sum()
         totals_by_month["month"] = pd.Categorical(
             totals_by_month["month"], ordered=True
@@ -14627,7 +14886,18 @@ with tab4:
                 hovertemplate=f"<b>{ghost_label}</b><br>Month %{{x}}<br>Load %{{y:,.0f}} kWh<extra></extra>",
             ))
             monthly_total_load_bar.update_layout(barmode="overlay")
-        monthly_total_load_bar.update_layout(showlegend=True, legend=dict(title=""))
+        monthly_total_load_bar.update_layout(
+            showlegend=True,
+            legend=dict(
+                title="",
+                orientation="h",
+                yanchor="top",
+                y=-0.16,
+                xanchor="center",
+                x=0.5,
+            ),
+            margin=dict(l=40, r=20, t=45, b=115),
+        )
 
         annual_total_load_fig = go.Figure()
         annual_total_load_fig.add_trace(go.Bar(
@@ -14696,6 +14966,15 @@ with tab4:
             st.metric("Minimum Specific Load", f"{min_specific_load:,.1f} W/m2")
             st.metric("95th Percentile Specific Load", f"{p95_specific_load:,.1f} W/m2")
             st.metric("80th Percentile Specific Load", f"{p80_specific_load:,.1f} W/m2")
+            st.metric(
+                "Annual System Efficiency",
+                f"{annual_system_efficiency:,.2f}" if annual_system_efficiency is not None and np.isfinite(annual_system_efficiency) else "n/a",
+                help=(
+                    f"Annual {ui_name(selected_load)} load divided by annual {ui_name(matched_energy_use_name)} energy use."
+                    if matched_energy_use_name else
+                    "No matching Energy_Balance end use was found for the selected load."
+                ),
+            )
 
         st.subheader(f"Hourly Load Heatmap — {selected_load} (kW)")
         st_plotly_chart(load_heatmap, use_container_width=True)
