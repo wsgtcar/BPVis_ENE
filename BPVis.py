@@ -91,7 +91,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.4.6",
+    page_title="WSGT_BPVis_ENE 2.4.7",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -112,34 +112,70 @@ VIEWER_EXTERNAL_FOLDER = "External"
 
 
 def _auth_app_dir() -> Path:
-    """Return the physical folder containing the Python entrypoint when available.
-
-    Some hosted Streamlit launchers stage or symlink the entrypoint into a temporary
-    directory. Therefore this path is useful as one hint, but it is deliberately not
-    treated as the repository root.
-    """
+    """Return the directory of the Streamlit entrypoint file."""
     try:
         return Path(__file__).resolve().parent
     except Exception:
         return Path.cwd().resolve()
 
 
-def _auth_candidate_roots() -> list:
-    """Return plausible application/repository roots across local and hosted runs.
+def _auth_secret_or_env(name: str) -> str:
+    """Read an optional deployment override from environment or Streamlit secrets."""
+    try:
+        value = os.environ.get(name, "")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    except Exception:
+        pass
+    try:
+        value = st.secrets.get(name, "")
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    except Exception:
+        pass
+    return ""
 
-    Streamlit Community Cloud normally starts the app with the repository root as
-    the working directory. Some deployment/staging environments, however, expose the
-    entrypoint from a temporary folder such as /mount/Downloads. To make BPVis robust
-    in both cases, collect roots from cwd, the entrypoint, environment variables,
-    Python's import path, and the standard Community Cloud /mount/src location.
+
+def _auth_nearest_marker_root(start_dir: Path) -> Optional[Path]:
+    """Return the nearest plausible BPVis/Git repository root above *start_dir*.
+
+    Community Cloud executes Streamlit from the repository root. Locally, IDEs can
+    use a different working directory. Looking for project markers lets BPVis recover
+    the root without depending on one launcher-specific path.
+    """
+    try:
+        p = Path(start_dir).resolve()
+    except Exception:
+        return None
+    for candidate in [p] + list(p.parents):
+        try:
+            if (candidate / ".git").exists():
+                return candidate
+            # External + templates is a strong BPVis project marker even when the
+            # local checkout does not expose the .git directory.
+            if (candidate / VIEWER_EXTERNAL_FOLDER).is_dir() and (candidate / "templates").is_dir():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _auth_candidate_roots() -> list:
+    """Return deterministic roots that can legitimately contain users.xlsx.
+
+    Important: this intentionally avoids walking arbitrary filesystem roots. On
+    Streamlit Community Cloud, ``Path.cwd()`` is the checked-out Git repository root.
+    Locally we additionally inspect the entrypoint directory and their nearest Git/BPVis
+    roots. ``BPVIS_ROOT`` can be supplied as an environment variable or Streamlit secret
+    for unusual launchers.
     """
     roots = []
 
-    def _add_root(path_like):
+    def _add(value):
         try:
-            if path_like is None or str(path_like).strip() == "":
+            if value is None or not str(value).strip():
                 return
-            p = Path(path_like).expanduser().resolve()
+            p = Path(value).expanduser().resolve()
             if p.is_file():
                 p = p.parent
             if p not in roots:
@@ -147,157 +183,137 @@ def _auth_candidate_roots() -> list:
         except Exception:
             pass
 
-    app_dir = _auth_app_dir()
+    override = _auth_secret_or_env("BPVIS_ROOT")
+    _add(override)
+
     cwd = Path.cwd().resolve()
-    _add_root(cwd)
-    _add_root(app_dir)
+    app_dir = _auth_app_dir()
+    _add(cwd)
+    _add(app_dir)
 
-    # Explicit/host-provided repository roots, when available. BPVIS_ROOT is an
-    # optional override that can also be used in non-Community-Cloud deployments.
-    for env_name in ("BPVIS_ROOT", "GITHUB_WORKSPACE", "STREAMLIT_REPO_ROOT", "REPO_ROOT"):
-        _add_root(os.environ.get(env_name))
-
-    # Parent directories cover the common case where the entrypoint sits in a
-    # subfolder of the repository.
     for base in (cwd, app_dir):
+        marker_root = _auth_nearest_marker_root(base)
+        _add(marker_root)
         try:
-            for parent in list(base.parents)[:6]:
-                _add_root(parent)
+            # A shallow parent search supports an entrypoint inside one or two
+            # subdirectories without ever scanning the whole drive.
+            for parent in list(base.parents)[:4]:
+                _add(parent)
         except Exception:
             pass
 
-    # Python import paths can still point at the checked-out repository even if
-    # the entrypoint itself was copied/symlinked elsewhere by the host.
-    for item in list(sys.path):
-        try:
-            if item:
-                _add_root(item)
-        except Exception:
-            pass
-
-    # Streamlit Community Cloud repositories are conventionally mounted below
-    # /mount/src/<repository>. Probe only a bounded depth to avoid broad filesystem
-    # scans while still supporting an entrypoint inside a repository subfolder.
+    # Official Community Cloud checkout location is below /mount/src. cwd should
+    # already be the repository root, but these direct children are a safe fallback
+    # for stale launch contexts and do not recursively scan the filesystem.
     mount_src = Path("/mount/src")
     try:
-        if mount_src.exists() and mount_src.is_dir():
-            _add_root(mount_src)
-            for repo_dir in mount_src.iterdir():
-                if not repo_dir.is_dir():
-                    continue
-                _add_root(repo_dir)
-                try:
-                    for child in repo_dir.iterdir():
-                        if child.is_dir() and not child.name.startswith("."):
-                            _add_root(child)
-                except Exception:
-                    pass
+        if mount_src.is_dir():
+            for child in mount_src.iterdir():
+                if child.is_dir():
+                    _add(child)
     except Exception:
         pass
 
     return roots
 
 
-def _auth_users_file_candidates() -> list:
-    """Return candidate users.xlsx paths across local and hosted Streamlit runs.
+def _auth_case_insensitive_file(directory: Path, filename: str) -> Optional[Path]:
+    """Return a direct child matching *filename* case-insensitively.
 
-    Direct repository/script candidates are tried first. If those fail, BPVis performs
-    a bounded discovery under common deployment roots. This avoids depending on a
-    particular Community Cloud filesystem layout and also supports an entrypoint that
-    lives in a repository subfolder.
+    This makes a GitHub file accidentally committed as ``Users.xlsx`` work on Linux
+    while still keeping the file constrained to the resolved project root.
     """
+    try:
+        directory = Path(directory)
+        exact = directory / filename
+        if exact.is_file():
+            return exact.resolve()
+        if directory.is_dir():
+            wanted = filename.lower()
+            for child in directory.iterdir():
+                if child.is_file() and child.name.lower() == wanted:
+                    return child.resolve()
+    except Exception:
+        pass
+    return None
+
+
+def _auth_users_file_candidates() -> list:
+    """Return direct users.xlsx candidates in priority order."""
     candidates = []
 
-    def _add(path_like):
+    # Optional explicit file override for environments where users.xlsx must live
+    # outside the application root. This is intended for administrators only.
+    explicit_file = _auth_secret_or_env("BPVIS_USERS_FILE")
+    if explicit_file:
         try:
-            if path_like is None or str(path_like).strip() == "":
-                return
-            p = Path(path_like).expanduser().resolve()
-            if p not in candidates:
-                candidates.append(p)
+            candidates.append(Path(explicit_file).expanduser().resolve())
         except Exception:
             pass
 
-    roots = _auth_candidate_roots()
-    for root in roots:
-        _add(root / AUTH_USERS_FILENAME)
-
-    if any(p.exists() and p.is_file() for p in candidates):
-        return candidates
-
-    # Hosted environments do not guarantee one universal checkout location.
-    # Search only a small set of plausible roots and cap traversal depth.
-    discovery_roots = list(roots)
-    for extra in (
-        "/mount", "/mount/src", "/workspace", "/app", "/repo", "/src",
-        "/home/adminuser", "/home/appuser", "/opt/render/project/src",
-    ):
-        try:
-            p = Path(extra)
-            if p.exists() and p.is_dir() and p.resolve() not in discovery_roots:
-                discovery_roots.append(p.resolve())
-        except Exception:
-            pass
-
-    skip_dirs = {
-        ".git", ".venv", "venv", "env", "node_modules", "site-packages",
-        "__pycache__", ".cache", ".streamlit",
-    }
-
-    for base in discovery_roots:
-        try:
-            base = Path(base).resolve()
-            if not base.exists() or not base.is_dir():
-                continue
-            base_depth = len(base.parts)
-            for root_str, dirnames, filenames in os.walk(base):
-                root_path = Path(root_str)
-                depth = len(root_path.parts) - base_depth
-                dirnames[:] = [
-                    d for d in dirnames
-                    if d not in skip_dirs and not d.startswith(".") and depth < 5
-                ]
-                if AUTH_USERS_FILENAME in filenames:
-                    _add(root_path / AUTH_USERS_FILENAME)
-        except Exception:
-            continue
-
+    for root in _auth_candidate_roots():
+        match = _auth_case_insensitive_file(root, AUTH_USERS_FILENAME)
+        if match is not None and match not in candidates:
+            candidates.append(match)
+        else:
+            try:
+                p = (Path(root) / AUTH_USERS_FILENAME).resolve()
+                if p not in candidates:
+                    candidates.append(p)
+            except Exception:
+                pass
     return candidates
 
+
 def _auth_users_file_path() -> Path:
-    """Return the first existing users.xlsx file, preferring the actual repository copy."""
-    candidates = _auth_users_file_candidates()
-    for candidate in candidates:
+    """Return the first existing users.xlsx candidate."""
+    for candidate in _auth_users_file_candidates():
         try:
-            if candidate.exists() and candidate.is_file():
-                return candidate
+            if candidate.is_file():
+                return candidate.resolve()
         except Exception:
             continue
-    # Keep a deterministic fallback for the login error path.
+    # Deterministic fallback used only for diagnostics.
     return (Path.cwd() / AUTH_USERS_FILENAME).resolve()
 
 
 def _auth_project_root() -> Path:
-    """Return the BPVis project root used for users.xlsx and External/.
+    """Return the authoritative BPVis project root.
 
-    Once users.xlsx is located, its parent is authoritative. This is important on
-    hosted deployments where __file__ may point to a transient staging directory.
+    The parent of the resolved users.xlsx is authoritative because the Viewer
+    ``External`` folder is intentionally colocated with the authentication database.
     """
     users_path = _auth_users_file_path()
     try:
-        if users_path.exists() and users_path.is_file():
+        if users_path.is_file():
             return users_path.parent.resolve()
     except Exception:
         pass
+    marker = _auth_nearest_marker_root(Path.cwd()) or _auth_nearest_marker_root(_auth_app_dir())
+    if marker is not None:
+        return marker.resolve()
     return Path.cwd().resolve()
 
 
+def _auth_runtime_diagnostics() -> dict:
+    """Small, non-recursive diagnostics for deployment troubleshooting."""
+    try:
+        roots = [str(p) for p in _auth_candidate_roots()]
+    except Exception:
+        roots = []
+    return {
+        "cwd": str(Path.cwd()),
+        "entrypoint_dir": str(_auth_app_dir()),
+        "searched_roots": roots,
+    }
+
+
 def _auth_users_file_help_text() -> str:
-    """Return deployment-oriented guidance without advertising transient paths."""
     return (
-        "Place `users.xlsx` in the root of the deployed GitHub repository (the same "
-        "project root that contains the `External` folder). If the file is already "
-        "there, make sure it is committed to the same branch used by the Streamlit app."
+        "BPVis could not see `users.xlsx` in the runtime project root. On Streamlit "
+        "Community Cloud the working directory is the root of the deployed Git repository. "
+        "Keep `users.xlsx` there, or set the administrator-only `BPVIS_ROOT` / "
+        "`BPVIS_USERS_FILE` override in Streamlit secrets for a non-standard layout."
     )
 
 
@@ -478,14 +494,13 @@ def _auth_format_expiration(expiration_date) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
-    """Load login users from users.xlsx.
+def _auth_parse_users_bytes(users_bytes: bytes) -> pd.DataFrame:
+    """Parse users.xlsx from immutable bytes.
 
-    Required columns are: email, password, expiration_date, access_mode, data_source_file.
-    The mtime argument is intentionally part of the cache key so edits to the
-    workbook are picked up after saving the file.
+    Caching by file contents avoids stale authentication data when a deployment replaces
+    users.xlsx without changing its timestamp in a way the runtime notices.
     """
-    df_users = pd.read_excel(users_path_str)
+    df_users = pd.read_excel(io.BytesIO(users_bytes))
     df_users.columns = [str(c).strip().lower() for c in df_users.columns]
     missing = AUTH_REQUIRED_COLUMNS.difference(set(df_users.columns))
     if missing:
@@ -545,13 +560,19 @@ def _auth_load_users(users_path_str: str, users_mtime: float) -> pd.DataFrame:
     return df_users
 
 
+
+def _auth_load_users_from_path(path: Path) -> pd.DataFrame:
+    """Read users.xlsx fresh and cache only the expensive Excel parsing."""
+    return _auth_parse_users_bytes(Path(path).read_bytes())
+
+
 def _auth_credentials_status(email: str, password: str) -> Tuple[bool, str, Optional[str], Optional[str], Optional[str]]:
     """Validate credentials and return (is_valid, message, expiration_label, access_mode, data_source_file)."""
     path = _auth_users_file_path()
     if not path.exists():
         return False, "Login user file not found.", None, None, None
     try:
-        users = _auth_load_users(str(path), path.stat().st_mtime)
+        users = _auth_load_users_from_path(path)
     except Exception as exc:
         return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None, None
 
@@ -598,7 +619,7 @@ def _auth_session_still_valid() -> Tuple[bool, str, Optional[str], Optional[str]
     if not path.exists():
         return False, "Login user file not found. Please contact the app administrator.", None, None, None
     try:
-        users = _auth_load_users(str(path), path.stat().st_mtime)
+        users = _auth_load_users_from_path(path)
     except Exception as exc:
         return False, f"Could not read {AUTH_USERS_FILENAME}: {exc}", None, None, None
 
@@ -648,12 +669,20 @@ def _render_login_page() -> None:
                 _auth_users_file_help_text()
                 + " The workbook must contain the columns `email`, `password`, `expiration_date`, `access_mode`, and `data_source_file`."
             )
-            st.caption("Running BPVis version 2.4.6. If another version is shown here, update the Streamlit Community Cloud app's configured entrypoint file.")
+            diag = _auth_runtime_diagnostics()
+            with st.expander("Runtime path diagnostics"):
+                st.code(
+                    "Working directory: " + diag.get("cwd", "") + "\n"
+                    + "Entrypoint directory: " + diag.get("entrypoint_dir", "") + "\n"
+                    + "Searched roots:\n- " + "\n- ".join(diag.get("searched_roots", [])),
+                    language="text",
+                )
+            st.caption("Running BPVis version 2.4.7.")
             st.stop()
 
         try:
             # Validate file structure early so admins get an actionable message.
-            _auth_load_users(str(users_path), users_path.stat().st_mtime)
+            _auth_load_users_from_path(users_path)
         except Exception as exc:
             st.error(f"Could not read `{AUTH_USERS_FILENAME}`. Required columns: `email`, `password`, `expiration_date`, `access_mode`, `data_source_file`.")
             st.caption(str(exc))
@@ -987,7 +1016,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.4.6")
+st.sidebar.write("Version 2.4.7")
 if IS_VIEWER_MODE:
     st.sidebar.write("**Viewer Mode**")
 
@@ -3358,7 +3387,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.4.6"
+REPORT_VERSION = "2.4.7"
 
 
 def _report_sanitize_filename(text: str) -> str:
