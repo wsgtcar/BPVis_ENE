@@ -53,6 +53,40 @@ def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None,
     return v
 
 
+# --- Streamlit compatibility: form_submit_button gained explicit `key=` support in Streamlit 1.49.
+# Keep the current behavior on newer versions while remaining compatible with older local installations.
+_FORM_SUBMIT_BUTTON_SUPPORTS_KEY = None
+
+def _form_submit_button_compat(label, key=None, **kwargs):
+    """Render a form submit button with stable identity across Streamlit versions.
+
+    Streamlit <= 1.48 does not accept ``key=`` on ``st.form_submit_button``.
+    For those versions, append a deterministic zero-width suffix derived from the requested
+    key so repeated submit-button labels inside the same form remain unique without changing
+    the visible button text. Streamlit >= 1.49 receives the original explicit key unchanged.
+    """
+    global _FORM_SUBMIT_BUTTON_SUPPORTS_KEY
+    if key is None:
+        return st.form_submit_button(label, **kwargs)
+
+    if _FORM_SUBMIT_BUTTON_SUPPORTS_KEY is None:
+        try:
+            import inspect
+            _FORM_SUBMIT_BUTTON_SUPPORTS_KEY = "key" in inspect.signature(st.form_submit_button).parameters
+        except Exception:
+            # Fail toward the modern API if introspection is unavailable.
+            _FORM_SUBMIT_BUTTON_SUPPORTS_KEY = True
+
+    if _FORM_SUBMIT_BUTTON_SUPPORTS_KEY:
+        return st.form_submit_button(label, key=key, **kwargs)
+
+    # Streamlit <= 1.48: make the auto-generated widget identity unique while keeping
+    # the rendered label visually identical. Use a stable SHA-1 digest (not Python hash()).
+    digest_bits = "".join(f"{byte:08b}" for byte in hashlib.sha1(str(key).encode("utf-8")).digest()[:4])
+    invisible_suffix = "\u2063" + "".join("\u200b" if bit == "0" else "\u200c" for bit in digest_bits)
+    return st.form_submit_button(f"{label}{invisible_suffix}", **kwargs)
+
+
 import numpy as np
 import plotly.colors as pcolors
 from typing import Optional, Tuple, Dict
@@ -10463,7 +10497,7 @@ with tab_model_qa:
                             key=item_duplicate_name_key,
                             help="Edit this name before clicking Duplicate. If the name already exists, the app adds a numeric suffix automatically.",
                         )
-                        duplicate_item = st.form_submit_button(
+                        duplicate_item = _form_submit_button_compat(
                             "Duplicate this complete object",
                             key=item_duplicate_key,
                             use_container_width=True,
@@ -10476,14 +10510,14 @@ with tab_model_qa:
                             key=item_rename_name_key,
                             help="Edit this name and click Rename. If the name already exists, the app adds a numeric suffix automatically.",
                         )
-                        rename_item = st.form_submit_button(
+                        rename_item = _form_submit_button_compat(
                             "Rename this complete object",
                             key=item_rename_key,
                             use_container_width=True,
                             help="Renames this object and keeps all parameter values, references, assumptions and QA justifications.",
                         )
 
-                        remove_item = st.form_submit_button(
+                        remove_item = _form_submit_button_compat(
                             "Remove this complete object",
                             key=item_delete_key,
                             use_container_width=True,
@@ -10523,7 +10557,7 @@ with tab_model_qa:
                         key=f"{custom_key_prefix}_source",
                     )
                     custom_param_ref = st.text_input("Source document / reference", value="", key=f"{custom_key_prefix}_source_ref")
-                    custom_param_submit = st.form_submit_button(
+                    custom_param_submit = _form_submit_button_compat(
                         "Add custom parameter to this object",
                         key=f"{custom_key_prefix}_submit",
                         use_container_width=True,
