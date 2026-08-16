@@ -65,7 +65,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.4.3",
+    page_title="WSGT_BPVis_ENE 2.4.4",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -227,9 +227,13 @@ def _viewer_external_project_path(data_source_file: str) -> Path:
     return candidate
 
 
-@st.cache_data(show_spinner=False, max_entries=16)
-def _viewer_read_project_bytes_cached(project_path_str: str, project_mtime_ns: int, project_size: int) -> bytes:
-    """Read an External project workbook once per file revision."""
+def _viewer_read_project_bytes_current(project_path_str: str) -> bytes:
+    """Read the current External project workbook bytes from disk.
+
+    This read is intentionally not cached. The expensive Excel parsing remains cached downstream
+    by the workbook bytes themselves, but reading the source file fresh prevents stale Viewer
+    projects when a deployment/sync process replaces an XLSX while preserving its size or timestamp.
+    """
     return Path(project_path_str).read_bytes()
 
 
@@ -250,8 +254,7 @@ def _viewer_project_file_from_assignment(data_source_file: str):
         raise FileNotFoundError(
             f"Assigned Viewer project file was not found in the {VIEWER_EXTERNAL_FOLDER} folder."
         )
-    stat = project_path.stat()
-    file_bytes = _viewer_read_project_bytes_cached(str(project_path), int(stat.st_mtime_ns), int(stat.st_size))
+    file_bytes = _viewer_read_project_bytes_current(str(project_path))
     return _ViewerProjectFile(project_path.name, file_bytes)
 
 
@@ -825,7 +828,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.4.3")
+st.sidebar.write("Version 2.4.4")
 if IS_VIEWER_MODE:
     st.sidebar.write("**Viewer Mode**")
 
@@ -3196,7 +3199,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.4.3"
+REPORT_VERSION = "2.4.4"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -7290,6 +7293,14 @@ def parse_project_df_with_building_use(
     kv = dict(zip(df["Key"].astype(str), df["Value"]))
 
     name = kv.get("Project_Name")
+    try:
+        if name is None or pd.isna(name) or str(name).strip() == "":
+            name = None
+        else:
+            name = str(name).strip()
+    except Exception:
+        name = None if name is None else str(name).strip() or None
+
     currency = kv.get("Currency")
     building_use = kv.get("Building_Use")
     country = kv.get("Country")
@@ -8565,6 +8576,16 @@ if uploaded_file:
     #     This keeps Project Data global (not scenario-dependent) and ensures it reloads correctly from the workbook.
     wb_token = f"{uploaded_file.name}|{hashlib.md5(file_bytes).hexdigest()}"
 
+    # Viewer Mode: Project_Name is read-only and therefore the source workbook is authoritative.
+    # Refresh it on every rerun rather than relying only on the previous workbook token. This also
+    # clears a stale name if a newly assigned workbook has no valid Project_Name value.
+    if IS_VIEWER_MODE:
+        viewer_project_name = preloaded.get("name")
+        if viewer_project_name is None or str(viewer_project_name).strip() == "":
+            viewer_project_name = "Building Performance Dashboard"
+        st.session_state["project_name"] = str(viewer_project_name).strip()
+        st.session_state["_project_name_workbook_token"] = wb_token
+
     # --- Seed Raw Data (Energy_Balance / Loads_Balance) from file on each new upload (token-based)
     #     Primary scenario-specific raw data is stored in numbered duplicate sheets:
     #     Energy_Balance, Energy_Balance2, Energy_Balance3, ... and the same for Loads_Balance.
@@ -8674,8 +8695,11 @@ if uploaded_file:
         except Exception:
             pass
 
-        if preloaded.get("name"):
-            st.session_state["project_name"] = str(preloaded["name"])
+        loaded_project_name = preloaded.get("name")
+        if loaded_project_name is None or str(loaded_project_name).strip() == "":
+            loaded_project_name = "Building Performance Dashboard"
+        st.session_state["project_name"] = str(loaded_project_name).strip()
+        st.session_state["_project_name_workbook_token"] = wb_token
 
         if preloaded.get("area") is not None:
             try:
@@ -9645,7 +9669,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_3.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_4.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -9654,7 +9678,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_3.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_4.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -12114,6 +12138,8 @@ with tab_lcc:
                         step=1,
                         format="%d",
                         key=_lcc_global_draft_key("analysis_period"),
+                        disabled=False,
+                        help="Analysis period used for the LCC calculation.",
                     )
                 with p2:
                     numeric_input(
@@ -12180,6 +12206,8 @@ with tab_lcc:
                     "For measures that affect several uses, enter multiple Assigned End Uses separated by commas (example: Heating, Cooling). "
                     "The measure cost is allocated equally across the assigned End Uses."
                 )
+                if IS_VIEWER_MODE:
+                    st.caption("🔒 You don't have permission to edit it")
 
                 draft_analysis_period_for_editor = max(
                     1,
@@ -12193,14 +12221,21 @@ with tab_lcc:
                     "num_rows": "fixed" if IS_VIEWER_MODE else "dynamic",
                     "use_container_width": True,
                     "key": "lcc_investments_editor",
-                    "disabled": IS_VIEWER_MODE,
+                    "disabled": True if IS_VIEWER_MODE else False,
                 }
                 if hasattr(st, "column_config"):
+                    lcc_investment_help = (
+                        "You don't have permission to edit it" if IS_VIEWER_MODE else None
+                    )
                     editor_kwargs_lcc["column_config"] = {
-                        "Measure Name": st.column_config.TextColumn("Measure Name", required=False),
+                        "Measure Name": st.column_config.TextColumn(
+                            "Measure Name",
+                            required=False,
+                            help=lcc_investment_help,
+                        ),
                         "Assigned End Uses": st.column_config.TextColumn(
                             "Assigned End Uses",
-                            help="Enter one or more End Uses separated by commas, e.g. Heating, Cooling.",
+                            help=lcc_investment_help or "Enter one or more End Uses separated by commas, e.g. Heating, Cooling.",
                             required=True,
                         ),
                         "Investment Year": st.column_config.NumberColumn(
@@ -12210,12 +12245,14 @@ with tab_lcc:
                             step=1,
                             format="%d",
                             required=True,
+                            help=lcc_investment_help,
                         ),
                         "Investment Cost": st.column_config.NumberColumn(
                             f"Investment Cost ({currency_lcc})",
                             min_value=0.0,
                             step=1000.0,
                             format="%.2f",
+                            help=lcc_investment_help,
                         ),
                         "Annual Maintenance Cost (%)": st.column_config.NumberColumn(
                             "Annual Maintenance Cost (% of investment)",
@@ -12223,6 +12260,7 @@ with tab_lcc:
                             max_value=100.0,
                             step=0.1,
                             format="%.2f",
+                            help=lcc_investment_help,
                         ),
                         "Life Length (years)": st.column_config.NumberColumn(
                             "Life Length (years)",
@@ -12230,6 +12268,7 @@ with tab_lcc:
                             max_value=200,
                             step=1,
                             format="%d",
+                            help=lcc_investment_help,
                         ),
                     }
 
