@@ -3976,8 +3976,12 @@ def _scenario_radar_kpi_order(period_years: Optional[int] = None, radar_raw_df: 
         "Annual Emissions /m²",
         emis_label,
     ]
-    if isinstance(radar_raw_df, pd.DataFrame) and "KPI" in radar_raw_df.columns and "Capex /m²" in set(radar_raw_df["KPI"].astype(str)):
-        order.insert(2, "Capex /m²")
+    if isinstance(radar_raw_df, pd.DataFrame) and "KPI" in radar_raw_df.columns:
+        _kpis_present_set = set(radar_raw_df["KPI"].astype(str))
+        if "Annual OPEX /m²" in _kpis_present_set:
+            order.insert(2, "Annual OPEX /m²")
+        if "Capex /m²" in _kpis_present_set:
+            order.insert(3 if "Annual OPEX /m²" in _kpis_present_set else 2, "Capex /m²")
     return order
 
 
@@ -3991,6 +3995,8 @@ def _scenario_kpi_short_label(kpi: str) -> str:
         return "End Energy<br>/m²"
     if k == "Annual Energy Cost /m²":
         return "Annual Energy<br>Cost /m²"
+    if k == "Annual OPEX /m²":
+        return "Annual OPEX<br>/m²"
     if k == "Capex /m²":
         return "Capex<br>/m²"
     if _is_scenario_lcc_kpi(k):
@@ -4020,6 +4026,8 @@ def _scenario_kpi_axis_title(kpi: str, currency_label: str = "Cost") -> str:
         return "kWh/m²·a"
     if k == "Annual Energy Cost /m²":
         return f"{currency_label}/m²·a" if currency_label and currency_label != "Cost" else "Cost/m²·a"
+    if k == "Annual OPEX /m²":
+        return f"{currency_label}/m²·a" if currency_label and currency_label != "Cost" else "Cost/m²·a"
     if k == "Capex /m²":
         return f"{currency_label}/m²" if currency_label and currency_label != "Cost" else "Cost/m²"
     if _is_scenario_lcc_kpi(k):
@@ -4045,6 +4053,7 @@ def _build_scenario_performance_radar_raw_df(
         scenario_analysis_period: int = 50,
         apply_lcc_filter: bool = True,
         include_capex: bool = False,
+        include_annual_opex: bool = False,
 ) -> pd.DataFrame:
     """Build raw KPI values for the Scenarios performance radar diagrams.
 
@@ -4115,6 +4124,7 @@ def _build_scenario_performance_radar_raw_df(
 
         # 2 + 3) Annual energy cost /m² and scenario-period nominal LCC /m².
         annual_energy_cost_m2 = np.nan
+        annual_opex_m2 = np.nan
         lcc_50_nominal_m2 = np.nan
         try:
             df_energy_sc_50 = get_energy_balance_df(file_bytes, filename, scenario_name=sc_name_str)
@@ -4138,6 +4148,16 @@ def _build_scenario_performance_radar_raw_df(
                     annual_energy_cost_m2 = float(
                         energy_cf_50.loc[energy_cf_50["Year"].astype(int) == int(project_year), "Nominal Cost"].sum()
                     ) / area
+                if include_annual_opex:
+                    _opex_year_mask = cf_sc_50["Year"].astype(int) == int(project_year)
+                    _opex_type = cf_sc_50["Cost Type"].astype(str)
+                    _annual_energy_cost = float(
+                        cf_sc_50.loc[_opex_year_mask & (_opex_type == "Energy"), "Nominal Cost"].sum()
+                    )
+                    _annual_maintenance_cost = float(
+                        cf_sc_50.loc[_opex_year_mask & (_opex_type == "Maintenance"), "Nominal Cost"].sum()
+                    )
+                    annual_opex_m2 = (_annual_energy_cost + _annual_maintenance_cost) / area
                 lcc_50_nominal_m2 = float(cf_sc_50["Nominal Cost"].sum()) / area
         except Exception:
             pass
@@ -4168,6 +4188,8 @@ def _build_scenario_performance_radar_raw_df(
         ])
         if include_capex:
             rows.append({"Scenario": sc_name_str, "KPI": "Capex /m²", "Value": capex_m2, "Unit": f"{currency_symbol_in}/m²"})
+        if include_annual_opex:
+            rows.append({"Scenario": sc_name_str, "KPI": "Annual OPEX /m²", "Value": annual_opex_m2, "Unit": f"{currency_symbol_in}/m²·a"})
 
     out = pd.DataFrame(rows)
     if out.empty:
@@ -4412,7 +4434,7 @@ def _scenario_kpi_scatter_plotly_figure(
     positions_right = [1.00, 0.945, 0.89]
     left_i = 0
     right_i = 0
-    annual_kpis_left = {"End Energy /m²", "Annual Energy Cost /m²", "Annual Emissions /m²"}
+    annual_kpis_left = {"End Energy /m²", "Annual Energy Cost /m²", "Annual OPEX /m²", "Annual Emissions /m²"}
     for kpi_i, kpi in enumerate(kpis):
         sub_vals = pd.to_numeric(dfp.loc[dfp["KPI"].astype(str) == kpi, "Value"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
         vmax = float(sub_vals.max()) if not sub_vals.empty else 1.0
@@ -13145,6 +13167,42 @@ with tab7:
             scenario_comparison_period = _get_scenario_comparison_analysis_period(50)
             scenario_comparison_apply_lcc_filter = _get_scenario_comparison_apply_lcc_filter(True)
 
+            # Session-only KPI selector for the four scenario-comparison KPI diagrams.
+            # Stable internal IDs keep the selection intact when the comparison period changes
+            # and therefore the displayed LCC / total-emissions labels change.
+            _comparison_kpi_ids = [
+                "end_energy",
+                "annual_energy_cost",
+                "annual_opex",
+                "capex",
+                "lcc",
+                "annual_emissions",
+                "total_emissions",
+            ]
+            _comparison_kpi_labels = {
+                "end_energy": "End Energy /m²",
+                "annual_energy_cost": "Annual Energy Cost /m²",
+                "annual_opex": "Annual OPEX /m²",
+                "capex": "Capex /m²",
+                "lcc": _scenario_lcc_kpi_label(scenario_comparison_period),
+                "annual_emissions": "Annual Emissions /m²",
+                "total_emissions": _scenario_lc_emissions_kpi_label(scenario_comparison_period),
+            }
+            _comparison_kpi_filter_key = "scenario_comparison_kpi_filter"
+            _comparison_kpi_selected_ids = st.multiselect(
+                "Comparison KPI's",
+                options=_comparison_kpi_ids,
+                default=_comparison_kpi_ids,
+                format_func=lambda _k: _comparison_kpi_labels.get(_k, str(_k)),
+                key=_comparison_kpi_filter_key,
+                help="Select which KPIs are shown in the two radar diagrams, Benchmark-style KPI bar by Scenario, and KPI improvement vs reference.",
+            )
+            _comparison_kpi_selected_labels = {
+                _comparison_kpi_labels[_k]
+                for _k in _comparison_kpi_selected_ids
+                if _k in _comparison_kpi_labels
+            }
+
             # On-top scenario radar summary (outside the Life Cycle Comparission expander).
             try:
                 _radar_enduses_all = []
@@ -13180,7 +13238,14 @@ with tab7:
                     scenario_analysis_period=scenario_comparison_period,
                     apply_lcc_filter=scenario_comparison_apply_lcc_filter,
                     include_capex=True,
+                    include_annual_opex=True,
                 )
+                # Filter only the four requested comparison diagrams. Keep the full KPI
+                # dataset for delta tables, marginal-abatement-cost calculations and all other logic.
+                _radar_chart_df = _radar_raw_df.loc[
+                    _radar_raw_df["KPI"].astype(str).isin(_comparison_kpi_selected_labels)
+                ].copy()
+
                 st.subheader("Scenario Performance Radar")
 
                 _scenario_order_str = [str(s) for s in scenario_order]
@@ -13219,7 +13284,7 @@ with tab7:
                     st.session_state[_radar_ref_key] = _radar_ref_scenario
 
                 _radar_improvement_df, _radar_absolute_df, _radar_axis_df = _prepare_scenario_radar_plot_dfs(
-                    _radar_raw_df,
+                    _radar_chart_df,
                     reference_scenario=_radar_ref_scenario,
                 )
 
@@ -13269,7 +13334,7 @@ with tab7:
 
                     st.subheader("Scenario KPI Bar Summary")
                     fig_scenario_kpi_scatter = _scenario_kpi_scatter_plotly_figure(
-                        _radar_raw_df,
+                        _radar_chart_df,
                         scenario_color_map,
                         scenario_order,
                         title="Benchmark-style KPI bar by scenario",
@@ -13320,8 +13385,11 @@ with tab7:
                             else:
                                 _dcol1, _dcol2 = st.columns([1.55, 1.0])
                                 with _dcol1:
+                                    _delta_chart_df = _delta_long_df.loc[
+                                        _delta_long_df["KPI"].astype(str).isin(_comparison_kpi_selected_labels)
+                                    ].copy()
                                     _fig_delta_pct = _scenario_delta_improvement_plotly_figure(
-                                        _delta_long_df,
+                                        _delta_chart_df,
                                         scenario_color_map,
                                         scenario_order,
                                         title=f"KPI improvement vs {_delta_ref_scenario}",
