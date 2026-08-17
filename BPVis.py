@@ -9064,36 +9064,6 @@ if uploaded_file:
         building_use = st.selectbox("Building Use", building_use_options, index=building_use_index,
                                     key="building_use", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
-    # ---- Sidebar: master Energy Use filter (global across all scenarios and calculations)
-    with st.sidebar.expander("Energy Use Filter"):
-        st.caption("Globally include or exclude Energy Uses from BPVis calculations and scenario comparisons.")
-        filter_options = _master_energy_filter_available_end_uses()
-
-        # Preserve the saved selection. For new/legacy projects, start with every Energy Use selected.
-        current_filter_selection = _normalize_master_energy_use_selection(
-            st.session_state.get(MASTER_ENERGY_FILTER_SELECTED_KEY, []),
-            valid_end_uses=filter_options,
-        )
-        if not current_filter_selection and filter_options:
-            current_filter_selection = list(filter_options)
-        st.session_state[MASTER_ENERGY_FILTER_SELECTED_KEY] = current_filter_selection
-
-        filter_enabled = st.checkbox(
-            "Apply Energy Use Filter",
-            key=MASTER_ENERGY_FILTER_ENABLED_KEY,
-            help="When active, only the selected Energy Uses are included in calculations throughout the app.",
-        )
-        selected_master_energy_uses = st.multiselect(
-            "Energy Uses included in calculations",
-            options=filter_options,
-            format_func=ui_name,
-            key=MASTER_ENERGY_FILTER_SELECTED_KEY,
-            help="This is a project-wide filter. It applies to every scenario, all analysis tabs, Loads Analysis where load names match Energy Uses, and all Scenarios-tab comparisons.",
-        )
-        if filter_enabled and not selected_master_energy_uses:
-            st.warning("Select at least one Energy Use. Until then, the filter is treated as inactive to keep calculations valid.")
-
-
 # =========================
 # Header (moved here so it can use preloaded name)
 # =========================
@@ -9474,6 +9444,36 @@ with tab1:
                     _activate_scenario(new_active)
                     st.rerun()
             st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors, On-site generation settings, CRREM measures, scenario-specific LCC investment measures, and optional scenario-specific Energy_Balance / Loads_Balance raw data. Numbered Excel sheets are mapped by scenario order.")
+
+        # ---- Sidebar: master Energy Use filter (global across all scenarios and calculations)
+        with st.sidebar.expander("Energy Use Filter"):
+            st.caption("Globally include or exclude Energy Uses from BPVis calculations and scenario comparisons.")
+            filter_options = _master_energy_filter_available_end_uses()
+
+            # Preserve the saved selection. For new/legacy projects, start with every Energy Use selected.
+            current_filter_selection = _normalize_master_energy_use_selection(
+                st.session_state.get(MASTER_ENERGY_FILTER_SELECTED_KEY, []),
+                valid_end_uses=filter_options,
+            )
+            if not current_filter_selection and filter_options:
+                current_filter_selection = list(filter_options)
+            st.session_state[MASTER_ENERGY_FILTER_SELECTED_KEY] = current_filter_selection
+
+            filter_enabled = st.checkbox(
+                "Apply Energy Use Filter",
+                key=MASTER_ENERGY_FILTER_ENABLED_KEY,
+                help="When active, only the selected Energy Uses are included in calculations throughout the app.",
+            )
+            selected_master_energy_uses = st.multiselect(
+                "Energy Uses included in calculations",
+                options=filter_options,
+                format_func=ui_name,
+                key=MASTER_ENERGY_FILTER_SELECTED_KEY,
+                help="This is a project-wide filter. It applies to every scenario, all analysis tabs, Loads Analysis where load names match Energy Uses, and all Scenarios-tab comparisons.",
+            )
+            if filter_enabled and not selected_master_energy_uses:
+                st.warning("Select at least one Energy Use. Until then, the filter is treated as inactive to keep calculations valid.")
+
 
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
