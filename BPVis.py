@@ -3969,13 +3969,16 @@ def _scenario_radar_kpi_order(period_years: Optional[int] = None, radar_raw_df: 
         period_years = int(period_years or _get_scenario_comparison_analysis_period())
         lcc_label = _scenario_lcc_kpi_label(period_years)
         emis_label = _scenario_lc_emissions_kpi_label(period_years)
-    return [
+    order = [
         "End Energy /m²",
         "Annual Energy Cost /m²",
         lcc_label,
         "Annual Emissions /m²",
         emis_label,
     ]
+    if isinstance(radar_raw_df, pd.DataFrame) and "KPI" in radar_raw_df.columns and "Capex /m²" in set(radar_raw_df["KPI"].astype(str)):
+        order.insert(2, "Capex /m²")
+    return order
 
 
 # Backward-compatible default order used when no dynamic scenario-comparison period is supplied.
@@ -3988,6 +3991,8 @@ def _scenario_kpi_short_label(kpi: str) -> str:
         return "End Energy<br>/m²"
     if k == "Annual Energy Cost /m²":
         return "Annual Energy<br>Cost /m²"
+    if k == "Capex /m²":
+        return "Capex<br>/m²"
     if _is_scenario_lcc_kpi(k):
         try:
             yrs = k.split(" ")[1]
@@ -4015,6 +4020,8 @@ def _scenario_kpi_axis_title(kpi: str, currency_label: str = "Cost") -> str:
         return "kWh/m²·a"
     if k == "Annual Energy Cost /m²":
         return f"{currency_label}/m²·a" if currency_label and currency_label != "Cost" else "Cost/m²·a"
+    if k == "Capex /m²":
+        return f"{currency_label}/m²" if currency_label and currency_label != "Cost" else "Cost/m²"
     if _is_scenario_lcc_kpi(k):
         return f"{currency_label}/m²" if currency_label and currency_label != "Cost" else "Cost/m²"
     if k == "Annual Emissions /m²":
@@ -4037,6 +4044,7 @@ def _build_scenario_performance_radar_raw_df(
         crrem_dataset: Optional[dict] = None,
         scenario_analysis_period: int = 50,
         apply_lcc_filter: bool = True,
+        include_capex: bool = False,
 ) -> pd.DataFrame:
     """Build raw KPI values for the Scenarios performance radar diagrams.
 
@@ -4096,6 +4104,15 @@ def _build_scenario_performance_radar_raw_df(
             except Exception:
                 end_energy_m2 = np.nan
 
+        capex_m2 = np.nan
+        if include_capex:
+            try:
+                inv_df_sc = _lcc_investments_records_to_df(((payload_sc.get("lcc", {}) or {}).get("investments", [])))
+                capex_total_sc = pd.to_numeric(inv_df_sc.get("Investment Cost", pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum()
+                capex_m2 = float(capex_total_sc) / area
+            except Exception:
+                capex_m2 = np.nan
+
         # 2 + 3) Annual energy cost /m² and scenario-period nominal LCC /m².
         annual_energy_cost_m2 = np.nan
         lcc_50_nominal_m2 = np.nan
@@ -4149,6 +4166,8 @@ def _build_scenario_performance_radar_raw_df(
             {"Scenario": sc_name_str, "KPI": "Annual Emissions /m²", "Value": annual_emissions_m2, "Unit": "kgCO₂e/m²·a"},
             {"Scenario": sc_name_str, "KPI": lc_emissions_period_kpi_label, "Value": total_emissions_50_m2, "Unit": "kgCO₂e/m²"},
         ])
+        if include_capex:
+            rows.append({"Scenario": sc_name_str, "KPI": "Capex /m²", "Value": capex_m2, "Unit": f"{currency_symbol_in}/m²"})
 
     out = pd.DataFrame(rows)
     if out.empty:
@@ -4390,7 +4409,7 @@ def _scenario_kpi_scatter_plotly_figure(
     # reads against its own scale. Annual KPIs are on the left; total/life-cycle KPIs are on the right.
     layout_axes = {}
     positions_left = [0.00, 0.055, 0.11]
-    positions_right = [1.00, 0.945]
+    positions_right = [1.00, 0.945, 0.89]
     left_i = 0
     right_i = 0
     annual_kpis_left = {"End Energy /m²", "Annual Energy Cost /m²", "Annual Emissions /m²"}
@@ -13160,6 +13179,7 @@ with tab7:
                     crrem_dataset=_radar_crrem_dataset,
                     scenario_analysis_period=scenario_comparison_period,
                     apply_lcc_filter=scenario_comparison_apply_lcc_filter,
+                    include_capex=True,
                 )
                 st.subheader("Scenario Performance Radar")
 
