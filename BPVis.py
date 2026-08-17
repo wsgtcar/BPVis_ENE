@@ -53,40 +53,6 @@ def numeric_input(label, default, key, min_value=None, max_value=None, fmt=None,
     return v
 
 
-# --- Streamlit compatibility: form_submit_button gained explicit `key=` support in Streamlit 1.49.
-# Keep the current behavior on newer versions while remaining compatible with older local installations.
-_FORM_SUBMIT_BUTTON_SUPPORTS_KEY = None
-
-def _form_submit_button_compat(label, key=None, **kwargs):
-    """Render a form submit button with stable identity across Streamlit versions.
-
-    Streamlit <= 1.48 does not accept ``key=`` on ``st.form_submit_button``.
-    For those versions, append a deterministic zero-width suffix derived from the requested
-    key so repeated submit-button labels inside the same form remain unique without changing
-    the visible button text. Streamlit >= 1.49 receives the original explicit key unchanged.
-    """
-    global _FORM_SUBMIT_BUTTON_SUPPORTS_KEY
-    if key is None:
-        return st.form_submit_button(label, **kwargs)
-
-    if _FORM_SUBMIT_BUTTON_SUPPORTS_KEY is None:
-        try:
-            import inspect
-            _FORM_SUBMIT_BUTTON_SUPPORTS_KEY = "key" in inspect.signature(st.form_submit_button).parameters
-        except Exception:
-            # Fail toward the modern API if introspection is unavailable.
-            _FORM_SUBMIT_BUTTON_SUPPORTS_KEY = True
-
-    if _FORM_SUBMIT_BUTTON_SUPPORTS_KEY:
-        return st.form_submit_button(label, key=key, **kwargs)
-
-    # Streamlit <= 1.48: make the auto-generated widget identity unique while keeping
-    # the rendered label visually identical. Use a stable SHA-1 digest (not Python hash()).
-    digest_bits = "".join(f"{byte:08b}" for byte in hashlib.sha1(str(key).encode("utf-8")).digest()[:4])
-    invisible_suffix = "\u2063" + "".join("\u200b" if bit == "0" else "\u200c" for bit in digest_bits)
-    return st.form_submit_button(f"{label}{invisible_suffix}", **kwargs)
-
-
 import numpy as np
 import plotly.colors as pcolors
 from typing import Optional, Tuple, Dict
@@ -261,9 +227,13 @@ def _viewer_external_project_path(data_source_file: str) -> Path:
     return candidate
 
 
-@st.cache_data(show_spinner=False, max_entries=16)
-def _viewer_read_project_bytes_cached(project_path_str: str, project_mtime_ns: int, project_size: int) -> bytes:
-    """Read an External project workbook once per file revision."""
+def _viewer_read_project_bytes_current(project_path_str: str) -> bytes:
+    """Read the current External project workbook bytes from disk.
+
+    This read is intentionally not cached. The expensive Excel parsing remains cached downstream
+    by the workbook bytes themselves, but reading the source file fresh prevents stale Viewer
+    projects when a deployment/sync process replaces an XLSX while preserving its size or timestamp.
+    """
     return Path(project_path_str).read_bytes()
 
 
@@ -284,8 +254,7 @@ def _viewer_project_file_from_assignment(data_source_file: str):
         raise FileNotFoundError(
             f"Assigned Viewer project file was not found in the {VIEWER_EXTERNAL_FOLDER} folder."
         )
-    stat = project_path.stat()
-    file_bytes = _viewer_read_project_bytes_cached(str(project_path), int(stat.st_mtime_ns), int(stat.st_size))
+    file_bytes = _viewer_read_project_bytes_current(str(project_path))
     return _ViewerProjectFile(project_path.name, file_bytes)
 
 
@@ -962,127 +931,6 @@ _RAW_MAX_NUMBERED_SCENARIO_INDEX_KEY = "_raw_max_numbered_scenario_index"
 _RAW_NUMBERED_SHEETS_BOUND_TOKEN_KEY = "_raw_numbered_sheets_bound_token"
 RAW_SCENARIO_ENERGY_SHEET = "Energy_Balance_Scenarios"  # legacy/backward-compatible long sheet
 
-# Global/master Energy Use filter. This is a project-level analysis setting, not scenario-specific.
-MASTER_ENERGY_FILTER_ENABLED_KEY = "master_energy_use_filter_enabled"
-MASTER_ENERGY_FILTER_SELECTED_KEY = "master_energy_use_filter_selected"
-MASTER_ENERGY_FILTER_AVAILABLE_KEY = "_master_energy_use_filter_available"
-
-
-def _normalize_master_energy_use_selection(values, valid_end_uses: Optional[list] = None) -> list:
-    """Normalize a saved/widget Energy Use selection while preserving order."""
-    if values is None:
-        raw_items = []
-    elif isinstance(values, (list, tuple, set, pd.Series, np.ndarray)):
-        raw_items = list(values)
-    else:
-        raw = str(values).strip()
-        raw_items = []
-        if raw:
-            try:
-                parsed = json.loads(raw)
-                raw_items = list(parsed) if isinstance(parsed, list) else [raw]
-            except Exception:
-                raw_items = [x.strip() for x in re.split(r"[|;,\n]+", raw) if x.strip()]
-
-    valid = [_canon_enduse_name(str(x)) for x in (valid_end_uses or []) if str(x).strip()]
-    valid_lookup = {str(x).lower(): str(x) for x in valid}
-    out = []
-    for item in raw_items:
-        canon = _canon_enduse_name(str(item).strip())
-        if not canon:
-            continue
-        if valid:
-            canon = valid_lookup.get(canon.lower(), "")
-            if not canon:
-                continue
-        if canon not in out:
-            out.append(canon)
-    return out
-
-
-def _master_energy_filter_enabled() -> bool:
-    return bool(st.session_state.get(MASTER_ENERGY_FILTER_ENABLED_KEY, False))
-
-
-def _master_energy_filter_available_end_uses(fallback: Optional[list] = None) -> list:
-    """Return the union of Energy Uses known across the project without applying the filter."""
-    ordered = []
-
-    def _add_many(items):
-        for item in items or []:
-            name = _canon_enduse_name(str(item))
-            if name and name != "Month" and name not in ordered:
-                ordered.append(name)
-
-    _add_many(fallback or [])
-    try:
-        raw_base = st.session_state.get(_RAW_ENERGY_KEY)
-        if isinstance(raw_base, pd.DataFrame):
-            _add_many([c for c in raw_base.columns if str(c) != "Month"])
-    except Exception:
-        pass
-    try:
-        for df_i in (st.session_state.get(_RAW_ENERGY_NUMBERED_SHEETS_KEY, {}) or {}).values():
-            if isinstance(df_i, pd.DataFrame):
-                _add_many([c for c in df_i.columns if str(c) != "Month"])
-    except Exception:
-        pass
-    try:
-        for df_i in _scenario_energy_overrides().values():
-            if isinstance(df_i, pd.DataFrame):
-                _add_many([c for c in df_i.columns if str(c) != "Month"])
-    except Exception:
-        pass
-
-    # Prefer the established End Use order, then preserve workbook order for custom names.
-    ordered = [x for x in END_USE_ORDER if x in ordered] + [x for x in ordered if x not in END_USE_ORDER]
-    st.session_state[MASTER_ENERGY_FILTER_AVAILABLE_KEY] = list(ordered)
-    return ordered
-
-
-def _master_energy_filter_selected(valid_end_uses: Optional[list] = None) -> list:
-    valid = valid_end_uses if valid_end_uses is not None else st.session_state.get(MASTER_ENERGY_FILTER_AVAILABLE_KEY, [])
-    return _normalize_master_energy_use_selection(
-        st.session_state.get(MASTER_ENERGY_FILTER_SELECTED_KEY, []),
-        valid_end_uses=list(valid or []),
-    )
-
-
-def _apply_master_energy_use_filter_to_energy_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply the project-level Energy Use filter to calculation Energy_Balance data only."""
-    if not isinstance(df, pd.DataFrame) or df.empty or not _master_energy_filter_enabled():
-        return df
-    energy_cols = [str(c) for c in df.columns if str(c) != "Month"]
-    selected = _master_energy_filter_selected(energy_cols)
-    # Empty selection is treated as a safe no-op; the sidebar warns the user.
-    if not selected:
-        return df
-    keep = (["Month"] if "Month" in df.columns else []) + [c for c in energy_cols if _canon_enduse_name(c) in set(selected)]
-    return df.loc[:, keep].copy()
-
-
-def _apply_master_energy_use_filter_to_loads_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply the master filter to matching Loads_Balance columns while preserving metadata/unmatched loads."""
-    if not isinstance(df, pd.DataFrame) or df.empty or not _master_energy_filter_enabled():
-        return df
-    available = _master_energy_filter_available_end_uses()
-    selected = _master_energy_filter_selected(available)
-    if not selected:
-        return df
-    available_set = set(available)
-    selected_set = set(selected)
-    meta_cols = {"hoy", "doy", "day", "month", "weekday", "hour", "Grid_Injection"}
-    keep = []
-    for c in df.columns:
-        c_s = str(c)
-        if c_s in meta_cols:
-            keep.append(c)
-            continue
-        canon = _canon_enduse_name(c_s)
-        if canon not in available_set or canon in selected_set:
-            keep.append(c)
-    return df.loc[:, keep].copy()
-
 
 def _workbook_token(file_bytes: bytes, filename: str = "") -> str:
     try:
@@ -1585,22 +1433,21 @@ def get_energy_balance_df(
         filename: str = "",
         scenario_name: Optional[str] = None,
         use_scenario_override: bool = True,
-        apply_master_filter: bool = True,
 ) -> pd.DataFrame:
     """Return Energy_Balance data for calculations.
 
     If a scenario-specific override exists for the requested/current active scenario,
-    it is used. The project-level master Energy Use filter is then applied by default.
-    Configuration/raw-data workflows can explicitly request the unfiltered dataframe.
+    it is used. Otherwise the global/base Energy_Balance sheet is returned.
     """
     base = get_global_energy_balance_df(file_bytes, filename)
-    result = base
-    if use_scenario_override:
-        sc_name = str(scenario_name) if scenario_name is not None and str(scenario_name).strip() else _active_scenario_name()
-        override = get_scenario_energy_balance_override(sc_name)
-        if override is not None:
-            result = override
-    return _apply_master_energy_use_filter_to_energy_df(result) if apply_master_filter else result
+    if not use_scenario_override:
+        return base
+
+    sc_name = str(scenario_name) if scenario_name is not None and str(scenario_name).strip() else _active_scenario_name()
+    override = get_scenario_energy_balance_override(sc_name)
+    if override is not None:
+        return override
+    return base
 
 
 def get_global_loads_balance_df(file_bytes: bytes, filename: str = "") -> pd.DataFrame:
@@ -1621,21 +1468,21 @@ def get_loads_balance_df(
         filename: str = "",
         scenario_name: Optional[str] = None,
         use_scenario_override: bool = True,
-        apply_master_filter: bool = True,
 ) -> pd.DataFrame:
     """Return Loads_Balance data for calculations.
 
-    Scenario-specific overrides are resolved first. When the master Energy Use filter is active,
-    matching load columns are filtered as well; raw/configuration workflows can bypass it.
+    If a scenario-specific override exists for the requested/current active scenario,
+    it is used. Otherwise the global/base Loads_Balance sheet is returned.
     """
     base = get_global_loads_balance_df(file_bytes, filename)
-    result = base
-    if use_scenario_override:
-        sc_name = str(scenario_name) if scenario_name is not None and str(scenario_name).strip() else _active_scenario_name()
-        override = get_scenario_loads_balance_override(sc_name)
-        if override is not None:
-            result = override
-    return _apply_master_energy_use_filter_to_loads_df(result) if apply_master_filter else result
+    if not use_scenario_override:
+        return base
+
+    sc_name = str(scenario_name) if scenario_name is not None and str(scenario_name).strip() else _active_scenario_name()
+    override = get_scenario_loads_balance_override(sc_name)
+    if override is not None:
+        return override
+    return base
 
 
 def _energy_balance_to_excel_df(df_no_suffix: pd.DataFrame) -> pd.DataFrame:
@@ -1746,7 +1593,7 @@ def build_scenario_energy_balance_sheet_map_for_export(
     for sc_name in _scenario_names_from_state_or_order(scenario_order):
         try:
             out[str(sc_name)] = sanitize_energy_balance_df(
-                get_energy_balance_df(file_bytes, filename, scenario_name=str(sc_name), apply_master_filter=False)
+                get_energy_balance_df(file_bytes, filename, scenario_name=str(sc_name))
             ).copy(deep=True)
         except Exception:
             out[str(sc_name)] = pd.DataFrame()
@@ -1765,7 +1612,7 @@ def build_scenario_loads_balance_sheet_map_for_export(
     for sc_name in _scenario_names_from_state_or_order(scenario_order):
         try:
             out[str(sc_name)] = sanitize_loads_balance_df(
-                get_loads_balance_df(file_bytes, filename, scenario_name=str(sc_name), apply_master_filter=False)
+                get_loads_balance_df(file_bytes, filename, scenario_name=str(sc_name))
             ).copy(deep=True)
         except Exception:
             out[str(sc_name)] = pd.DataFrame()
@@ -1865,30 +1712,6 @@ def parse_project_setting_bool(df: Optional[pd.DataFrame], key: str, default: bo
             return bool(default)
     except Exception:
         return bool(default)
-
-
-def parse_project_setting_list(df: Optional[pd.DataFrame], key: str, default: Optional[list] = None) -> list:
-    """Read a project-level list setting from Project_Data (JSON preferred; delimiter fallback)."""
-    default = list(default or [])
-    try:
-        if df is None or not {"Key", "Value"}.issubset(df.columns):
-            return default
-        kv = dict(zip(df["Key"].astype(str), df["Value"]))
-        raw = kv.get(key)
-        if raw is None or str(raw).strip() == "":
-            return default
-        if isinstance(raw, list):
-            return [str(x) for x in raw if str(x).strip()]
-        raw_s = str(raw).strip()
-        try:
-            parsed = json.loads(raw_s)
-            if isinstance(parsed, list):
-                return [str(x) for x in parsed if str(x).strip()]
-        except Exception:
-            pass
-        return [x.strip() for x in re.split(r"[|;,\n]+", raw_s) if x.strip()]
-    except Exception:
-        return default
 
 
 def parse_factors_df(df: Optional[pd.DataFrame]) -> Dict[str, float]:
@@ -3236,21 +3059,10 @@ def compute_lcc_cashflow_table(
     inv_df = _lcc_investments_records_to_df(lcc.get("investments", []), end_uses=end_uses)
     for _, r in inv_df.iterrows():
         measure = str(r.get("Measure Name", "")).strip() or "Unnamed measure"
-        assigned_list_all = _lcc_parse_assigned_enduses(r.get("Assigned End Uses", ""), end_uses=end_uses)
-        if not assigned_list_all:
-            assigned_list_all = _lcc_default_selected_enduses(end_uses)[:1]
-
-        # The master filter also applies to LCC investment/O&M/replacement costs assigned to End Uses.
-        # Keep the original cost allocation denominator so a multi-use measure contributes only the
-        # fraction attributable to currently included Energy Uses rather than reallocating its full cost.
-        allocation = 1.0 / max(1, len(assigned_list_all))
-        if _master_energy_filter_enabled():
-            calculation_enduses = {str(c) for c in df_energy.columns if str(c) != "Month"}
-            assigned_list = [u for u in assigned_list_all if str(u) in calculation_enduses]
-            if not assigned_list:
-                continue
-        else:
-            assigned_list = assigned_list_all
+        assigned_list = _lcc_parse_assigned_enduses(r.get("Assigned End Uses", ""), end_uses=end_uses)
+        if not assigned_list:
+            assigned_list = _lcc_default_selected_enduses(end_uses)[:1]
+        allocation = 1.0 / max(1, len(assigned_list))
 
         inv_year = _to_int_lcc(r.get("Investment Year"), start_year)
         inv_cost = max(0.0, _to_float_lcc(r.get("Investment Cost"), 0.0))
@@ -5176,10 +4988,9 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     except Exception as exc:
         raise RuntimeError("Report generation requires matplotlib and reportlab to be installed.") from exc
 
-    # Data and context. Keep the complete End Use universe for scenario/config persistence,
-    # while the actual report calculations use the master-filtered dataframes.
-    base_df_all = get_energy_balance_df(file_bytes, filename, apply_master_filter=False)
-    end_uses = [str(c) for c in base_df_all.columns if str(c) != "Month"]
+    # Data and context
+    base_df = get_energy_balance_df(file_bytes, filename)
+    end_uses = [str(c) for c in base_df.columns if str(c) != "Month"]
     active_name, payload = _report_active_payload(end_uses)
     df_energy = get_energy_balance_df(file_bytes, filename, scenario_name=active_name)
     df_loads = get_loads_balance_df(file_bytes, filename, scenario_name=active_name)
@@ -7482,6 +7293,14 @@ def parse_project_df_with_building_use(
     kv = dict(zip(df["Key"].astype(str), df["Value"]))
 
     name = kv.get("Project_Name")
+    try:
+        if name is None or pd.isna(name) or str(name).strip() == "":
+            name = None
+        else:
+            name = str(name).strip()
+    except Exception:
+        name = None if name is None else str(name).strip() or None
+
     currency = kv.get("Currency")
     building_use = kv.get("Building_Use")
     country = kv.get("Country")
@@ -8707,16 +8526,6 @@ if uploaded_file:
         "Scenario_Comparison_Apply_LCC_Filter",
         True,
     )
-    saved_master_energy_filter_enabled = parse_project_setting_bool(
-        cfg_saved["project"],
-        "Energy_Use_Filter_Enabled",
-        False,
-    )
-    saved_master_energy_filter_selected = parse_project_setting_list(
-        cfg_saved["project"],
-        "Energy_Use_Filter_Selected",
-        [],
-    )
 
     saved_factors = parse_factors_df(cfg_saved["factors"])
     saved_tariffs = parse_tariffs_df(cfg_saved["tariffs"])
@@ -8745,8 +8554,6 @@ if uploaded_file:
         "year": saved_year,
         "scenario_comparison_period": saved_scenario_comparison_period,
         "scenario_comparison_apply_lcc_filter": saved_scenario_comparison_apply_lcc_filter,
-        "energy_use_filter_enabled": saved_master_energy_filter_enabled,
-        "energy_use_filter_selected": saved_master_energy_filter_selected,
         "factors": saved_factors,
         "tariffs": saved_tariffs,
         "mapping_df": saved_mapping_df,
@@ -8768,6 +8575,16 @@ if uploaded_file:
     # --- Seed Project Data from file on each new upload (token-based)
     #     This keeps Project Data global (not scenario-dependent) and ensures it reloads correctly from the workbook.
     wb_token = f"{uploaded_file.name}|{hashlib.md5(file_bytes).hexdigest()}"
+
+    # Viewer Mode: Project_Name is read-only and therefore the source workbook is authoritative.
+    # Refresh it on every rerun rather than relying only on the previous workbook token. This also
+    # clears a stale name if a newly assigned workbook has no valid Project_Name value.
+    if IS_VIEWER_MODE:
+        viewer_project_name = preloaded.get("name")
+        if viewer_project_name is None or str(viewer_project_name).strip() == "":
+            viewer_project_name = "Building Performance Dashboard"
+        st.session_state["project_name"] = str(viewer_project_name).strip()
+        st.session_state["_project_name_workbook_token"] = wb_token
 
     # --- Seed Raw Data (Energy_Balance / Loads_Balance) from file on each new upload (token-based)
     #     Primary scenario-specific raw data is stored in numbered duplicate sheets:
@@ -8878,8 +8695,11 @@ if uploaded_file:
         except Exception:
             pass
 
-        if preloaded.get("name"):
-            st.session_state["project_name"] = str(preloaded["name"])
+        loaded_project_name = preloaded.get("name")
+        if loaded_project_name is None or str(loaded_project_name).strip() == "":
+            loaded_project_name = "Building Performance Dashboard"
+        st.session_state["project_name"] = str(loaded_project_name).strip()
+        st.session_state["_project_name_workbook_token"] = wb_token
 
         if preloaded.get("area") is not None:
             try:
@@ -8920,13 +8740,6 @@ if uploaded_file:
         except Exception:
             st.session_state[SCENARIO_COMPARISON_APPLY_LCC_FILTER_KEY] = True
 
-        # Master Energy Use filter is global to the project and shared by every scenario/comparison.
-        st.session_state[MASTER_ENERGY_FILTER_ENABLED_KEY] = bool(preloaded.get("energy_use_filter_enabled", False))
-        st.session_state[MASTER_ENERGY_FILTER_SELECTED_KEY] = _normalize_master_energy_use_selection(
-            preloaded.get("energy_use_filter_selected", [])
-        )
-        st.session_state.pop(MASTER_ENERGY_FILTER_AVAILABLE_KEY, None)
-
         if preloaded.get("year") is not None:
             try:
                 st.session_state["project_year"] = int(float(preloaded["year"]))
@@ -8965,135 +8778,6 @@ if uploaded_file:
 
         st.session_state["_loaded_workbook_token"] = wb_token
 
-if uploaded_file:
-    # ---- Sidebar: project info (prefill from saved if available)
-    with st.sidebar.expander("Project Data"):
-        st.caption("Enter Project's Basic Informations")
-
-        # Prefer current session values (so Project Data stays global across scenarios)
-        default_name = st.session_state.get("project_name")
-        if not default_name:
-            default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
-
-        default_area = st.session_state.get("project_area")
-        if default_area is None:
-            default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
-
-        default_building_use = st.session_state.get("building_use")
-        if not default_building_use:
-            default_building_use = preloaded["building_use"] if (
-                    preloaded and preloaded["building_use"]) else "Office"
-
-        # Defaults for lat/lon (fallback to previous hard-coded values)
-        default_lat = st.session_state.get("project_latitude")
-        if default_lat is None:
-            default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
-
-        default_lon = st.session_state.get("project_longitude")
-        if default_lon is None:
-            default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
-
-        # keep title reactive via session_state
-        project_name = st.text_input("Project Name", value=str(default_name), key="project_name", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
-        project_area = numeric_input("Project Area", float(default_area), key="project_area", min_value=0.0, disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
-
-        default_year = st.session_state.get("project_year")
-        if default_year is None:
-            default_year = preloaded.get("year") if (preloaded and preloaded.get("year") is not None) else 2025
-
-        # Year must be an integer. Use number_input (not the custom text-based numeric_input)
-        # to avoid modifying a widget-bound *_txt key after instantiation.
-        project_year = st.number_input(
-            "Year",
-            value=int(default_year),
-            min_value=2020,
-            max_value=2050,
-            step=1,
-            format="%d",
-            key="project_year",
-            disabled=IS_VIEWER_MODE,
-            help=_viewer_widget_help(),
-        )
-
-        # Country (CRREM-aligned). Stored as full name. Default: Germany.
-        country_options = get_crrem_country_options()
-        default_country = st.session_state.get("project_country")
-        if not default_country:
-            default_country = preloaded.get("country") if (preloaded and preloaded.get("country")) else "Germany"
-        if (not country_options) or (default_country not in country_options):
-            default_country = "Germany" if (country_options and "Germany" in country_options) else (
-                country_options[0] if country_options else "Germany"
-            )
-
-        st.selectbox(
-            "Country",
-            options=country_options if country_options else ["Germany"],
-            index=(country_options.index(default_country) if (
-                    country_options and default_country in country_options) else 0),
-            key="project_country",
-            disabled=IS_VIEWER_MODE,
-            help=_viewer_widget_help(),
-        )
-
-        latitude = numeric_input(
-            "Project Latitude",
-            float(default_lat),
-            key="project_latitude",
-            min_value=-90.0,
-            max_value=90.0,
-            fmt="{:.6f}",
-            disabled=IS_VIEWER_MODE,
-            help=_viewer_widget_help(),
-        )
-        longitude = numeric_input(
-            "Project Longitude",
-            float(default_lon),
-            key="project_longitude",
-            min_value=-180.0,
-            max_value=180.0,
-            fmt="{:.6f}",
-            disabled=IS_VIEWER_MODE,
-            help=_viewer_widget_help(),
-        )
-
-        # building use dropdown unchanged...
-        building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
-                                "Leisure", "Healthcare"]
-        building_use_index = building_use_options.index(
-            default_building_use) if default_building_use in building_use_options else 0
-        building_use = st.selectbox("Building Use", building_use_options, index=building_use_index,
-                                    key="building_use", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
-
-    # ---- Sidebar: master Energy Use filter (global across all scenarios and calculations)
-    with st.sidebar.expander("Energy Use Filter"):
-        st.caption("Globally include or exclude Energy Uses from BPVis calculations and scenario comparisons.")
-        filter_options = _master_energy_filter_available_end_uses()
-
-        # Preserve the saved selection. For new/legacy projects, start with every Energy Use selected.
-        current_filter_selection = _normalize_master_energy_use_selection(
-            st.session_state.get(MASTER_ENERGY_FILTER_SELECTED_KEY, []),
-            valid_end_uses=filter_options,
-        )
-        if not current_filter_selection and filter_options:
-            current_filter_selection = list(filter_options)
-        st.session_state[MASTER_ENERGY_FILTER_SELECTED_KEY] = current_filter_selection
-
-        filter_enabled = st.checkbox(
-            "Apply Energy Use Filter",
-            key=MASTER_ENERGY_FILTER_ENABLED_KEY,
-            help="When active, only the selected Energy Uses are included in calculations throughout the app.",
-        )
-        selected_master_energy_uses = st.multiselect(
-            "Energy Uses included in calculations",
-            options=filter_options,
-            format_func=ui_name,
-            key=MASTER_ENERGY_FILTER_SELECTED_KEY,
-            help="This is a project-wide filter. It applies to every scenario, all analysis tabs, Loads Analysis where load names match Energy Uses, and all Scenarios-tab comparisons.",
-        )
-        if filter_enabled and not selected_master_energy_uses:
-            st.warning("Select at least one Energy Use. Until then, the filter is treated as inactive to keep calculations valid.")
-
-
 # =========================
 # Header (moved here so it can use preloaded name)
 # =========================
@@ -9131,18 +8815,13 @@ else:
 with tab1:
     if uploaded_file:
         # ---- Load data
-        # Keep an unfiltered copy for configuration/scenario persistence; calculations use the filtered copy.
-        df_all_energy_uses = get_energy_balance_df(
-            uploaded_file.getvalue(), uploaded_file.name, apply_master_filter=False
-        )
         df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
 
         # ---- Wide->Long transform for plotting and grouping
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
-        df_melted_all = df_all_energy_uses.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
         # ---- Scenario Manager initialization (backwards compatible)
-        end_uses = df_melted_all["End_Use"].unique().tolist()
+        end_uses = df_melted["End_Use"].unique().tolist()
         _just_initialized_scenarios = False
 
         if "scenarios" not in st.session_state:
@@ -9202,17 +8881,9 @@ with tab1:
 
         # Resolve Energy_Balance again after scenario initialization so first render also uses
         # an active scenario-specific raw-data override when one was loaded from the workbook.
-        df_all_energy_uses = get_energy_balance_df(
-            uploaded_file.getvalue(),
-            uploaded_file.name,
-            scenario_name=st.session_state.get("active_scenario"),
-            apply_master_filter=False,
-        )
         df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=st.session_state.get("active_scenario"))
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
-        df_melted_all = df_all_energy_uses.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
-        end_uses = df_melted_all["End_Use"].unique().tolist()
-        _master_energy_filter_available_end_uses(end_uses)
+        end_uses = df_melted["End_Use"].unique().tolist()
         if _just_initialized_scenarios and st.session_state.get("active_scenario") in st.session_state.get("scenarios", {}):
             load_scenario_into_widgets(st.session_state["scenarios"][st.session_state["active_scenario"]], end_uses)
 
@@ -9268,7 +8939,6 @@ with tab1:
                         uploaded_file.getvalue(),
                         uploaded_file.name,
                         scenario_name=_scenario_name,
-                        apply_master_filter=False,
                     )
                     if isinstance(_df, pd.DataFrame) and "Month" in _df.columns:
                         return _df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")["End_Use"].unique().tolist()
@@ -9330,14 +9000,14 @@ with tab1:
                 try:
                     set_scenario_energy_balance_override(
                         new_name,
-                        get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
+                        get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active),
                     )
                 except Exception:
                     pass
                 try:
                     set_scenario_loads_balance_override(
                         new_name,
-                        get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
+                        get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active),
                     )
                 except Exception:
                     pass
@@ -9363,14 +9033,14 @@ with tab1:
                 try:
                     set_scenario_energy_balance_override(
                         new_name,
-                        get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
+                        get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active),
                     )
                 except Exception:
                     pass
                 try:
                     set_scenario_loads_balance_override(
                         new_name,
-                        get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
+                        get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active),
                     )
                 except Exception:
                     pass
@@ -9475,6 +9145,104 @@ with tab1:
                     st.rerun()
             st.caption("Scenarios store CO₂ factors, tariffs, source mapping, efficiency factors, On-site generation settings, CRREM measures, scenario-specific LCC investment measures, and optional scenario-specific Energy_Balance / Loads_Balance raw data. Numbered Excel sheets are mapped by scenario order.")
 
+        # ---- Sidebar: project info (prefill from saved if available)
+        with st.sidebar.expander("Project Data"):
+            st.caption("Enter Project's Basic Informations")
+
+            # Prefer current session values (so Project Data stays global across scenarios)
+            default_name = st.session_state.get("project_name")
+            if not default_name:
+                default_name = preloaded["name"] if (preloaded and preloaded["name"]) else "Example Building 1"
+
+            default_area = st.session_state.get("project_area")
+            if default_area is None:
+                default_area = preloaded["area"] if (preloaded and preloaded["area"] is not None) else 1000.00
+
+            default_building_use = st.session_state.get("building_use")
+            if not default_building_use:
+                default_building_use = preloaded["building_use"] if (
+                        preloaded and preloaded["building_use"]) else "Office"
+
+            # Defaults for lat/lon (fallback to previous hard-coded values)
+            default_lat = st.session_state.get("project_latitude")
+            if default_lat is None:
+                default_lat = preloaded["lat"] if (preloaded and preloaded["lat"] is not None) else 53.54955
+
+            default_lon = st.session_state.get("project_longitude")
+            if default_lon is None:
+                default_lon = preloaded["lon"] if (preloaded and preloaded["lon"] is not None) else 9.9936
+
+            # keep title reactive via session_state
+            project_name = st.text_input("Project Name", value=str(default_name), key="project_name", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
+            project_area = numeric_input("Project Area", float(default_area), key="project_area", min_value=0.0, disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
+
+            default_year = st.session_state.get("project_year")
+            if default_year is None:
+                default_year = preloaded.get("year") if (preloaded and preloaded.get("year") is not None) else 2025
+
+            # Year must be an integer. Use number_input (not the custom text-based numeric_input)
+            # to avoid modifying a widget-bound *_txt key after instantiation.
+            project_year = st.number_input(
+                "Year",
+                value=int(default_year),
+                min_value=2020,
+                max_value=2050,
+                step=1,
+                format="%d",
+                key="project_year",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
+            )
+
+            # Country (CRREM-aligned). Stored as full name. Default: Germany.
+            country_options = get_crrem_country_options()
+            default_country = st.session_state.get("project_country")
+            if not default_country:
+                default_country = preloaded.get("country") if (preloaded and preloaded.get("country")) else "Germany"
+            if (not country_options) or (default_country not in country_options):
+                default_country = "Germany" if (country_options and "Germany" in country_options) else (
+                    country_options[0] if country_options else "Germany"
+                )
+
+            st.selectbox(
+                "Country",
+                options=country_options if country_options else ["Germany"],
+                index=(country_options.index(default_country) if (
+                        country_options and default_country in country_options) else 0),
+                key="project_country",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
+            )
+
+            latitude = numeric_input(
+                "Project Latitude",
+                float(default_lat),
+                key="project_latitude",
+                min_value=-90.0,
+                max_value=90.0,
+                fmt="{:.6f}",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
+            )
+            longitude = numeric_input(
+                "Project Longitude",
+                float(default_lon),
+                key="project_longitude",
+                min_value=-180.0,
+                max_value=180.0,
+                fmt="{:.6f}",
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(),
+            )
+
+            # building use dropdown unchanged...
+            building_use_options = ["Office", "Hospitality", "Retail", "Residential", "Industrial", "Education",
+                                    "Leisure", "Healthcare"]
+            building_use_index = building_use_options.index(
+                default_building_use) if default_building_use in building_use_options else 0
+            building_use = st.selectbox("Building Use", building_use_options, index=building_use_index,
+                                        key="building_use", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
+
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
             st.caption("Assign Emission Factors per source")
@@ -9571,7 +9339,7 @@ with tab1:
         with st.sidebar.expander("Efficiency Factors"):
             st.caption("Assign efficiency factors per End Use (dimensionless; kWh is divided by factor)")
             def_eff = preloaded["efficiency"] if (preloaded and preloaded.get("efficiency")) else {}
-            for use in end_uses:
+            for use in df_melted["End_Use"].unique().tolist():
                 numeric_input(
                     f"Efficiency Factor {use}",
                     float(def_eff.get(use, 1.0)),
@@ -9646,7 +9414,7 @@ with tab1:
 
             # Detect loads from Loads_Balance (if present)
             try:
-                _df_loads_sidebar = get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name, apply_master_filter=False)
+                _df_loads_sidebar = get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name)
                 _load_cols = [c for c in _df_loads_sidebar.columns if c not in ["hoy", "doy", "day", "month", "weekday", "hour"]]
             except Exception:
                 _load_cols = []
@@ -9791,11 +9559,6 @@ with tab1:
                         pd.DataFrame([
                             {"Key": "Scenario_Comparison_Analysis_Period", "Value": int(_sc_cmp_period_save)},
                             {"Key": "Scenario_Comparison_Apply_LCC_Filter", "Value": 1 if bool(_sc_cmp_apply_lcc_filter_save) else 0},
-                            {"Key": "Energy_Use_Filter_Enabled", "Value": 1 if _master_energy_filter_enabled() else 0},
-                            {"Key": "Energy_Use_Filter_Selected", "Value": json.dumps(
-                                _master_energy_filter_selected(_master_energy_filter_available_end_uses(end_uses)),
-                                ensure_ascii=False,
-                            )},
                         ]),
                     ], ignore_index=True)
                 except Exception:
@@ -10497,7 +10260,7 @@ with tab_model_qa:
                             key=item_duplicate_name_key,
                             help="Edit this name before clicking Duplicate. If the name already exists, the app adds a numeric suffix automatically.",
                         )
-                        duplicate_item = _form_submit_button_compat(
+                        duplicate_item = st.form_submit_button(
                             "Duplicate this complete object",
                             key=item_duplicate_key,
                             use_container_width=True,
@@ -10510,14 +10273,14 @@ with tab_model_qa:
                             key=item_rename_name_key,
                             help="Edit this name and click Rename. If the name already exists, the app adds a numeric suffix automatically.",
                         )
-                        rename_item = _form_submit_button_compat(
+                        rename_item = st.form_submit_button(
                             "Rename this complete object",
                             key=item_rename_key,
                             use_container_width=True,
                             help="Renames this object and keeps all parameter values, references, assumptions and QA justifications.",
                         )
 
-                        remove_item = _form_submit_button_compat(
+                        remove_item = st.form_submit_button(
                             "Remove this complete object",
                             key=item_delete_key,
                             use_container_width=True,
@@ -10557,7 +10320,7 @@ with tab_model_qa:
                         key=f"{custom_key_prefix}_source",
                     )
                     custom_param_ref = st.text_input("Source document / reference", value="", key=f"{custom_key_prefix}_source_ref")
-                    custom_param_submit = _form_submit_button_compat(
+                    custom_param_submit = st.form_submit_button(
                         "Add custom parameter to this object",
                         key=f"{custom_key_prefix}_submit",
                         use_container_width=True,
@@ -12301,13 +12064,9 @@ with tab_lcc:
         st.write("## LCC-Analysis")
         st.metric("Active Scenario", active_selected)
 
-        # Current project/scenario context. Calculations use the master-filtered data,
-        # while the LCC configuration keeps the complete underlying End Use list.
+        # Current project/scenario context
         df_lcc_energy = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name).copy()
-        df_lcc_energy_all = get_energy_balance_df(
-            uploaded_file.getvalue(), uploaded_file.name, apply_master_filter=False
-        ).copy()
-        end_uses_lcc = [str(c) for c in df_lcc_energy_all.columns if str(c) != "Month"]
+        end_uses_lcc = [str(c) for c in df_lcc_energy.columns if str(c) != "Month"]
         project_year_lcc = int(st.session_state.get("project_year", 2025))
         project_area_lcc = float(st.session_state.get("project_area", 0.0) or 0.0)
         currency_lcc = st.session_state.get("currency_symbol", "€")
@@ -12379,6 +12138,8 @@ with tab_lcc:
                         step=1,
                         format="%d",
                         key=_lcc_global_draft_key("analysis_period"),
+                        disabled=False,
+                        help="Analysis period used for the LCC calculation.",
                     )
                 with p2:
                     numeric_input(
@@ -12445,6 +12206,8 @@ with tab_lcc:
                     "For measures that affect several uses, enter multiple Assigned End Uses separated by commas (example: Heating, Cooling). "
                     "The measure cost is allocated equally across the assigned End Uses."
                 )
+                if IS_VIEWER_MODE:
+                    st.caption("🔒 You don't have permission to edit it")
 
                 draft_analysis_period_for_editor = max(
                     1,
@@ -12458,14 +12221,21 @@ with tab_lcc:
                     "num_rows": "fixed" if IS_VIEWER_MODE else "dynamic",
                     "use_container_width": True,
                     "key": "lcc_investments_editor",
-                    "disabled": IS_VIEWER_MODE,
+                    "disabled": True if IS_VIEWER_MODE else False,
                 }
                 if hasattr(st, "column_config"):
+                    lcc_investment_help = (
+                        "You don't have permission to edit it" if IS_VIEWER_MODE else None
+                    )
                     editor_kwargs_lcc["column_config"] = {
-                        "Measure Name": st.column_config.TextColumn("Measure Name", required=False),
+                        "Measure Name": st.column_config.TextColumn(
+                            "Measure Name",
+                            required=False,
+                            help=lcc_investment_help,
+                        ),
                         "Assigned End Uses": st.column_config.TextColumn(
                             "Assigned End Uses",
-                            help="Enter one or more End Uses separated by commas, e.g. Heating, Cooling.",
+                            help=lcc_investment_help or "Enter one or more End Uses separated by commas, e.g. Heating, Cooling.",
                             required=True,
                         ),
                         "Investment Year": st.column_config.NumberColumn(
@@ -12475,12 +12245,14 @@ with tab_lcc:
                             step=1,
                             format="%d",
                             required=True,
+                            help=lcc_investment_help,
                         ),
                         "Investment Cost": st.column_config.NumberColumn(
                             f"Investment Cost ({currency_lcc})",
                             min_value=0.0,
                             step=1000.0,
                             format="%.2f",
+                            help=lcc_investment_help,
                         ),
                         "Annual Maintenance Cost (%)": st.column_config.NumberColumn(
                             "Annual Maintenance Cost (% of investment)",
@@ -12488,6 +12260,7 @@ with tab_lcc:
                             max_value=100.0,
                             step=0.1,
                             format="%.2f",
+                            help=lcc_investment_help,
                         ),
                         "Life Length (years)": st.column_config.NumberColumn(
                             "Life Length (years)",
@@ -12495,6 +12268,7 @@ with tab_lcc:
                             max_value=200,
                             step=1,
                             format="%d",
+                            help=lcc_investment_help,
                         ),
                     }
 
@@ -16432,9 +16206,7 @@ with tab8:
         if _RAW_ENERGY_DRAFT_KEY not in st.session_state:
             st.session_state[_RAW_ENERGY_DRAFT_KEY] = get_global_energy_balance_df(file_bytes, uploaded_file.name).copy(deep=True)
         if _RAW_LOADS_DRAFT_KEY not in st.session_state:
-            st.session_state[_RAW_LOADS_DRAFT_KEY] = get_loads_balance_df(
-                file_bytes, uploaded_file.name, apply_master_filter=False
-            ).copy(deep=True)
+            st.session_state[_RAW_LOADS_DRAFT_KEY] = get_loads_balance_df(file_bytes, uploaded_file.name).copy(deep=True)
 
         # ---------- Energy_Balance ----------
         with st.expander("Energy_Balance (monthly, kWh)", expanded=True):
