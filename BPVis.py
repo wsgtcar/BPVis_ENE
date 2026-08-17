@@ -9064,6 +9064,14 @@ if uploaded_file:
         building_use = st.selectbox("Building Use", building_use_options, index=building_use_index,
                                     key="building_use", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
+# Preserve the project-wide Energy Use Filter widget state across scenario-switch reruns.
+# Scenario Manager can trigger st.rerun() before these widgets are rendered; re-saving the
+# keys here prevents Streamlit's widget cleanup from resetting the global filter selection.
+if MASTER_ENERGY_FILTER_ENABLED_KEY in st.session_state:
+    st.session_state[MASTER_ENERGY_FILTER_ENABLED_KEY] = st.session_state[MASTER_ENERGY_FILTER_ENABLED_KEY]
+if MASTER_ENERGY_FILTER_SELECTED_KEY in st.session_state:
+    st.session_state[MASTER_ENERGY_FILTER_SELECTED_KEY] = st.session_state[MASTER_ENERGY_FILTER_SELECTED_KEY]
+
 # =========================
 # Header (moved here so it can use preloaded name)
 # =========================
