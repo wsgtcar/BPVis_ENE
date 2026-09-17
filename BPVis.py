@@ -13189,19 +13189,56 @@ with tab7:
                 "total_emissions": _scenario_lc_emissions_kpi_label(scenario_comparison_period),
             }
             _comparison_kpi_filter_key = "scenario_comparison_kpi_filter"
-            _comparison_kpi_selected_ids = st.multiselect(
-                "Comparison KPI's",
-                options=_comparison_kpi_ids,
-                default=_comparison_kpi_ids,
-                format_func=lambda _k: _comparison_kpi_labels.get(_k, str(_k)),
-                key=_comparison_kpi_filter_key,
-                help="Select which KPIs are shown in the two radar diagrams, Benchmark-style KPI bar by Scenario, and KPI improvement vs reference.",
-            )
+            _comparison_scenario_filter_key = "scenario_comparison_scenario_filter"
+            _comparison_scenario_options = [str(s) for s in scenario_order]
+
+            # Keep this tab-only filter valid if scenarios are renamed/deleted during the session.
+            # It is intentionally not persisted to the project workbook.
+            if _comparison_scenario_filter_key in st.session_state:
+                _comparison_scenario_previous = st.session_state.get(_comparison_scenario_filter_key, [])
+                if not isinstance(_comparison_scenario_previous, list):
+                    _comparison_scenario_previous = []
+                st.session_state[_comparison_scenario_filter_key] = [
+                    _s for _s in _comparison_scenario_options if _s in {str(x) for x in _comparison_scenario_previous}
+                ]
+
+            _scenario_filter_col, _kpi_filter_col = st.columns(2)
+            with _scenario_filter_col:
+                _comparison_scenario_selected = st.multiselect(
+                    "Comparison Scenarios",
+                    options=_comparison_scenario_options,
+                    default=_comparison_scenario_options,
+                    key=_comparison_scenario_filter_key,
+                    help="Select which scenarios are presented and investigated in this tab. Filtered-out scenarios are also removed from scenario selection lists below.",
+                )
+            with _kpi_filter_col:
+                _comparison_kpi_selected_ids = st.multiselect(
+                    "Comparison KPI's",
+                    options=_comparison_kpi_ids,
+                    default=_comparison_kpi_ids,
+                    format_func=lambda _k: _comparison_kpi_labels.get(_k, str(_k)),
+                    key=_comparison_kpi_filter_key,
+                    help="Select which KPIs are shown in the two radar diagrams, Benchmark-style KPI bar by Scenario, and KPI improvement vs reference.",
+                )
+
             _comparison_kpi_selected_labels = {
                 _comparison_kpi_labels[_k]
                 for _k in _comparison_kpi_selected_ids
                 if _k in _comparison_kpi_labels
             }
+
+            # From this point onward, every Scenarios-tab comparison uses only the selected scenarios.
+            # The underlying scenario definitions are untouched; this is a presentation/analysis filter only.
+            scenario_order = [str(s) for s in _comparison_scenario_options if str(s) in set(_comparison_scenario_selected)]
+            _comparison_scenario_set = set(scenario_order)
+            df_cmp = df_cmp.loc[df_cmp["Scenario"].astype(str).isin(_comparison_scenario_set)].copy()
+            df_cmp_display = df_cmp_display.loc[df_cmp_display["Scenario"].astype(str).isin(_comparison_scenario_set)].copy()
+            energy_rows = [r for r in energy_rows if str(r.get("Scenario", "")) in _comparison_scenario_set]
+            cost_rows = [r for r in cost_rows if str(r.get("Scenario", "")) in _comparison_scenario_set]
+            emissions_rows = [r for r in emissions_rows if str(r.get("Scenario", "")) in _comparison_scenario_set]
+            energy_use_rows = [r for r in energy_use_rows if str(r.get("Scenario", "")) in _comparison_scenario_set]
+            cost_use_rows = [r for r in cost_use_rows if str(r.get("Scenario", "")) in _comparison_scenario_set]
+            emissions_use_rows = [r for r in emissions_use_rows if str(r.get("Scenario", "")) in _comparison_scenario_set]
 
             # On-top scenario radar summary (outside the Life Cycle Comparission expander).
             try:
@@ -13273,13 +13310,17 @@ with tab7:
 
                 _ctrl_col, _spacer_col = st.columns([1.15, 2.85])
                 with _ctrl_col:
-                    _radar_ref_scenario = st.selectbox(
-                        "Relative radar reference scenario",
-                        options=_scenario_order_str,
-                        index=_scenario_order_str.index(_radar_ref_default) if _radar_ref_default in _scenario_order_str else 0,
-                        key=_radar_ref_widget_key,
-                        help="The selected scenario is used as the 0% reference and is filtered out from the relative improvement radar.",
-                    )
+                    if _scenario_order_str:
+                        _radar_ref_scenario = st.selectbox(
+                            "Relative radar reference scenario",
+                            options=_scenario_order_str,
+                            index=_scenario_order_str.index(_radar_ref_default) if _radar_ref_default in _scenario_order_str else 0,
+                            key=_radar_ref_widget_key,
+                            help="The selected scenario is used as the 0% reference and is filtered out from the relative improvement radar.",
+                        )
+                    else:
+                        _radar_ref_scenario = ""
+                        st.info("Select at least one scenario in Comparison Scenarios.")
                 if _radar_ref_scenario in _scenario_order_str:
                     st.session_state[_radar_ref_key] = _radar_ref_scenario
 
