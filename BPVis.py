@@ -9860,6 +9860,39 @@ with tab1:
                                                   key="co2_emissions_biomass",
                                                   min_value=0.0, max_value=5.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
+            if st.button(
+                "Copy active scenario emission factors to all scenarios",
+                key="copy_emission_factors_to_all_scenarios",
+                use_container_width=True,
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(
+                    "Copies all emission-factor values and the CRREM standard-electricity-factor checkbox from the active scenario to every existing scenario."
+                ),
+            ):
+                _scenarios_factor_copy = st.session_state.get("scenarios", {})
+                if isinstance(_scenarios_factor_copy, dict) and _scenarios_factor_copy:
+                    _current_factors_copy = {
+                        "Electricity": float(co2_Emissions_Electricity),
+                        "Green Electricity": float(co2_Emissions_Green_Electricity),
+                        "Gas": float(co2_emissions_gas),
+                        "District Heating": float(co2_emissions_dh),
+                        "District Cooling": float(co2_emissions_dc),
+                        "Biomass": float(co2_emissions_biomass),
+                    }
+                    _current_standard_electricity_ef_copy = bool(
+                        st.session_state.get("crrem_use_standard_electricity_ef", False)
+                    )
+                    for _sc_name_copy, _sc_payload_copy in list(_scenarios_factor_copy.items()):
+                        if not isinstance(_sc_payload_copy, dict):
+                            _sc_payload_copy = {}
+                        _sc_payload_copy["factors"] = deepcopy(_current_factors_copy)
+                        _crrem_ef_copy = _coerce_crrem_ef_payload(_sc_payload_copy.get("crrem_ef", {}))
+                        _crrem_ef_copy["use_standard_electricity"] = _current_standard_electricity_ef_copy
+                        _sc_payload_copy["crrem_ef"] = _crrem_ef_copy
+                        _scenarios_factor_copy[_sc_name_copy] = _sc_payload_copy
+                    st.session_state["scenarios"] = _scenarios_factor_copy
+                    st.success("Emission factors copied to all scenarios.")
+
         # --- Energy Cost: optional consumption + annual peak-demand tariff ---
         with st.sidebar.expander("Energy Tariffs"):
             st.caption("Assign source tariffs. Optionally add an annual peak-demand charge (per kW) to the consumption tariff (per kWh).")
