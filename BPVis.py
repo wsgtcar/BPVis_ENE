@@ -13202,8 +13202,7 @@ with tab7:
                     _s for _s in _comparison_scenario_options if _s in {str(x) for x in _comparison_scenario_previous}
                 ]
 
-            _scenario_filter_col, _kpi_filter_col = st.columns(2)
-            with _scenario_filter_col:
+            with st.expander("Filters", expanded=False):
                 _comparison_scenario_selected = st.multiselect(
                     "Comparison Scenarios",
                     options=_comparison_scenario_options,
@@ -13211,7 +13210,6 @@ with tab7:
                     key=_comparison_scenario_filter_key,
                     help="Select which scenarios are presented and investigated in this tab. Filtered-out scenarios are also removed from scenario selection lists below.",
                 )
-            with _kpi_filter_col:
                 _comparison_kpi_selected_ids = st.multiselect(
                     "Comparison KPI's",
                     options=_comparison_kpi_ids,
