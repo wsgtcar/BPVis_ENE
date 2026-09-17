@@ -99,7 +99,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.4.4",
+    page_title="WSGT_BPVis_ENE 2.4.5",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -859,7 +859,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.4.4")
+st.sidebar.write("Version 2.4.5")
 if IS_VIEWER_MODE:
     st.sidebar.write("**Viewer Mode**")
 
@@ -1915,6 +1915,221 @@ def parse_tariffs_df(df: Optional[pd.DataFrame]) -> Dict[str, float]:
     return out
 
 
+# Optional two-component energy tariff: consumption charge (per kWh) + annual peak-demand charge (per kW).
+TARIFF_DEMAND_CONFIG_KEY = "tariff_demand"
+
+
+def _tariff_source_state_suffix(source: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "_", str(source or "").strip().lower()).strip("_") or "source"
+
+
+def _tariff_kwh_widget_key(source: str) -> str:
+    return {
+        "Electricity": "cost_electricity",
+        "Green Electricity": "cost_green_electricity",
+        "Gas": "cost_gas",
+        "District Heating": "cost_dh",
+        "District Cooling": "cost_dc",
+        "Biomass": "cost_biomass",
+    }.get(str(source), f"cost_{_tariff_source_state_suffix(source)}")
+
+
+def _default_tariff_demand_config() -> Dict[str, dict]:
+    return {src: {"enabled": False, "per_kw": 0.0} for src in ENERGY_SOURCE_ORDER}
+
+
+def _normalize_tariff_demand_config(config) -> Dict[str, dict]:
+    defaults = _default_tariff_demand_config()
+    raw = config if isinstance(config, dict) else {}
+    out = {}
+    for src in ENERGY_SOURCE_ORDER:
+        rec = raw.get(src, {}) if isinstance(raw.get(src, {}), dict) else {}
+        try:
+            per_kw = float(str(rec.get("per_kw", 0.0)).replace(",", "."))
+        except Exception:
+            per_kw = 0.0
+        out[src] = {
+            "enabled": bool(rec.get("enabled", False)),
+            "per_kw": max(0.0, float(per_kw)),
+        }
+    return out
+
+
+def parse_tariff_demand_df(df: Optional[pd.DataFrame]) -> Dict[str, dict]:
+    """Parse optional demand-charge columns from Energy_Tariffs; legacy files default to disabled."""
+    out = _default_tariff_demand_config()
+    if df is None or "Energy_Source" not in df.columns:
+        return out
+    has_enabled = "Demand_Charge_Enabled" in df.columns
+    has_per_kw = "Tariff_per_kW" in df.columns
+    if not has_enabled and not has_per_kw:
+        return out
+    for _, row in df.iterrows():
+        src = str(row.get("Energy_Source", "")).strip()
+        if src not in out:
+            continue
+        raw_enabled = row.get("Demand_Charge_Enabled", False) if has_enabled else False
+        if isinstance(raw_enabled, str):
+            enabled = raw_enabled.strip().lower() in {"1", "true", "yes", "y", "on"}
+        else:
+            try:
+                enabled = bool(int(float(raw_enabled)))
+            except Exception:
+                enabled = bool(raw_enabled)
+        try:
+            per_kw = float(str(row.get("Tariff_per_kW", 0.0)).replace(",", ".")) if has_per_kw else 0.0
+        except Exception:
+            per_kw = 0.0
+        out[src] = {"enabled": bool(enabled), "per_kw": max(0.0, float(per_kw))}
+    return out
+
+
+def _capture_tariff_demand_from_widgets() -> Dict[str, dict]:
+    out = {}
+    for src in ENERGY_SOURCE_ORDER:
+        suffix = _tariff_source_state_suffix(src)
+        out[src] = {
+            "enabled": bool(st.session_state.get(f"tariff_demand_enabled_{suffix}", False)),
+            "per_kw": max(0.0, float(st.session_state.get(f"tariff_per_kw_{suffix}", 0.0) or 0.0)),
+        }
+    return out
+
+
+def _tariff_load_match_key(name: str) -> str:
+    """Normalize source/load names while tolerating standard leading/trailing load labels and unit suffixes."""
+    s = str(name or "").strip().lower()
+    s = re.sub(r"[\[\](){}]", " ", s)
+    token = r"(?:peak[ _.-]*load|peak[ _.-]*demand|load|demand|energy[ _.-]*source|source|system|annual|total)"
+    prev = None
+    while prev != s:
+        prev = s
+        s = re.sub(r"(?i)(?:[ _.-]+)(?:kw|kilowatt|load_kw|peak_kw)$", "", s).strip()
+        s = re.sub(rf"(?i)^{token}[ _.-]+", "", s).strip()
+        s = re.sub(rf"(?i)[ _.-]+{token}$", "", s).strip()
+        s = re.sub(r"^[0-9]+[ _.-]*", "", s).strip()
+        s = re.sub(r"[ _.-]*[0-9]+$", "", s).strip()
+    return re.sub(r"[^a-z0-9]+", "", s)
+
+
+def _tariff_find_matching_load_column(df_loads: pd.DataFrame, source: str) -> Optional[str]:
+    """Find a source-named load using exact normalized matching; avoids e.g. Electricity -> Green Electricity."""
+    if df_loads is None or not isinstance(df_loads, pd.DataFrame) or df_loads.empty:
+        return None
+    meta = {"hoy", "doy", "day", "month", "weekday", "hour", "Grid_Injection"}
+    source_key = _tariff_load_match_key(source)
+    if not source_key:
+        return None
+    matches = [str(c) for c in df_loads.columns if str(c) not in meta and _tariff_load_match_key(c) == source_key]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _tariff_peak_for_source(df_loads: pd.DataFrame, source: str) -> Tuple[Optional[float], Optional[str]]:
+    col = _tariff_find_matching_load_column(df_loads, source)
+    if not col:
+        return None, None
+    try:
+        vals = pd.to_numeric(df_loads[col], errors="coerce").dropna()
+        if vals.empty:
+            return None, col
+        # Demand charge is based on the highest positive import/load value, not absolute negative values.
+        return max(0.0, float(vals.max())), col
+    except Exception:
+        return None, col
+
+
+def _tariff_rate_details_for_rows(
+        rows: pd.DataFrame,
+        payload: dict,
+        df_loads: Optional[pd.DataFrame],
+        energy_col: str = "kWh",
+        source_col: str = "Energy_Source",
+        per_kwh_map: Optional[dict] = None,
+        per_kw_map: Optional[dict] = None,
+) -> Dict[str, dict]:
+    """Return source tariff details and an equivalent consumption tariff.
+
+    The annual peak-demand charge is spread proportionally across positive consumption rows.
+    Negative generation/credits retain the entered per-kWh tariff. This preserves the exact
+    source total: signed kWh * tariff_per_kWh + annual peak kW * tariff_per_kW.
+    """
+    payload = payload or {}
+    base_tariffs = payload.get("tariffs", {}) or {}
+    demand_cfg = _normalize_tariff_demand_config(payload.get(TARIFF_DEMAND_CONFIG_KEY, {}))
+    details = {}
+    work = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame()
+    if not work.empty and source_col in work.columns and energy_col in work.columns:
+        work[source_col] = work[source_col].astype(str)
+        work[energy_col] = pd.to_numeric(work[energy_col], errors="coerce").fillna(0.0)
+
+    for src in ENERGY_SOURCE_ORDER:
+        try:
+            base_rate = float((per_kwh_map or {}).get(src, base_tariffs.get(src, 0.0)))
+        except Exception:
+            base_rate = 0.0
+        cfg = demand_cfg.get(src, {"enabled": False, "per_kw": 0.0})
+        enabled = bool(cfg.get("enabled", False))
+        try:
+            demand_rate = float((per_kw_map or {}).get(src, cfg.get("per_kw", 0.0)))
+        except Exception:
+            demand_rate = 0.0
+        demand_rate = max(0.0, demand_rate)
+
+        if not work.empty:
+            vals = work.loc[work[source_col] == str(src), energy_col]
+            consumption_kwh = float(vals.loc[vals > 0].sum())
+            generation_kwh = float(vals.loc[vals < 0].sum())
+        else:
+            consumption_kwh = 0.0
+            generation_kwh = 0.0
+
+        peak_kw, load_col = _tariff_peak_for_source(df_loads, src) if enabled else (None, None)
+        demand_cost = float(peak_kw) * demand_rate if enabled and peak_kw is not None else 0.0
+        consumption_cost = consumption_kwh * base_rate
+        generation_credit = generation_kwh * base_rate
+        equivalent_rate = (consumption_cost + demand_cost) / consumption_kwh if consumption_kwh > 1e-12 else base_rate
+        total_cost = consumption_cost + generation_credit + demand_cost
+
+        details[src] = {
+            "enabled": enabled,
+            "tariff_per_kwh": base_rate,
+            "tariff_per_kw": demand_rate,
+            "consumption_kwh": consumption_kwh,
+            "generation_kwh": generation_kwh,
+            "peak_kw": peak_kw,
+            "load_column": load_col,
+            "demand_cost": demand_cost,
+            "equivalent_tariff": equivalent_rate,
+            "annual_cost": total_cost,
+            "load_found": (peak_kw is not None),
+        }
+    return details
+
+
+def _tariff_apply_rates_to_rows(
+        rows: pd.DataFrame,
+        tariff_details: Dict[str, dict],
+        energy_col: str = "kWh",
+        source_col: str = "Energy_Source",
+        tariff_col: str = "Tariff",
+        cost_col: str = "cost",
+) -> pd.DataFrame:
+    """Apply equivalent tariff to positive consumption and base kWh tariff to negative generation."""
+    out = rows.copy()
+    if out.empty:
+        out[tariff_col] = pd.Series(dtype=float)
+        out[cost_col] = pd.Series(dtype=float)
+        return out
+    out[energy_col] = pd.to_numeric(out[energy_col], errors="coerce").fillna(0.0)
+    out[source_col] = out[source_col].astype(str)
+    eq_map = {src: float((tariff_details.get(src, {}) or {}).get("equivalent_tariff", 0.0)) for src in ENERGY_SOURCE_ORDER}
+    base_map = {src: float((tariff_details.get(src, {}) or {}).get("tariff_per_kwh", 0.0)) for src in ENERGY_SOURCE_ORDER}
+    eq_rates = out[source_col].map(eq_map).fillna(0.0)
+    base_rates = out[source_col].map(base_map).fillna(0.0)
+    out[tariff_col] = np.where(out[energy_col] >= 0.0, eq_rates, base_rates)
+    out[cost_col] = out[energy_col] * out[tariff_col]
+    return out
+
+
 def parse_mapping_df(df: Optional[pd.DataFrame]) -> Dict[str, str]:
     out = {}
     if df is not None and {"End_Use", "Energy_Source"}.issubset(df.columns):
@@ -2094,6 +2309,7 @@ def _canon_scenario_payload(payload: dict) -> dict:
         payload["crrem_ef"] = _default_crrem_ef_payload()
     else:
         payload["crrem_ef"] = _coerce_crrem_ef_payload(payload.get("crrem_ef"))
+    payload[TARIFF_DEMAND_CONFIG_KEY] = _normalize_tariff_demand_config(payload.get(TARIFF_DEMAND_CONFIG_KEY, {}))
     return payload
 
 
@@ -3080,13 +3296,14 @@ def _lcc_energy_rows_for_payload_year(
         project_year: int,
         energy_inflation_pct: Optional[dict] = None,
         parsed_crrem_lcc_measures: Optional[dict] = None,
+        df_loads: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Return annual operational-energy cost rows for one scenario and one calendar year.
 
-    This is the LCC counterpart to the CRREM Decarbonization Path logic. It applies
-    scenario-specific CRREM measures from their measure year onward, so future source
-    substitutions, efficiency changes, tariff changes and on-site-generation measures affect
-    annual LCC cash flows.
+    Optional demand charges are included by converting each source's annual peak charge into
+    an equivalent consumption tariff. The equivalent rate is calculated from the complete
+    available energy basis before the LCC operational End Use filter is applied, so filtering
+    End Uses removes only their proportional share of the demand charge.
     """
     if df_energy is None or df_energy.empty or "Month" not in df_energy.columns:
         return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
@@ -3097,17 +3314,14 @@ def _lcc_energy_rows_for_payload_year(
     base_tariffs = payload.get("tariffs", {}) or {}
     pv_cfg = payload.get("pv", {}) or {}
     measures = parsed_crrem_lcc_measures or _parse_crrem_measures_for_lcc(payload, max_year=int(year))
-
     selected = [_canon_enduse_name(str(u)) for u in (selected_end_uses or []) if str(u).strip()]
 
     df = df_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh").copy()
     df["End_Use"] = df["End_Use"].apply(lambda x: _canon_enduse_name(str(x)))
-    if selected:
-        df = df[df["End_Use"].isin(set(selected))].copy()
-    if df.empty:
-        return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
     df["kWh"] = pd.to_numeric(df["kWh"], errors="coerce").fillna(0.0)
     annual_by_enduse = df.groupby("End_Use", as_index=True)["kWh"].sum()
+    if annual_by_enduse.empty:
+        return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
 
     eff_y = {str(u): _to_float_lcc(eff_base.get(str(u), 1.0), 1.0) for u in annual_by_enduse.index.tolist()}
     src_y = {str(u): str(src_base.get(str(u), "Electricity")) for u in annual_by_enduse.index.tolist()}
@@ -3127,7 +3341,7 @@ def _lcc_energy_rows_for_payload_year(
     onsite_enduses = set(get_onsite_generation_enduses(annual_by_enduse.index.tolist()))
     pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
 
-    rows = []
+    rows_all = []
     for eu, raw_kwh in annual_by_enduse.items():
         eu = str(eu)
         effv = float(eff_y.get(eu, 1.0) or 1.0)
@@ -3136,7 +3350,6 @@ def _lcc_energy_rows_for_payload_year(
         kwh_adj = float(raw_kwh) / effv
 
         if eu in onsite_enduses:
-            # On-site generation is modelled as an electricity cost offset.
             if pv_annual_override_y is not None:
                 kwh_adj = -abs(float(pv_annual_override_y))
             else:
@@ -3148,25 +3361,39 @@ def _lcc_energy_rows_for_payload_year(
             if src not in ENERGY_SOURCE_ORDER:
                 src = "Electricity"
 
-        tariff_y = _lcc_tariff_at_year(
-            src,
-            int(year),
-            int(project_year),
-            base_tariffs,
-            energy_inflation_pct or {},
+        rows_all.append({"End_Use": eu, "Energy_Source": src, "kWh": float(kwh_adj)})
+
+    if not rows_all:
+        return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
+
+    rows_df = pd.DataFrame(rows_all)
+    per_kwh_y = {
+        src: _lcc_tariff_at_year(
+            src, int(year), int(project_year), base_tariffs, energy_inflation_pct or {},
             measures.get("tariff_measures", {}),
         )
-        rows.append({
-            "End_Use": eu,
-            "Energy_Source": src,
-            "kWh": float(kwh_adj),
-            "Tariff": float(tariff_y),
-            "Annual Cost": float(kwh_adj) * float(tariff_y),
-        })
+        for src in ENERGY_SOURCE_ORDER
+    }
+    demand_cfg = _normalize_tariff_demand_config(payload.get(TARIFF_DEMAND_CONFIG_KEY, {}))
+    per_kw_y = {}
+    for src in ENERGY_SOURCE_ORDER:
+        base_per_kw = float(demand_cfg.get(src, {}).get("per_kw", 0.0) or 0.0)
+        infl = _to_float_lcc((energy_inflation_pct or {}).get(src, 0.0), 0.0) / 100.0
+        offset = max(0, int(year) - int(project_year))
+        per_kw_y[src] = base_per_kw * ((1.0 + infl) ** offset)
 
-    if not rows:
-        return pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"])
-    return pd.DataFrame(rows)[["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"]]
+    tariff_details = _tariff_rate_details_for_rows(
+        rows_df, payload, df_loads, energy_col="kWh", source_col="Energy_Source",
+        per_kwh_map=per_kwh_y, per_kw_map=per_kw_y,
+    )
+    rows_df = _tariff_apply_rates_to_rows(
+        rows_df, tariff_details, energy_col="kWh", source_col="Energy_Source",
+        tariff_col="Tariff", cost_col="Annual Cost",
+    )
+
+    if selected:
+        rows_df = rows_df.loc[rows_df["End_Use"].isin(set(selected))].copy()
+    return rows_df[["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"]]
 
 
 def compute_lcc_cashflow_table(
@@ -3175,6 +3402,7 @@ def compute_lcc_cashflow_table(
         end_uses: list,
         project_year: int,
         lcc_global: Optional[dict] = None,
+        df_loads: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Compute annual nominal and discounted LCC cash-flow rows for one scenario.
 
@@ -3210,6 +3438,7 @@ def compute_lcc_cashflow_table(
             int(start_year),
             energy_inflation_pct=energy_inf,
             parsed_crrem_lcc_measures=parsed_crrem_lcc_measures,
+            df_loads=df_loads,
         )
         if energy_rows_y is None or energy_rows_y.empty:
             continue
@@ -3328,11 +3557,12 @@ def _compute_lcc_cashflow_table_cached_impl(
         end_uses: list,
         project_year: int,
         lcc_global: Optional[dict],
+        df_loads: Optional[pd.DataFrame],
         onsite_signature: tuple,
 ) -> pd.DataFrame:
     """Cached implementation for the expensive year-by-year LCC calculation."""
     return _compute_lcc_cashflow_table_uncached(
-        df_energy, payload, end_uses, project_year, lcc_global=lcc_global
+        df_energy, payload, end_uses, project_year, lcc_global=lcc_global, df_loads=df_loads
     )
 
 
@@ -3342,9 +3572,10 @@ def compute_lcc_cashflow_table_cached(
         end_uses: list,
         project_year: int,
         lcc_global: Optional[dict] = None,
+        df_loads: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     return _compute_lcc_cashflow_table_cached_impl(
-        df_energy, payload, end_uses, int(project_year), lcc_global, _onsite_generation_cache_signature(df_energy)
+        df_energy, payload, end_uses, int(project_year), lcc_global, df_loads, _onsite_generation_cache_signature(df_energy)
     )
 
 
@@ -3387,7 +3618,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.4.4"
+REPORT_VERSION = "2.4.5"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -4135,12 +4366,14 @@ def _build_scenario_performance_radar_raw_df(
                 apply_lcc_filter=apply_lcc_filter,
             )
             radar_lcc_global_50["analysis_period"] = int(scenario_analysis_period)
+            df_loads_sc_50 = get_loads_balance_df(file_bytes, filename, scenario_name=sc_name_str, apply_master_filter=False)
             cf_sc_50 = compute_lcc_cashflow_table_cached(
                 df_energy_sc_50,
                 payload_sc,
                 end_uses_sc_50,
                 int(project_year),
                 lcc_global=radar_lcc_global_50,
+                df_loads=df_loads_sc_50,
             )
             if cf_sc_50 is not None and not cf_sc_50.empty:
                 energy_cf_50 = cf_sc_50.loc[cf_sc_50["Cost Type"].astype(str) == "Energy"].copy()
@@ -5389,9 +5622,13 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
 
     # Energy cost
     add_section("4. Energy Cost (with Factors)")
-    rows_cost = rows_eff.copy()
-    rows_cost["Tariff"] = rows_cost["Energy_Source"].map(tariff_map).fillna(0.0)
-    rows_cost["cost"] = rows_cost["kWh"] * rows_cost["Tariff"]
+    _report_tariff_details = _tariff_rate_details_for_rows(
+        rows_eff, payload, df_loads, energy_col="kWh", source_col="Energy_Source", per_kwh_map=tariff_map
+    )
+    rows_cost = _tariff_apply_rates_to_rows(
+        rows_eff, _report_tariff_details, energy_col="kWh", source_col="Energy_Source",
+        tariff_col="Tariff", cost_col="cost",
+    )
     totals_cost_eu = rows_cost.groupby("End_Use", as_index=True)["cost"].sum()
     totals_cost_src = rows_cost.groupby("Energy_Source", as_index=True)["cost"].sum()
     gross_cost_int = totals_cost_eu[totals_cost_eu > 0].sum() / project_area_r if project_area_r else 0.0
@@ -5410,7 +5647,18 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     _report_add_chart(story, styles, "Annual cost by energy source", _report_annual_stacked_chart(rows_cost, "cost", "Energy_Source", "Annual Cost by Energy Source", f"{currency_r}/a", colors_src), "Annual source costs are factored kWh times source-specific tariffs.")
     pie_cost_src = (totals_cost_src[totals_cost_src > 0] / project_area_r) if project_area_r else totals_cost_src[totals_cost_src > 0]
     _report_add_chart(story, styles, "Cost intensity by energy source", _report_pie_chart(pie_cost_src, "Cost Intensity Share by Energy Source", f"{currency_r} {pie_cost_src.sum():,.2f}\n/m²·a", colors_src), "Source cost intensity is annual cost per source divided by project area.")
-    add_input_table("Relevant inputs", [(f"Tariff - {src}", f"{currency_r} {tariff_map.get(src, 0.0):,.5f}/kWh") for src in ENERGY_SOURCE_ORDER])
+    _report_tariff_input_rows = []
+    for src in ENERGY_SOURCE_ORDER:
+        _td = _report_tariff_details.get(src, {})
+        if bool(_td.get("enabled", False)):
+            _peak_txt = f"; peak {_td.get('peak_kw', 0.0):,.2f} kW" if _td.get("peak_kw") is not None else "; matching peak load not found"
+            _report_tariff_input_rows.append((
+                f"Tariff - {src}",
+                f"{currency_r} {float(_td.get('tariff_per_kwh', 0.0)):,.5f}/kWh + {currency_r} {float(_td.get('tariff_per_kw', 0.0)):,.5f}/kW·a; equivalent {currency_r} {float(_td.get('equivalent_tariff', 0.0)):,.5f}/kWh{_peak_txt}",
+            ))
+        else:
+            _report_tariff_input_rows.append((f"Tariff - {src}", f"{currency_r} {tariff_map.get(src, 0.0):,.5f}/kWh"))
+    add_input_table("Relevant inputs", _report_tariff_input_rows)
 
     # Loads
     add_section("5. Loads Analysis")
@@ -5554,7 +5802,9 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         active_name,
         prefer_draft=True,
     )
-    cf = compute_lcc_cashflow_table_cached(df_energy, payload, end_uses, project_year_r, lcc_global=lcc_global)
+    cf = compute_lcc_cashflow_table_cached(
+        df_energy, payload, end_uses, project_year_r, lcc_global=lcc_global, df_loads=df_loads
+    )
     if cf.empty:
         story.append(Paragraph("No LCC cash-flow data available. Add LCC assumptions and investment measures in the LCC-Analysis tab.", styles["BodyText"]))
     else:
@@ -5574,7 +5824,10 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                 ref_end_uses = [str(c) for c in ref_df.columns if str(c) != "Month"]
                 ref_lcc_global = _normalize_lcc_global_payload(lcc_global, ref_end_uses)
                 ref_lcc_global["payback_reference_scenario"] = ref_name
-                ref_cf = compute_lcc_cashflow_table_cached(ref_df, ref_payload, ref_end_uses, project_year_r, lcc_global=ref_lcc_global)
+                ref_loads = get_loads_balance_df(file_bytes, filename, scenario_name=ref_name, apply_master_filter=False)
+                ref_cf = compute_lcc_cashflow_table_cached(
+                    ref_df, ref_payload, ref_end_uses, project_year_r, lcc_global=ref_lcc_global, df_loads=ref_loads
+                )
                 pb = discounted_payback_period(cf, ref_cf, project_year_r)
             except Exception:
                 pb = None
@@ -5735,6 +5988,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
             _sc_report_end_uses,
             project_year_r,
             lcc_global=_sc_report_lcc_global,
+            df_loads=df_loads,
         )
     except Exception:
         cf_scenario_report = cf
@@ -5832,6 +6086,9 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
             "District Cooling": float(def_t.get("District Cooling", 0.16)),
             "Biomass": float(def_t.get("Biomass", 0.10)),
         },
+        TARIFF_DEMAND_CONFIG_KEY: _normalize_tariff_demand_config(
+            (preloaded_cfg.get("tariff_demand") if preloaded_cfg else {}) or {}
+        ),
         "mapping": {use: str(saved_mapping.get(use, "Electricity")) for use in end_uses},
         "efficiency": {use: float(def_eff.get(use, 1.0)) for use in end_uses},
         "pv": {"enabled": False, "scale": 1.0},
@@ -5867,6 +6124,7 @@ def capture_scenario_from_widgets(end_uses: list) -> dict:
             "District Cooling": float(st.session_state.get("cost_dc", 0.16)),
             "Biomass": float(st.session_state.get("cost_biomass", 0.10)),
         },
+        TARIFF_DEMAND_CONFIG_KEY: _capture_tariff_demand_from_widgets(),
         "mapping": {use: str(st.session_state.get(f"source_{use}", "Electricity")) for use in end_uses},
         "efficiency": {use: float(st.session_state.get(f"eff_{use}", 1.0)) for use in end_uses},
         "pv": {
@@ -5913,6 +6171,13 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
     _set_num("cost_dc", float(t.get("District Cooling", 0.16)), "{:.5f}")
     _set_num("cost_gas", float(t.get("Gas", 0.12)), "{:.5f}")
     _set_num("cost_biomass", float(t.get("Biomass", 0.10)), "{:.5f}")
+
+    _tariff_demand_loaded = _normalize_tariff_demand_config(payload.get(TARIFF_DEMAND_CONFIG_KEY, {}))
+    for _src in ENERGY_SOURCE_ORDER:
+        _suffix = _tariff_source_state_suffix(_src)
+        _rec = _tariff_demand_loaded.get(_src, {})
+        st.session_state[f"tariff_demand_enabled_{_suffix}"] = bool(_rec.get("enabled", False))
+        _set_num(f"tariff_per_kw_{_suffix}", float(_rec.get("per_kw", 0.0)), "{:.5f}")
 
     for use in end_uses:
         st.session_state[f"source_{use}"] = str(m.get(use, "Electricity"))
@@ -6002,11 +6267,16 @@ def build_tariffs_df(
         cost_dc: float,
         cost_gas: float,
         cost_biomass: float,
+        tariff_demand_config: Optional[dict] = None,
 ) -> pd.DataFrame:
-    """Build Energy_Tariffs sheet."""
+    """Build Energy_Tariffs sheet, including optional annual peak-demand tariff settings."""
+    sources = ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling", "Biomass"]
+    demand_cfg = _normalize_tariff_demand_config(tariff_demand_config or {})
     return pd.DataFrame({
-        "Energy_Source": ["Electricity", "Green Electricity", "Gas", "District Heating", "District Cooling", "Biomass"],
+        "Energy_Source": sources,
         "Tariff_per_kWh": [cost_elec, cost_green, cost_gas, cost_dh, cost_dc, cost_biomass],
+        "Demand_Charge_Enabled": [1 if demand_cfg.get(src, {}).get("enabled", False) else 0 for src in sources],
+        "Tariff_per_kW": [float(demand_cfg.get(src, {}).get("per_kw", 0.0)) for src in sources],
     })
 
 
@@ -8761,6 +9031,7 @@ if uploaded_file:
 
     saved_factors = parse_factors_df(cfg_saved["factors"])
     saved_tariffs = parse_tariffs_df(cfg_saved["tariffs"])
+    saved_tariff_demand = parse_tariff_demand_df(cfg_saved["tariffs"])
     saved_mapping_df = cfg_saved["mapping"]
     saved_efficiency = parse_efficiency_df(cfg_saved.get("efficiency"))
     saved_colors_enduse, saved_colors_sources, saved_colors_loads, saved_colors_scenarios = parse_color_settings_df(cfg_saved.get("colors"))
@@ -8790,6 +9061,7 @@ if uploaded_file:
         "energy_use_filter_selected": saved_master_energy_filter_selected,
         "factors": saved_factors,
         "tariffs": saved_tariffs,
+        "tariff_demand": saved_tariff_demand,
         "mapping_df": saved_mapping_df,
         "efficiency": saved_efficiency,
         "colors_enduse": saved_colors_enduse,
@@ -9588,33 +9860,154 @@ with tab1:
                                                   key="co2_emissions_biomass",
                                                   min_value=0.0, max_value=5.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
-        # --- Energy Cost (€/kWh) ---
+        # --- Energy Cost: optional consumption + annual peak-demand tariff ---
         with st.sidebar.expander("Energy Tariffs"):
-            st.caption("Assign energy cost per source (per kWh)")
+            st.caption("Assign source tariffs. Optionally add an annual peak-demand charge (per kW) to the consumption tariff (per kWh).")
             default_currency = preloaded["currency"] if (
                     preloaded and preloaded["currency"] in ["€", "$", "£"]) else "€"
             currency_symbol = st.selectbox("Currency", ["€", "$", "£"], index=["€", "$", "£"].index(default_currency),
                                            key="currency_symbol", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
 
             def_t = preloaded["tariffs"] if preloaded else {}
-            cost_electricity = numeric_input(f"Cost Electricity ({currency_symbol}/kWh)",
-                                             float(def_t.get("Electricity", 0.3500)), key="cost_electricity",
-                                             min_value=0.0, max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
-            cost_green_electricity = numeric_input(f"Cost Green Electricity ({currency_symbol}/kWh)",
-                                                   float(def_t.get("Green Electricity", 0.4000)),
-                                                   key="cost_green_electricity", min_value=0.0, max_value=100.0,
-                                                   fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
-            cost_dh = numeric_input(f"Cost District Heating ({currency_symbol}/kWh)",
-                                    float(def_t.get("District Heating", 0.1600)), key="cost_dh", min_value=0.0,
-                                    max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
-            cost_dc = numeric_input(f"Cost District Cooling ({currency_symbol}/kWh)",
-                                    float(def_t.get("District Cooling", 0.1600)), key="cost_dc", min_value=0.0,
-                                    max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
-            cost_gas = numeric_input(f"Cost Gas ({currency_symbol}/kWh)", float(def_t.get("Gas", 0.1200)), key="cost_gas",
-                                     min_value=0.0, max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
-            cost_biomass = numeric_input(f"Cost Biomass ({currency_symbol}/kWh)", float(def_t.get("Biomass", 0.1000)),
-                                         key="cost_biomass",
-                                         min_value=0.0, max_value=100.0, fmt="{:.5f}", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
+            def_td = _normalize_tariff_demand_config(preloaded.get("tariff_demand", {}) if preloaded else {})
+
+            # Build the active-scenario energy basis once for equivalent-tariff previews.
+            _tariff_preview_rows = pd.DataFrame(columns=["End_Use", "Energy_Source", "kWh"])
+            _tariff_preview_loads = pd.DataFrame()
+            try:
+                _tariff_preview_energy = get_energy_balance_df(
+                    uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(st.session_state.get("active_scenario", ""))
+                )
+                _tariff_preview_rows = _tariff_preview_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
+                _tariff_preview_rows["kWh"] = pd.to_numeric(_tariff_preview_rows["kWh"], errors="coerce").fillna(0.0)
+                _tariff_preview_rows["Efficiency_Factor"] = _tariff_preview_rows["End_Use"].map(
+                    lambda _u: float(st.session_state.get(f"eff_{_u}", 1.0) or 1.0)
+                ).replace(0.0, 1.0)
+                _tariff_preview_rows["kWh"] = _tariff_preview_rows["kWh"] / _tariff_preview_rows["Efficiency_Factor"]
+                _tariff_preview_rows["Energy_Source"] = _tariff_preview_rows["End_Use"].map(
+                    lambda _u: str(st.session_state.get(f"source_{_u}", "Electricity"))
+                )
+                _tariff_preview_loads = get_loads_balance_df(
+                    uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(st.session_state.get("active_scenario", "")),
+                    apply_master_filter=False,
+                )
+            except Exception:
+                pass
+
+            _tariff_values = {}
+            _tariff_defaults = {
+                "Electricity": 0.3500,
+                "Green Electricity": 0.4000,
+                "Gas": 0.1200,
+                "District Heating": 0.1600,
+                "District Cooling": 0.1600,
+                "Biomass": 0.1000,
+            }
+
+            for _src in ENERGY_SOURCE_ORDER:
+                _suffix = _tariff_source_state_suffix(_src)
+                _kwh_key = _tariff_kwh_widget_key(_src)
+                st.markdown(f"**{_src}**")
+
+                _enabled_key = f"tariff_demand_enabled_{_suffix}"
+                if _enabled_key not in st.session_state:
+                    st.session_state[_enabled_key] = bool(def_td.get(_src, {}).get("enabled", False))
+                _demand_enabled = st.checkbox(
+                    "Use kWh + peak kW tariff",
+                    key=_enabled_key,
+                    disabled=IS_VIEWER_MODE,
+                    help=_viewer_widget_help(
+                        "When enabled, annual source cost = annual signed kWh × tariff/kWh + annual peak load kW × tariff/kW."
+                    ),
+                )
+
+                _kwh_value = numeric_input(
+                    f"Tariff per kWh ({currency_symbol}/kWh)",
+                    float(def_t.get(_src, _tariff_defaults.get(_src, 0.0))),
+                    key=_kwh_key, min_value=0.0, max_value=100.0, fmt="{:.5f}",
+                    disabled=IS_VIEWER_MODE, help=_viewer_widget_help(),
+                )
+                _tariff_values[_src] = float(_kwh_value)
+
+                _per_kw_key = f"tariff_per_kw_{_suffix}"
+                if _per_kw_key not in st.session_state:
+                    _v = float(def_td.get(_src, {}).get("per_kw", 0.0))
+                    st.session_state[_per_kw_key] = _v
+                    st.session_state[f"{_per_kw_key}_txt"] = f"{_v:.5f}"
+                _per_kw_value = numeric_input(
+                    f"Tariff per kW ({currency_symbol}/kW·a)",
+                    float(def_td.get(_src, {}).get("per_kw", 0.0)),
+                    key=_per_kw_key, min_value=0.0, max_value=100000.0, fmt="{:.5f}",
+                    disabled=(IS_VIEWER_MODE or not _demand_enabled),
+                    help=_viewer_widget_help("Enable 'Use kWh + peak kW tariff' to edit this demand-charge component."),
+                )
+
+                _preview_payload = {
+                    "tariffs": {_src: float(_kwh_value)},
+                    TARIFF_DEMAND_CONFIG_KEY: {
+                        _src: {"enabled": bool(_demand_enabled), "per_kw": float(_per_kw_value)}
+                    },
+                }
+                _preview_details = _tariff_rate_details_for_rows(
+                    _tariff_preview_rows, _preview_payload, _tariff_preview_loads
+                ).get(_src, {})
+                _eq = float(_preview_details.get("equivalent_tariff", _kwh_value))
+                if _demand_enabled:
+                    if bool(_preview_details.get("load_found", False)):
+                        _peak = float(_preview_details.get("peak_kw", 0.0) or 0.0)
+                        _load_name = str(_preview_details.get("load_column", ""))
+                        st.caption(
+                            f"Equivalent tariff: {currency_symbol} {_eq:,.5f}/kWh · Peak: {_peak:,.2f} kW from '{_load_name}'"
+                        )
+                        if float(_preview_details.get("consumption_kwh", 0.0) or 0.0) <= 1e-12 and _peak > 0.0:
+                            st.warning(
+                                f"'{_src}' has a matching peak load but no positive annual consumption to allocate the demand charge to."
+                            )
+                    else:
+                        st.caption(f"Equivalent tariff: {currency_symbol} {_eq:,.5f}/kWh")
+                        st.warning(
+                            f"No Loads_Balance load matching '{_src}' was found. The peak-demand component is not applied until a matching load exists."
+                        )
+                else:
+                    st.caption(f"Equivalent tariff: {currency_symbol} {_eq:,.5f}/kWh")
+                st.markdown("---")
+
+            cost_electricity = float(_tariff_values.get("Electricity", 0.35))
+            cost_green_electricity = float(_tariff_values.get("Green Electricity", 0.40))
+            cost_gas = float(_tariff_values.get("Gas", 0.12))
+            cost_dh = float(_tariff_values.get("District Heating", 0.16))
+            cost_dc = float(_tariff_values.get("District Cooling", 0.16))
+            cost_biomass = float(_tariff_values.get("Biomass", 0.10))
+
+            if st.button(
+                "Copy active scenario tariffs to all scenarios",
+                key="copy_energy_tariffs_to_all_scenarios",
+                use_container_width=True,
+                disabled=IS_VIEWER_MODE,
+                help=_viewer_widget_help(
+                    "Copies all per-kWh tariffs, demand-charge checkboxes and per-kW tariffs from the active scenario to every existing scenario."
+                ),
+            ):
+                _scenarios_tariff_copy = st.session_state.get("scenarios", {})
+                if isinstance(_scenarios_tariff_copy, dict) and _scenarios_tariff_copy:
+                    _current_tariffs_copy = {
+                        "Electricity": cost_electricity,
+                        "Green Electricity": cost_green_electricity,
+                        "Gas": cost_gas,
+                        "District Heating": cost_dh,
+                        "District Cooling": cost_dc,
+                        "Biomass": cost_biomass,
+                    }
+                    _current_demand_copy = _capture_tariff_demand_from_widgets()
+                    for _sc_name_copy, _sc_payload_copy in list(_scenarios_tariff_copy.items()):
+                        if not isinstance(_sc_payload_copy, dict):
+                            _sc_payload_copy = {}
+                        _sc_payload_copy["tariffs"] = deepcopy(_current_tariffs_copy)
+                        _sc_payload_copy[TARIFF_DEMAND_CONFIG_KEY] = deepcopy(_current_demand_copy)
+                        _scenarios_tariff_copy[_sc_name_copy] = _sc_payload_copy
+                    st.session_state["scenarios"] = _scenarios_tariff_copy
+                    st.success("Energy tariffs copied to all scenarios.")
+
 
         # ---- Sidebar: efficiency factors per End_Use (used in 'Energy Balance with Factors' tab)
         with st.sidebar.expander("Efficiency Factors"):
@@ -9865,6 +10258,7 @@ with tab1:
                     cost_dc,
                     cost_gas,
                     cost_biomass,
+                    tariff_demand_config=_capture_tariff_demand_from_widgets(),
                 )
                 mapping_df = build_mapping_df(end_uses)
                 efficiency_df = build_efficiency_df(end_uses)
@@ -9955,7 +10349,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_4.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_5.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -9964,7 +10358,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_4.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_5.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -12596,12 +12990,16 @@ with tab_lcc:
             active_payload_lcc["lcc"] = _capture_lcc_from_widgets(valid_enduses_lcc)
             active_payload_lcc["lcc_global"] = deepcopy(lcc_global_active)
 
+        df_lcc_loads = get_loads_balance_df(
+            uploaded_file.getvalue(), uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
+        )
         active_lcc_cashflow = compute_lcc_cashflow_table_cached(
             df_lcc_energy,
             active_payload_lcc,
             valid_enduses_lcc,
             project_year_lcc,
             lcc_global=lcc_global_active,
+            df_loads=df_lcc_loads,
         )
 
         if active_lcc_cashflow.empty:
@@ -12645,12 +13043,16 @@ with tab_lcc:
                 ref_lcc_global_active = _normalize_lcc_global_payload(lcc_global_active, ref_valid_enduses_lcc)
                 ref_payload_lcc["lcc"] = _normalize_lcc_payload(ref_payload_lcc.get("lcc", {}), ref_valid_enduses_lcc)
                 ref_payload_lcc["lcc_global"] = deepcopy(ref_lcc_global_active)
+                ref_df_lcc_loads = get_loads_balance_df(
+                    uploaded_file.getvalue(), uploaded_file.name, scenario_name=ref_scenario_lcc, apply_master_filter=False
+                )
                 ref_lcc_cashflow = compute_lcc_cashflow_table_cached(
                     ref_df_lcc_energy,
                     ref_payload_lcc,
                     ref_valid_enduses_lcc,
                     project_year_lcc,
                     lcc_global=ref_lcc_global_active,
+                    df_loads=ref_df_lcc_loads,
                 )
                 payback_value = discounted_payback_period(active_lcc_cashflow, ref_lcc_cashflow, project_year_lcc)
 
@@ -13031,25 +13433,41 @@ with tab7:
                 )
                 pv_kwh = float(abs(totals_use.loc[totals_use["End_Use"].isin(onsite_set), "kWh_signed"].sum()))
 
-                # Net CO2 and net cost (including PV credit as signed kWh)
+                # Net CO2 and net cost (including PV credit as signed kWh). Demand-charge tariffs
+                # are converted to one equivalent consumption rate per source for all End Use splits.
                 df_net = df_s.copy()
                 df_net["co2_factor"] = df_net["Energy_Source"].map(lambda s: float(factors.get(s, 0.0))).fillna(0.0)
-                df_net["tariff"] = df_net["Energy_Source"].map(lambda s: float(tariffs.get(s, 0.0))).fillna(0.0)
+                try:
+                    _df_loads_tariff_sc = get_loads_balance_df(
+                        uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(name), apply_master_filter=False
+                    )
+                except Exception:
+                    _df_loads_tariff_sc = pd.DataFrame()
+                _tariff_details_sc = _tariff_rate_details_for_rows(
+                    df_net, payload, _df_loads_tariff_sc, energy_col="kWh_signed", source_col="Energy_Source",
+                    per_kwh_map=tariffs,
+                )
+                df_net = _tariff_apply_rates_to_rows(
+                    df_net, _tariff_details_sc, energy_col="kWh_signed", source_col="Energy_Source",
+                    tariff_col="tariff", cost_col="cost",
+                )
 
                 co2_kg = float((df_net["kWh_signed"] * df_net["co2_factor"]).sum())
-                cost_val = float((df_net["kWh_signed"] * df_net["tariff"]).sum())
-                # Gross CO2 and gross cost (excluding On-site_Generation)
+                cost_val = float(df_net["cost"].sum())
+                # Gross CO2 and gross cost (excluding On-site_Generation), using the same source-equivalent tariff.
                 df_gross = df_s.loc[~pv_mask].copy()
                 df_gross["kWh_pos"] = df_gross["kWh_factored"].clip(lower=0.0)
                 df_gross["co2_factor"] = df_gross["Energy_Source"].map(lambda s: float(factors.get(s, 0.0))).fillna(0.0)
-                df_gross["tariff"] = df_gross["Energy_Source"].map(lambda s: float(tariffs.get(s, 0.0))).fillna(0.0)
+                df_gross = _tariff_apply_rates_to_rows(
+                    df_gross, _tariff_details_sc, energy_col="kWh_pos", source_col="Energy_Source",
+                    tariff_col="tariff", cost_col="cost",
+                )
                 gross_co2_kg = float((df_gross["kWh_pos"] * df_gross["co2_factor"]).sum())
-                gross_cost_val = float((df_gross["kWh_pos"] * df_gross["tariff"]).sum())
+                gross_cost_val = float(df_gross["cost"].sum())
 
                 # Per-source breakdown (net, including PV) for scenario comparison charts (intensities)
                 if _area and _area > 0:
                     df_src = df_net.copy()
-                    df_src["cost"] = df_src["kWh_signed"] * df_src["tariff"]
                     df_src["co2_kg"] = df_src["kWh_signed"] * df_src["co2_factor"]
 
                     grp = df_src.groupby("Energy_Source", as_index=False).agg(
@@ -13545,12 +13963,16 @@ with tab7:
                         try:
                             _df_energy_sc = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(_sc_name))
                             _end_uses_sc = [_canon_enduse_name(str(c)) for c in _df_energy_sc.columns if c != "Month"]
+                            _df_loads_sc = get_loads_balance_df(
+                                uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(_sc_name), apply_master_filter=False
+                            )
                             _cf_sc = compute_lcc_cashflow_table_cached(
                                 _df_energy_sc,
                                 _payload_sc,
                                 _end_uses_sc,
                                 project_year_lcc_cmp,
                                 lcc_global=lcc_global_cmp,
+                                df_loads=_df_loads_sc,
                             )
                         except Exception:
                             _cf_sc = pd.DataFrame()
@@ -14701,7 +15123,9 @@ with tab3:
         mapping_dict_cost = {use: st.session_state.get(f"source_{use}", "Electricity") for use in end_uses_here}
         df_melted_cost["Energy_Source"] = df_melted_cost["End_Use"].map(mapping_dict_cost)
 
-        # Build the cost map from sidebar inputs
+        # Build the tariff payload from the active scenario inputs. When a source uses a peak-demand
+        # component, its annual demand charge is converted to an equivalent consumption tariff so
+        # all End Use cost splits remain additive and consistent with the source total.
         cost_map = {
             "Electricity": cost_electricity,
             "Gas": cost_gas,
@@ -14710,11 +15134,23 @@ with tab3:
             "Green Electricity": cost_green_electricity,
             "Biomass": cost_biomass,
         }
-
-        # Compute row-level cost
-        df_cost = df_melted_cost.copy()
-        df_cost["cost_per_kWh"] = df_cost["Energy_Source"].map(cost_map).fillna(0.0)
-        df_cost["cost"] = df_cost["kWh"] * df_cost["cost_per_kWh"]  # negative PV -> negative cost (saves money)
+        _cost_tariff_payload = {
+            "tariffs": cost_map,
+            TARIFF_DEMAND_CONFIG_KEY: _capture_tariff_demand_from_widgets(),
+        }
+        try:
+            _cost_loads = get_loads_balance_df(
+                uploaded_file.getvalue(), uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
+            )
+        except Exception:
+            _cost_loads = pd.DataFrame()
+        _cost_tariff_details = _tariff_rate_details_for_rows(
+            df_melted_cost, _cost_tariff_payload, _cost_loads, energy_col="kWh", source_col="Energy_Source"
+        )
+        df_cost = _tariff_apply_rates_to_rows(
+            df_melted_cost, _cost_tariff_details, energy_col="kWh", source_col="Energy_Source",
+            tariff_col="cost_per_kWh", cost_col="cost",
+        )
 
         # ---------- Monthly charts ----------
         month_order = MONTH_ORDER
@@ -16139,7 +16575,7 @@ with tab5:
             co2_intensity_gross = float(totals_co2.loc[totals_co2["kgCO2_per_m2"] > 0, "kgCO2_per_m2"].sum())
             co2_intensity_net = float(totals_co2["kgCO2_per_m2"].sum())
 
-            # Cost calculations (net accounting)
+            # Cost calculations (net accounting), including optional annual peak-demand charges.
             cost_map = {
                 "Electricity": cost_electricity,
                 "Gas": cost_gas,
@@ -16148,9 +16584,23 @@ with tab5:
                 "Green Electricity": cost_green_electricity,
                 "Biomass": cost_biomass,
             }
-            df_cost = df_melted.copy()
-            df_cost["cost_per_kWh"] = df_cost["Energy_Source"].map(cost_map).fillna(0.0)
-            df_cost["cost"] = df_cost["kWh"] * df_cost["cost_per_kWh"]
+            _bm_tariff_payload = {
+                "tariffs": cost_map,
+                TARIFF_DEMAND_CONFIG_KEY: _capture_tariff_demand_from_widgets(),
+            }
+            try:
+                _bm_loads = get_loads_balance_df(
+                    uploaded_file.getvalue(), uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
+                )
+            except Exception:
+                _bm_loads = pd.DataFrame()
+            _bm_tariff_details = _tariff_rate_details_for_rows(
+                df_melted, _bm_tariff_payload, _bm_loads, energy_col="kWh", source_col="Energy_Source"
+            )
+            df_cost = _tariff_apply_rates_to_rows(
+                df_melted, _bm_tariff_details, energy_col="kWh", source_col="Energy_Source",
+                tariff_col="cost_per_kWh", cost_col="cost",
+            )
             totals_cost = df_cost.groupby("End_Use", as_index=False)["cost"].sum()
             totals_cost["cost_per_m2"] = (totals_cost["cost"] / project_area).round(2)
 
