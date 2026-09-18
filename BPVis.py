@@ -16907,6 +16907,8 @@ with tab4:
                 _fig_load_cmp_annual.update_layout(
                     title="Annual Load and Energy for Load Coverage",
                     barmode="group",
+                    bargap=0.24,
+                    bargroupgap=0.12,
                     xaxis_title="",
                     yaxis_title="kWh/a",
                     height=520,
@@ -16950,6 +16952,8 @@ with tab4:
                 _fig_load_cmp_power.update_layout(
                     title="Peak and 95th Percentile Load",
                     barmode="group",
+                    bargap=0.24,
+                    bargroupgap=0.12,
                     xaxis_title="",
                     yaxis_title="kW",
                     height=520,
@@ -16985,6 +16989,7 @@ with tab4:
                     ))
                 _fig_load_cmp_eff.update_layout(
                     title="Annual System Efficiency",
+                    bargap=0.24,
                     xaxis_title="Scenario",
                     yaxis_title="Load / Energy",
                     height=520,
@@ -17018,6 +17023,7 @@ with tab4:
                     ))
                 _fig_load_cmp_daily.update_layout(
                     title="Maximum Daily Load Sum",
+                    bargap=0.24,
                     xaxis_title="Scenario",
                     yaxis_title="kWh/day",
                     height=520,
