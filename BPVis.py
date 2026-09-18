@@ -15574,6 +15574,147 @@ def _loads_daily_profile_customdata(profile_df: pd.DataFrame, daily_total_kwh: f
     ])
 
 
+def _loads_daily_threshold_stats(profile_df: pd.DataFrame, load_col: str, threshold_kw: float) -> dict:
+    """Return threshold KPIs for one presented daily load profile.
+
+    The excess-energy value is the area above the threshold. For the standard hourly
+    Loads_Balance data this is sum(max(load - threshold, 0)) in kWh. A different
+    regular time step is handled from the median positive hour spacing.
+    """
+    result = {
+        "hours_above": 0.0,
+        "peak_excess_kw": 0.0,
+        "excess_energy_kwh": 0.0,
+        "timestep_hours": 1.0,
+    }
+    try:
+        if profile_df is None or profile_df.empty or load_col not in profile_df.columns or "hour" not in profile_df.columns:
+            return result
+        work = profile_df[["hour", load_col]].copy()
+        work["hour"] = pd.to_numeric(work["hour"], errors="coerce")
+        work[load_col] = pd.to_numeric(work[load_col], errors="coerce")
+        work = work.dropna(subset=["hour", load_col]).sort_values("hour")
+        if work.empty:
+            return result
+
+        step_h = 1.0
+        diffs = work["hour"].astype(float).diff().dropna()
+        diffs = diffs[diffs > 0]
+        if not diffs.empty:
+            step_h = float(diffs.median())
+            if not np.isfinite(step_h) or step_h <= 0:
+                step_h = 1.0
+
+        threshold = float(threshold_kw)
+        loads = work[load_col].astype(float)
+        excess = (loads - threshold).clip(lower=0.0)
+        result = {
+            "hours_above": float((loads > threshold).sum()) * step_h,
+            "peak_excess_kw": float(excess.max()) if len(excess) else 0.0,
+            "excess_energy_kwh": float(excess.sum()) * step_h,
+            "timestep_hours": step_h,
+        }
+    except Exception:
+        pass
+    return result
+
+
+def _loads_daily_threshold_customdata(
+        profile_df: pd.DataFrame,
+        load_col: str,
+        daily_total_kwh: float,
+        date_label: str,
+        threshold_kw: float,
+        threshold_stats: Optional[dict] = None,
+) -> np.ndarray:
+    """Return daily-profile hover data including threshold-analysis information."""
+    stats = threshold_stats or _loads_daily_threshold_stats(profile_df, load_col, threshold_kw)
+    try:
+        loads = pd.to_numeric(profile_df[load_col], errors="coerce").fillna(0.0).astype(float)
+        n = len(loads)
+        excess = (loads - float(threshold_kw)).clip(lower=0.0).to_numpy(dtype=float)
+        above = np.where(loads.to_numpy(dtype=float) > float(threshold_kw), "Yes", "No")
+    except Exception:
+        n = len(profile_df) if profile_df is not None else 0
+        excess = np.zeros(n, dtype=float)
+        above = np.full(n, "No", dtype=object)
+    return np.column_stack([
+        np.full(n, float(daily_total_kwh), dtype=float),
+        np.full(n, str(date_label), dtype=object),
+        np.full(n, float(threshold_kw), dtype=float),
+        excess,
+        above,
+        np.full(n, float(stats.get("hours_above", 0.0)), dtype=float),
+        np.full(n, float(stats.get("peak_excess_kw", 0.0)), dtype=float),
+        np.full(n, float(stats.get("excess_energy_kwh", 0.0)), dtype=float),
+    ])
+
+
+def _loads_daily_threshold_excess_trace(
+        profile_df: pd.DataFrame,
+        load_col: str,
+        threshold_kw: float,
+        color_hex: str,
+) -> Optional[go.Scatter]:
+    """Return a hatched polygon representing the daily load area above threshold."""
+    try:
+        work = profile_df[["hour", load_col]].copy()
+        work["hour"] = pd.to_numeric(work["hour"], errors="coerce")
+        work[load_col] = pd.to_numeric(work[load_col], errors="coerce")
+        work = work.dropna(subset=["hour", load_col]).sort_values("hour")
+        if work.empty:
+            return None
+        threshold = float(threshold_kw)
+        loads = work[load_col].astype(float).to_numpy()
+        if not np.any(loads > threshold):
+            return None
+        hours = work["hour"].astype(float).tolist()
+        upper = np.maximum(loads, threshold).astype(float).tolist()
+        x_poly = hours + list(reversed(hours))
+        y_poly = upper + [threshold] * len(hours)
+        r_h, g_h, b_h = pcolors.hex_to_rgb(color_hex)
+        return go.Scatter(
+            x=x_poly,
+            y=y_poly,
+            mode="none",
+            fill="toself",
+            fillcolor=f"rgba({r_h},{g_h},{b_h},0.12)",
+            fillpattern=dict(
+                shape="/",
+                fgcolor=color_hex,
+                bgcolor="rgba(255,255,255,0)",
+                size=9,
+                solidity=0.22,
+            ),
+            line=dict(color="rgba(0,0,0,0)"),
+            name="Load above threshold",
+            hoverinfo="skip",
+            showlegend=True,
+        )
+    except Exception:
+        return None
+
+
+def _loads_daily_threshold_line_trace(profile_df: pd.DataFrame, threshold_kw: float) -> Optional[go.Scatter]:
+    """Return the visible threshold line for a daily profile."""
+    try:
+        hours = pd.to_numeric(profile_df["hour"], errors="coerce").dropna().astype(float)
+        if hours.empty:
+            return None
+        threshold = float(threshold_kw)
+        return go.Scatter(
+            x=[float(hours.min()), float(hours.max())],
+            y=[threshold, threshold],
+            mode="lines",
+            name=f"Threshold ({threshold:,.1f} kW)",
+            line=dict(color="#444444", width=3, dash="dash"),
+            hovertemplate="Threshold: %{y:,.1f} kW<extra></extra>",
+            showlegend=True,
+        )
+    except Exception:
+        return None
+
+
 def _loads_daily_profile_fill_trace(
         profile_df: pd.DataFrame,
         load_col: str,
@@ -16105,6 +16246,33 @@ with tab4:
             use_container_width=True
         )
 
+        # --- Optional threshold analysis for Peak Day / Peak Moment Day ---
+        _threshold_load_key = _loads_energy_match_key(selected_load) or _safe_state_key(selected_load) or "load"
+        _threshold_enabled_key = f"loads_daily_threshold_enabled_{_threshold_load_key}"
+        _threshold_value_key = f"loads_daily_threshold_kw_{_threshold_load_key}"
+        if _threshold_enabled_key not in st.session_state:
+            st.session_state[_threshold_enabled_key] = False
+        threshold_analysis_enabled = st.checkbox(
+            "Enable threshold analysis for Peak Day and Peak Moment Day",
+            key=_threshold_enabled_key,
+            help=(
+                "Adds a threshold line and a hatched excess-load area to the Peak Day and Peak Moment Day profiles. "
+                "The summary reports hours above threshold, maximum kW above threshold and the excess-load energy above threshold."
+            ),
+        )
+        threshold_analysis_kw = None
+        if threshold_analysis_enabled:
+            if _threshold_value_key not in st.session_state:
+                st.session_state[_threshold_value_key] = float(round(max(0.0, 0.8 * float(max_load_selected)), 1))
+            threshold_analysis_kw = st.number_input(
+                "Threshold load (kW)",
+                min_value=0.0,
+                step=1.0,
+                format="%.1f",
+                key=_threshold_value_key,
+                help="Load level used for the Peak Day and Peak Moment Day threshold analysis.",
+            )
+
         # --- Peak day (by daily sum of the selected load) ---
         # Ensure numeric
         s = pd.to_numeric(df_loads[selected_load], errors="coerce")
@@ -16169,18 +16337,39 @@ with tab4:
             showlegend=bool(ghost_load)
         )
 
-        peak_day_customdata = _loads_daily_profile_customdata(day_profile, peak_total, date_label)
-        r, g, b = pcolors.hex_to_rgb(bar_color)
-        peak_day_fig.update_traces(
-            marker_color=bar_color,
-            customdata=peak_day_customdata,
-            hovertemplate=(
+        peak_day_threshold_stats = None
+        if threshold_analysis_enabled and threshold_analysis_kw is not None:
+            peak_day_threshold_stats = _loads_daily_threshold_stats(day_profile, selected_load, threshold_analysis_kw)
+            peak_day_customdata = _loads_daily_threshold_customdata(
+                day_profile, selected_load, peak_total, date_label, threshold_analysis_kw, peak_day_threshold_stats
+            )
+            peak_day_hovertemplate = (
+                f"<b>{ui_name(selected_load)}</b><br>"
+                "%{customdata[1]}<br>"
+                "Hour %{x:g}<br>"
+                "Load: %{y:.2f} kW<br>"
+                "Threshold: %{customdata[2]:,.1f} kW<br>"
+                "Above threshold: %{customdata[4]}<br>"
+                "Excess at this hour: %{customdata[3]:,.1f} kW<br>"
+                "Hours above threshold: %{customdata[5]:,.1f} h<br>"
+                "Peak above threshold: %{customdata[6]:,.1f} kW<br>"
+                "Sum above threshold: %{customdata[7]:,.1f} kWh<br>"
+                "Daily total load: %{customdata[0]:,.1f} kWh<extra></extra>"
+            )
+        else:
+            peak_day_customdata = _loads_daily_profile_customdata(day_profile, peak_total, date_label)
+            peak_day_hovertemplate = (
                 f"<b>{ui_name(selected_load)}</b><br>"
                 "%{customdata[1]}<br>"
                 "Hour %{x:g}<br>"
                 "Load %{y:.2f} kW<br>"
                 "Daily total load: %{customdata[0]:,.1f} kWh<extra></extra>"
-            ),
+            )
+        r, g, b = pcolors.hex_to_rgb(bar_color)
+        peak_day_fig.update_traces(
+            marker_color=bar_color,
+            customdata=peak_day_customdata,
+            hovertemplate=peak_day_hovertemplate,
         )
         peak_day_area_trace = _loads_daily_profile_fill_trace(
             day_profile,
@@ -16193,6 +16382,16 @@ with tab4:
         if peak_day_area_trace is not None:
             peak_day_fig.add_trace(peak_day_area_trace)
             peak_day_fig.data = (peak_day_fig.data[-1],) + peak_day_fig.data[:-1]
+        if threshold_analysis_enabled and threshold_analysis_kw is not None:
+            _peak_day_threshold_fill = _loads_daily_threshold_excess_trace(
+                day_profile, selected_load, threshold_analysis_kw, bar_color
+            )
+            if _peak_day_threshold_fill is not None:
+                peak_day_fig.add_trace(_peak_day_threshold_fill)
+            _peak_day_threshold_line = _loads_daily_threshold_line_trace(day_profile, threshold_analysis_kw)
+            if _peak_day_threshold_line is not None:
+                peak_day_fig.add_trace(_peak_day_threshold_line)
+            peak_day_fig.update_layout(showlegend=True)
         if ghost_load and not ghost_day_profile.empty:
             ghost_peak_day_total = _loads_daily_total_for_doy(df_ghost_loads, peak_doy, ghost_load)
             peak_day_fig.add_trace(go.Scatter(
@@ -16227,6 +16426,13 @@ with tab4:
             )
         except Exception:
             st.caption(f"Peak daily load on {date_label}: {peak_total:,.1f} kWh.")
+        if threshold_analysis_enabled and threshold_analysis_kw is not None and isinstance(peak_day_threshold_stats, dict):
+            st.caption(
+                f"Threshold analysis ({float(threshold_analysis_kw):,.1f} kW): "
+                f"{float(peak_day_threshold_stats.get('hours_above', 0.0)):,.1f} h above threshold; "
+                f"peak difference above threshold: {float(peak_day_threshold_stats.get('peak_excess_kw', 0.0)):,.1f} kW; "
+                f"sum of load above threshold (hatched area): {float(peak_day_threshold_stats.get('excess_energy_kwh', 0.0)):,.1f} kWh."
+            )
 
 
         # --- Peak moment day (by highest hourly value of the selected load) ---
@@ -16294,22 +16500,46 @@ with tab4:
             )
 
             peak_moment_day_total = _loads_daily_total_for_doy(df_loads, peak_moment_doy, selected_load)
-            peak_moment_day_customdata = _loads_daily_profile_customdata(
-                peak_moment_day_profile,
-                peak_moment_day_total,
-                peak_moment_date_label,
-            )
-            r, g, b = pcolors.hex_to_rgb(bar_color)
-            peak_moment_day_fig.update_traces(
-                marker_color=bar_color,
-                customdata=peak_moment_day_customdata,
-                hovertemplate=(
+            peak_moment_threshold_stats = None
+            if threshold_analysis_enabled and threshold_analysis_kw is not None:
+                peak_moment_threshold_stats = _loads_daily_threshold_stats(
+                    peak_moment_day_profile, selected_load, threshold_analysis_kw
+                )
+                peak_moment_day_customdata = _loads_daily_threshold_customdata(
+                    peak_moment_day_profile, selected_load, peak_moment_day_total, peak_moment_date_label,
+                    threshold_analysis_kw, peak_moment_threshold_stats
+                )
+                peak_moment_hovertemplate = (
+                    f"<b>{ui_name(selected_load)}</b><br>"
+                    "%{customdata[1]}<br>"
+                    "Hour %{x:g}<br>"
+                    "Load: %{y:.2f} kW<br>"
+                    "Threshold: %{customdata[2]:,.1f} kW<br>"
+                    "Above threshold: %{customdata[4]}<br>"
+                    "Excess at this hour: %{customdata[3]:,.1f} kW<br>"
+                    "Hours above threshold: %{customdata[5]:,.1f} h<br>"
+                    "Peak above threshold: %{customdata[6]:,.1f} kW<br>"
+                    "Sum above threshold: %{customdata[7]:,.1f} kWh<br>"
+                    "Daily total load: %{customdata[0]:,.1f} kWh<extra></extra>"
+                )
+            else:
+                peak_moment_day_customdata = _loads_daily_profile_customdata(
+                    peak_moment_day_profile,
+                    peak_moment_day_total,
+                    peak_moment_date_label,
+                )
+                peak_moment_hovertemplate = (
                     f"<b>{ui_name(selected_load)}</b><br>"
                     "%{customdata[1]}<br>"
                     "Hour %{x:g}<br>"
                     "Load %{y:.2f} kW<br>"
                     "Daily total load: %{customdata[0]:,.1f} kWh<extra></extra>"
-                ),
+                )
+            r, g, b = pcolors.hex_to_rgb(bar_color)
+            peak_moment_day_fig.update_traces(
+                marker_color=bar_color,
+                customdata=peak_moment_day_customdata,
+                hovertemplate=peak_moment_hovertemplate,
             )
             peak_moment_day_area_trace = _loads_daily_profile_fill_trace(
                 peak_moment_day_profile,
@@ -16322,6 +16552,18 @@ with tab4:
             if peak_moment_day_area_trace is not None:
                 peak_moment_day_fig.add_trace(peak_moment_day_area_trace)
                 peak_moment_day_fig.data = (peak_moment_day_fig.data[-1],) + peak_moment_day_fig.data[:-1]
+            if threshold_analysis_enabled and threshold_analysis_kw is not None:
+                _peak_moment_threshold_fill = _loads_daily_threshold_excess_trace(
+                    peak_moment_day_profile, selected_load, threshold_analysis_kw, bar_color
+                )
+                if _peak_moment_threshold_fill is not None:
+                    peak_moment_day_fig.add_trace(_peak_moment_threshold_fill)
+                _peak_moment_threshold_line = _loads_daily_threshold_line_trace(
+                    peak_moment_day_profile, threshold_analysis_kw
+                )
+                if _peak_moment_threshold_line is not None:
+                    peak_moment_day_fig.add_trace(_peak_moment_threshold_line)
+                peak_moment_day_fig.update_layout(showlegend=True)
             if ghost_load and not ghost_peak_moment_day_profile.empty:
                 ghost_peak_moment_day_total = _loads_daily_total_for_doy(df_ghost_loads, peak_moment_doy, ghost_load)
                 peak_moment_day_fig.add_trace(go.Scatter(
@@ -16354,6 +16596,13 @@ with tab4:
                 f"Highest hourly load on {peak_moment_date_label}: {peak_moment_value:,.1f} kW at hour {_peak_hour_label}. "
                 f"Daily total load of the presented day: {peak_moment_day_total:,.1f} kWh."
             )
+            if threshold_analysis_enabled and threshold_analysis_kw is not None and isinstance(peak_moment_threshold_stats, dict):
+                st.caption(
+                    f"Threshold analysis ({float(threshold_analysis_kw):,.1f} kW): "
+                    f"{float(peak_moment_threshold_stats.get('hours_above', 0.0)):,.1f} h above threshold; "
+                    f"peak difference above threshold: {float(peak_moment_threshold_stats.get('peak_excess_kw', 0.0)):,.1f} kW; "
+                    f"sum of load above threshold (hatched area): {float(peak_moment_threshold_stats.get('excess_energy_kwh', 0.0)):,.1f} kWh."
+                )
 
         # --- Typical day by month (average of all same-month days by hour) ---
         exclude_weekends_typical = st.checkbox(
