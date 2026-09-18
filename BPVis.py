@@ -99,7 +99,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.4.5",
+    page_title="WSGT_BPVis_ENE 2.4.7",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -859,7 +859,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.4.5")
+st.sidebar.write("Version 2.4.7")
 if IS_VIEWER_MODE:
     st.sidebar.write("**Viewer Mode**")
 
@@ -3618,7 +3618,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.4.5"
+REPORT_VERSION = "2.4.7"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -10382,7 +10382,7 @@ with tab1:
                                 _apply_lcc_global_to_all_scenarios(end_uses)
                         report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
-                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_5.pdf"
+                        st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_7.pdf"
                     st.success("Report generated successfully.")
                 except Exception as exc:
                     st.error(f"Report generation failed: {exc}")
@@ -10391,7 +10391,7 @@ with tab1:
                 st.download_button(
                     label="Download Report (PDF)",
                     data=st.session_state["_generated_report_pdf"],
-                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_5.pdf"),
+                    file_name=st.session_state.get("_generated_report_name", "BPVis_Report_v2_4_7.pdf"),
                     mime="application/pdf",
                     use_container_width=True,
                     key="download_generated_report_pdf",
@@ -15446,6 +15446,122 @@ def _loads_find_matching_energy_use(selected_load: str, df_energy: pd.DataFrame)
     return None
 
 
+def _loads_find_matching_load(reference_load: str, df_loads: pd.DataFrame) -> Optional[str]:
+    """Return the best load column matching a reference load name.
+
+    Matching uses the same prefix/suffix-tolerant normalization as the Load/Energy
+    matching used by Annual System Efficiency. Exact normalized matches are preferred;
+    a unique containment match is accepted only as a conservative fallback.
+    """
+    try:
+        candidates = _loads_available_load_columns(df_loads)
+        if not candidates:
+            return None
+        reference_key = _loads_energy_match_key(reference_load)
+        exact = [c for c in candidates if _loads_energy_match_key(c) == reference_key and reference_key]
+        if exact:
+            return exact[0]
+        if len(reference_key) >= 4:
+            partial = [
+                c for c in candidates
+                if (_loads_energy_match_key(c) in reference_key or reference_key in _loads_energy_match_key(c))
+                and len(_loads_energy_match_key(c)) >= 4
+            ]
+            if len(partial) == 1:
+                return partial[0]
+    except Exception:
+        pass
+    return None
+
+
+def _loads_build_scenario_comparison_df(
+        file_bytes: bytes,
+        filename: str,
+        scenario_names: list,
+        reference_load: str,
+) -> pd.DataFrame:
+    """Build comparable Load KPIs for the same logical load across all scenarios.
+
+    KPI definitions intentionally follow the existing Loads Analysis conventions:
+    - Total Annual Load: sum of the presented load series (hourly kW -> kWh/a).
+    - Peak Load: maximum load value in the year.
+    - Annual System Efficiency: annual load / matched annual Energy_Balance consumption.
+    - Maximum Daily Load Sum: maximum sum of the load grouped by day-of-year.
+    - 95th Percentile Load: 95th percentile of the total load series (not specific W/m²).
+    - Annual Energy for Load Coverage: matched annual Energy_Balance consumption; 0 if none is found.
+    """
+    rows = []
+    for sc_name in [str(x) for x in (scenario_names or []) if str(x).strip()]:
+        matched_load = None
+        matched_energy_use = None
+        annual_load = 0.0
+        peak_load = 0.0
+        p95_load = 0.0
+        max_daily_load_sum = 0.0
+        annual_energy_for_coverage = 0.0
+        annual_system_efficiency = np.nan
+
+        try:
+            df_sc_loads = get_loads_balance_df(file_bytes, filename, scenario_name=sc_name)
+            matched_load = _loads_find_matching_load(reference_load, df_sc_loads)
+        except Exception:
+            df_sc_loads = pd.DataFrame()
+            matched_load = None
+
+        if matched_load and isinstance(df_sc_loads, pd.DataFrame) and matched_load in df_sc_loads.columns:
+            try:
+                load_series = pd.to_numeric(df_sc_loads[matched_load], errors="coerce").dropna()
+                if not load_series.empty:
+                    annual_load = float(load_series.sum())
+                    peak_load = float(load_series.max())
+                    p95_load = float(np.percentile(load_series.astype(float), 95))
+            except Exception:
+                pass
+
+            try:
+                if "doy" in df_sc_loads.columns:
+                    daily_work = pd.DataFrame({
+                        "doy": pd.to_numeric(df_sc_loads["doy"], errors="coerce"),
+                        "_load": pd.to_numeric(df_sc_loads[matched_load], errors="coerce"),
+                    }).dropna(subset=["doy", "_load"])
+                    if not daily_work.empty:
+                        daily_sums = daily_work.groupby("doy", as_index=False)["_load"].sum()
+                        if not daily_sums.empty:
+                            max_daily_load_sum = float(daily_sums["_load"].max())
+            except Exception:
+                max_daily_load_sum = 0.0
+
+            try:
+                df_sc_energy = get_energy_balance_df(file_bytes, filename, scenario_name=sc_name)
+                matched_energy_use = _loads_find_matching_energy_use(matched_load, df_sc_energy)
+                if matched_energy_use and matched_energy_use in df_sc_energy.columns:
+                    annual_energy_for_coverage = float(
+                        pd.to_numeric(df_sc_energy[matched_energy_use], errors="coerce").fillna(0.0).sum()
+                    )
+                else:
+                    annual_energy_for_coverage = 0.0
+            except Exception:
+                annual_energy_for_coverage = 0.0
+                matched_energy_use = None
+
+            if abs(float(annual_energy_for_coverage)) > 1e-12:
+                annual_system_efficiency = float(annual_load) / float(annual_energy_for_coverage)
+
+        rows.append({
+            "Scenario": sc_name,
+            "Matched Load": str(matched_load or "Not found"),
+            "Matched Energy Use": str(matched_energy_use or "Not found"),
+            "Total Annual Load (kWh/a)": float(annual_load),
+            "Peak Load (kW)": float(peak_load),
+            "Annual System Efficiency": annual_system_efficiency,
+            "Maximum Daily Load Sum (kWh/day)": float(max_daily_load_sum),
+            "95th Percentile Load (kW)": float(p95_load),
+            "Annual Energy for Load Coverage (kWh/a)": float(annual_energy_for_coverage),
+        })
+
+    return pd.DataFrame(rows)
+
+
 def _loads_color_for(load_name: str, fallback: str = "#c02419") -> str:
     """Return the configured color for a load/end-use name."""
     try:
@@ -16713,6 +16829,213 @@ with tab4:
 
         st.subheader(f"Load Duration Curve — {ui_name(selected_load)}")
         st_plotly_chart(ldc_fig, use_container_width=True)
+
+        # --- Scenario Comparison: same logical load across all existing scenarios ---
+        with st.expander("Scenario Comparisson", expanded=False):
+            st.caption(
+                f"Compare the load corresponding to **{ui_name(selected_load)}** across all existing scenarios. "
+                "Load and Energy_Balance names are matched while ignoring common prefixes/suffixes. "
+                "Scenario colors are used in every comparison chart."
+            )
+
+            _load_cmp_scenarios = [
+                str(x) for x in st.session_state.get("scenarios", {}).keys() if str(x).strip()
+            ]
+            if not _load_cmp_scenarios:
+                _load_cmp_scenarios = [active_scenario_loads]
+            elif active_scenario_loads not in _load_cmp_scenarios:
+                _load_cmp_scenarios.insert(0, active_scenario_loads)
+
+            _load_cmp_df = _loads_build_scenario_comparison_df(
+                file_bytes_loads,
+                uploaded_file.name,
+                _load_cmp_scenarios,
+                selected_load,
+            )
+
+            if _load_cmp_df.empty:
+                st.info("No scenario load data is available for comparison.")
+            else:
+                _saved_load_cmp_colors = st.session_state.get("color_map_scenarios", {})
+                if not isinstance(_saved_load_cmp_colors, dict):
+                    _saved_load_cmp_colors = {}
+                _load_cmp_colors = {
+                    str(sc): str(_saved_load_cmp_colors.get(
+                        str(sc),
+                        SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)]
+                    ))
+                    for i, sc in enumerate(_load_cmp_scenarios)
+                }
+
+                _load_cmp_df["Scenario"] = _load_cmp_df["Scenario"].astype(str)
+                _load_cmp_df["Scenario"] = pd.Categorical(
+                    _load_cmp_df["Scenario"], categories=_load_cmp_scenarios, ordered=True
+                )
+                _load_cmp_df = _load_cmp_df.sort_values("Scenario", kind="stable").reset_index(drop=True)
+
+                # 1) Annual load and annual energy required for load coverage share the same energy unit.
+                _fig_load_cmp_annual = go.Figure()
+                for _i_sc, _sc in enumerate(_load_cmp_scenarios):
+                    _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
+                    if _hit.empty:
+                        continue
+                    _row = _hit.iloc[0]
+                    _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
+                    _fig_load_cmp_annual.add_trace(go.Bar(
+                        x=["Total Annual Load", "Energy for Load Coverage"],
+                        y=[
+                            float(_row["Total Annual Load (kWh/a)"]),
+                            float(_row["Annual Energy for Load Coverage (kWh/a)"]),
+                        ],
+                        name=str(_sc),
+                        marker=dict(color=_col),
+                        text=[
+                            f"{float(_row['Total Annual Load (kWh/a)']):,.0f}",
+                            f"{float(_row['Annual Energy for Load Coverage (kWh/a)']):,.0f}",
+                        ],
+                        textposition="outside",
+                        cliponaxis=False,
+                        customdata=np.array([
+                            [str(_row["Matched Load"]), str(_row["Matched Energy Use"])],
+                            [str(_row["Matched Load"]), str(_row["Matched Energy Use"])],
+                        ], dtype=object),
+                        hovertemplate=(
+                            "<b>%{fullData.name}</b><br>%{x}: %{y:,.1f} kWh/a<br>"
+                            "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<extra></extra>"
+                        ),
+                    ))
+                _fig_load_cmp_annual.update_layout(
+                    title="Annual Load and Energy for Load Coverage",
+                    barmode="group",
+                    xaxis_title="",
+                    yaxis_title="kWh/a",
+                    height=520,
+                    legend_title_text="Scenario",
+                    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+                    margin=dict(l=45, r=20, t=60, b=115),
+                )
+                _fig_load_cmp_annual.update_yaxes(rangemode="tozero")
+
+                # 2) Peak and 95th percentile share the same load-power unit.
+                _fig_load_cmp_power = go.Figure()
+                for _i_sc, _sc in enumerate(_load_cmp_scenarios):
+                    _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
+                    if _hit.empty:
+                        continue
+                    _row = _hit.iloc[0]
+                    _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
+                    _fig_load_cmp_power.add_trace(go.Bar(
+                        x=["Peak Load", "95th Percentile Load"],
+                        y=[
+                            float(_row["Peak Load (kW)"]),
+                            float(_row["95th Percentile Load (kW)"]),
+                        ],
+                        name=str(_sc),
+                        marker=dict(color=_col),
+                        text=[
+                            f"{float(_row['Peak Load (kW)']):,.1f}",
+                            f"{float(_row['95th Percentile Load (kW)']):,.1f}",
+                        ],
+                        textposition="outside",
+                        cliponaxis=False,
+                        customdata=np.array([
+                            [str(_row["Matched Load"])],
+                            [str(_row["Matched Load"])],
+                        ], dtype=object),
+                        hovertemplate=(
+                            "<b>%{fullData.name}</b><br>%{x}: %{y:,.1f} kW<br>"
+                            "Matched load: %{customdata[0]}<extra></extra>"
+                        ),
+                    ))
+                _fig_load_cmp_power.update_layout(
+                    title="Peak and 95th Percentile Load",
+                    barmode="group",
+                    xaxis_title="",
+                    yaxis_title="kW",
+                    height=520,
+                    legend_title_text="Scenario",
+                    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+                    margin=dict(l=45, r=20, t=60, b=115),
+                )
+                _fig_load_cmp_power.update_yaxes(rangemode="tozero")
+
+                # 3) Annual system efficiency by scenario.
+                _fig_load_cmp_eff = go.Figure()
+                for _i_sc, _sc in enumerate(_load_cmp_scenarios):
+                    _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
+                    if _hit.empty:
+                        continue
+                    _row = _hit.iloc[0]
+                    _eff = pd.to_numeric(_row["Annual System Efficiency"], errors="coerce")
+                    _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
+                    _fig_load_cmp_eff.add_trace(go.Bar(
+                        x=[str(_sc)],
+                        y=[float(_eff) if pd.notna(_eff) and np.isfinite(float(_eff)) else 0.0],
+                        name=str(_sc),
+                        marker=dict(color=_col),
+                        showlegend=False,
+                        text=[f"{float(_eff):,.2f}" if pd.notna(_eff) and np.isfinite(float(_eff)) else "n/a"],
+                        textposition="outside",
+                        cliponaxis=False,
+                        customdata=np.array([[str(_row["Matched Load"]), str(_row["Matched Energy Use"]) ]], dtype=object),
+                        hovertemplate=(
+                            "<b>%{x}</b><br>Annual System Efficiency: %{text}<br>"
+                            "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<extra></extra>"
+                        ),
+                    ))
+                _fig_load_cmp_eff.update_layout(
+                    title="Annual System Efficiency",
+                    xaxis_title="Scenario",
+                    yaxis_title="Load / Energy",
+                    height=520,
+                    margin=dict(l=45, r=20, t=60, b=75),
+                )
+                _fig_load_cmp_eff.update_yaxes(rangemode="tozero")
+
+                # 4) Maximum daily load sum by scenario.
+                _fig_load_cmp_daily = go.Figure()
+                for _i_sc, _sc in enumerate(_load_cmp_scenarios):
+                    _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
+                    if _hit.empty:
+                        continue
+                    _row = _hit.iloc[0]
+                    _val = float(_row["Maximum Daily Load Sum (kWh/day)"])
+                    _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
+                    _fig_load_cmp_daily.add_trace(go.Bar(
+                        x=[str(_sc)],
+                        y=[_val],
+                        name=str(_sc),
+                        marker=dict(color=_col),
+                        showlegend=False,
+                        text=[f"{_val:,.0f}"],
+                        textposition="outside",
+                        cliponaxis=False,
+                        customdata=np.array([[str(_row["Matched Load"]) ]], dtype=object),
+                        hovertemplate=(
+                            "<b>%{x}</b><br>Maximum daily load sum: %{y:,.1f} kWh/day<br>"
+                            "Matched load: %{customdata[0]}<extra></extra>"
+                        ),
+                    ))
+                _fig_load_cmp_daily.update_layout(
+                    title="Maximum Daily Load Sum",
+                    xaxis_title="Scenario",
+                    yaxis_title="kWh/day",
+                    height=520,
+                    margin=dict(l=45, r=20, t=60, b=75),
+                )
+                _fig_load_cmp_daily.update_yaxes(rangemode="tozero")
+
+                _cmp_row1_col1, _cmp_row1_col2 = st.columns(2)
+                with _cmp_row1_col1:
+                    st_plotly_chart(_fig_load_cmp_annual, use_container_width=True, key="loads_scenario_comparison_annual")
+                with _cmp_row1_col2:
+                    st_plotly_chart(_fig_load_cmp_power, use_container_width=True, key="loads_scenario_comparison_power")
+
+                _cmp_row2_col1, _cmp_row2_col2 = st.columns(2)
+                with _cmp_row2_col1:
+                    st_plotly_chart(_fig_load_cmp_eff, use_container_width=True, key="loads_scenario_comparison_efficiency")
+                with _cmp_row2_col2:
+                    st_plotly_chart(_fig_load_cmp_daily, use_container_width=True, key="loads_scenario_comparison_daily")
 
         # -------------------------
         # On-site Generation Self-Consumption (hourly) — uses On-site_Generation from Loads_Balance
