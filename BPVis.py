@@ -15656,7 +15656,12 @@ def _loads_daily_threshold_excess_trace(
         threshold_kw: float,
         color_hex: str,
 ) -> Optional[go.Scatter]:
-    """Return a hatched polygon representing the daily load area above threshold."""
+    """Return a hatched polygon clipped exactly to the load curve above threshold.
+
+    Threshold-crossing points are linearly interpolated between adjacent samples. This
+    prevents the hatched polygon from starting/ending at the preceding/following whole
+    hour and therefore keeps the hatch fully inside the visible load-profile area.
+    """
     try:
         work = profile_df[["hour", load_col]].copy()
         work["hour"] = pd.to_numeric(work["hour"], errors="coerce")
@@ -15664,14 +15669,41 @@ def _loads_daily_threshold_excess_trace(
         work = work.dropna(subset=["hour", load_col]).sort_values("hour")
         if work.empty:
             return None
+
         threshold = float(threshold_kw)
+        hours = work["hour"].astype(float).to_numpy()
         loads = work[load_col].astype(float).to_numpy()
         if not np.any(loads > threshold):
             return None
-        hours = work["hour"].astype(float).tolist()
-        upper = np.maximum(loads, threshold).astype(float).tolist()
-        x_poly = hours + list(reversed(hours))
-        y_poly = upper + [threshold] * len(hours)
+
+        # Build the upper boundary from the original load curve, clipped at the
+        # threshold. Insert the exact linear intersection wherever a segment crosses
+        # the threshold so the hatched area starts/ends at the real crossing point.
+        x_upper = []
+        y_upper = []
+        for i in range(len(hours)):
+            x0 = float(hours[i])
+            y0 = float(loads[i])
+            if i == 0:
+                x_upper.append(x0)
+                y_upper.append(max(y0, threshold))
+                continue
+
+            x_prev = float(hours[i - 1])
+            y_prev = float(loads[i - 1])
+            prev_side = y_prev - threshold
+            curr_side = y0 - threshold
+            if prev_side * curr_side < 0.0 and y0 != y_prev:
+                frac = (threshold - y_prev) / (y0 - y_prev)
+                x_cross = x_prev + frac * (x0 - x_prev)
+                x_upper.append(float(x_cross))
+                y_upper.append(threshold)
+
+            x_upper.append(x0)
+            y_upper.append(max(y0, threshold))
+
+        x_poly = x_upper + list(reversed(x_upper))
+        y_poly = y_upper + [threshold] * len(x_upper)
         r_h, g_h, b_h = pcolors.hex_to_rgb(color_hex)
         return go.Scatter(
             x=x_poly,
