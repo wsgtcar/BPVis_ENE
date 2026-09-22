@@ -5001,6 +5001,55 @@ def _scenario_radar_plotly_figure(
     if not scenario_order:
         scenario_order = dfp["Scenario"].dropna().astype(str).drop_duplicates().tolist()
 
+    # Refit inside the figure itself. Only the scenarios actually passed to this
+    # figure are allowed to define the radar scales; any upstream normalization
+    # fields are overwritten below.
+    dfp = dfp.loc[dfp["Scenario"].astype(str).isin(set(scenario_order))].copy()
+
+    if mode == "improvement":
+        _visible_improvement = pd.to_numeric(
+            dfp.get("Improvement vs Reference %"), errors="coerce"
+        ).replace([np.inf, -np.inf], np.nan)
+        _finite_improvement = _visible_improvement[np.isfinite(_visible_improvement)]
+        if _finite_improvement.empty:
+            _visible_axis_min, _visible_axis_max = -10.0, 10.0
+        else:
+            _raw_min = min(float(_finite_improvement.min()), 0.0)
+            _raw_max = max(float(_finite_improvement.max()), 0.0)
+            _span = max(_raw_max - _raw_min, 1.0)
+            _step_candidates = [5, 10, 20, 25, 50, 100, 200, 500]
+            _step = float(_step_candidates[-1])
+            for _candidate in _step_candidates:
+                if _span / float(_candidate) <= 6:
+                    _step = float(_candidate)
+                    break
+            _visible_axis_min = float(np.floor(_raw_min / _step) * _step)
+            _visible_axis_max = float(np.ceil(_raw_max / _step) * _step)
+            if abs(_visible_axis_max - _visible_axis_min) < 1e-9:
+                _visible_axis_min -= _step
+                _visible_axis_max += _step
+        dfp["Improvement Axis Min"] = _visible_axis_min
+        dfp["Improvement Axis Max"] = _visible_axis_max
+        dfp["Radial"] = _visible_improvement - _visible_axis_min
+    else:
+        # Absolute radar: recompute every KPI's maximum from visible scenarios only.
+        # This guarantees that a filtered-out scenario cannot keep an old axis maximum.
+        dfp["Value"] = pd.to_numeric(dfp.get("Value"), errors="coerce").replace([np.inf, -np.inf], np.nan)
+        for _kpi in kpi_order:
+            _mask = dfp["KPI"].astype(str) == str(_kpi)
+            _vals = pd.to_numeric(dfp.loc[_mask, "Value"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            _finite_vals = _vals[np.isfinite(_vals)]
+            if _finite_vals.empty:
+                continue
+            _visible_vmax = float(_finite_vals.max())
+            if abs(_visible_vmax) < 1e-12:
+                _pct = pd.Series(100.0, index=_vals.index)
+            else:
+                _pct = 100.0 * _vals.astype(float) / _visible_vmax
+            dfp.loc[_mask, "Axis Maximum"] = _visible_vmax
+            dfp.loc[_mask, "Percent of Highest"] = _pct
+            dfp.loc[_mask, "Radial"] = _pct
+
     fig = go.Figure()
 
     def _fmt_num(x, decimals=1, suffix=""):
@@ -5105,7 +5154,7 @@ def _scenario_radar_plotly_figure(
         ))
 
     if mode == "improvement":
-        # Values in the dataframe are shifted to avoid negative radii. Tick labels show the real improvement %.
+        # Visible-scenario values are shifted to avoid negative radii. Tick labels show the real improvement %.
         try:
             axis_min = float(pd.to_numeric(dfp.get("Improvement Axis Min"), errors="coerce").dropna().iloc[0])
             axis_max = float(pd.to_numeric(dfp.get("Improvement Axis Max"), errors="coerce").dropna().iloc[0])
@@ -13669,15 +13718,6 @@ with tab7:
                     key=_comparison_kpi_filter_key,
                     help="Select which KPIs are shown in the two radar diagrams, Benchmark-style KPI bar by Scenario, and KPI improvement vs reference.",
                 )
-                if st.button(
-                    "Refit radar scales to visible scenarios",
-                    key="scenario_radar_refit_button",
-                    help="Recalculate the radar axes from the scenarios currently selected in Comparison Scenarios and force a fresh radar render.",
-                ):
-                    st.session_state["scenario_radar_refit_nonce"] = int(
-                        st.session_state.get("scenario_radar_refit_nonce", 0)
-                    ) + 1
-
             _comparison_kpi_selected_labels = {
                 _comparison_kpi_labels[_k]
                 for _k in _comparison_kpi_selected_ids
@@ -13688,16 +13728,6 @@ with tab7:
             # The underlying scenario definitions are untouched; this is a presentation/analysis filter only.
             scenario_order = [str(s) for s in _comparison_scenario_options if str(s) in set(_comparison_scenario_selected)]
             _comparison_scenario_set = set(scenario_order)
-
-            # Automatically invalidate the radar render when the visible scenario set changes.
-            # The manual Refit button above increments the same nonce on demand.
-            _radar_visible_signature = tuple(scenario_order)
-            if st.session_state.get("scenario_radar_visible_signature") != _radar_visible_signature:
-                st.session_state["scenario_radar_visible_signature"] = _radar_visible_signature
-                st.session_state["scenario_radar_refit_nonce"] = int(
-                    st.session_state.get("scenario_radar_refit_nonce", 0)
-                ) + 1
-            _radar_refit_nonce = int(st.session_state.get("scenario_radar_refit_nonce", 0))
 
             df_cmp = df_cmp.loc[df_cmp["Scenario"].astype(str).isin(_comparison_scenario_set)].copy()
             df_cmp_display = df_cmp_display.loc[df_cmp_display["Scenario"].astype(str).isin(_comparison_scenario_set)].copy()
@@ -13810,10 +13840,13 @@ with tab7:
                                 mode="improvement",
                                 height=620,
                             )
+                            _radar_render_signature = hashlib.md5(
+                                ("|".join(scenario_order) + "||" + "|".join(sorted(_comparison_kpi_selected_labels))).encode("utf-8")
+                            ).hexdigest()[:10]
                             st_plotly_chart(
                                 fig_radar_improvement,
                                 use_container_width=True,
-                                key=f"scenario_performance_radar_improvement_{_radar_refit_nonce}",
+                                key=f"scenario_performance_radar_improvement_{_radar_render_signature}",
                             )
                             st.caption(
                                 "The reference scenario is not plotted. Improvement = (reference KPI − scenario KPI) / reference KPI. "
@@ -13830,10 +13863,13 @@ with tab7:
                             mode="absolute",
                             height=620,
                         )
+                        _radar_render_signature = hashlib.md5(
+                            ("|".join(scenario_order) + "||" + "|".join(sorted(_comparison_kpi_selected_labels))).encode("utf-8")
+                        ).hexdigest()[:10]
                         st_plotly_chart(
                             fig_radar_absolute,
                             use_container_width=True,
-                            key=f"scenario_performance_radar_absolute_{_radar_refit_nonce}",
+                            key=f"scenario_performance_radar_absolute_{_radar_render_signature}",
                         )
                         st.caption(
                             "Each axis uses its own KPI maximum as the outer scale. Hover over a point to read the absolute value and unit."
