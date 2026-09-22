@@ -5170,10 +5170,10 @@ def _scenario_radar_plotly_figure(
     else:
         tickvals = [0, 25, 50, 75, 100]
         ticktext = ["0%", "25%", "50%", "75%", "Axis max"]
-        # Keep 10% radial headroom outside the 100% axis maximum. Values remain
+        # Keep 5% radial headroom outside the 100% axis maximum. Values remain
         # normalized exactly as before; this only prevents markers/lines/fills at
         # sharp 100% corners from visually protruding beyond the polar boundary.
-        radial_range = [0, 110]
+        radial_range = [0, 105]
         radial_title = "Axis-scaled value"
 
     fig.update_layout(
@@ -5189,6 +5189,7 @@ def _scenario_radar_plotly_figure(
             angularaxis=dict(
                 categoryorder="array",
                 categoryarray=kpi_order,
+                showline=False,
             ),
         ),
         legend_title_text="Scenario",
