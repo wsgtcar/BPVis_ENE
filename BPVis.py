@@ -13669,6 +13669,14 @@ with tab7:
                     key=_comparison_kpi_filter_key,
                     help="Select which KPIs are shown in the two radar diagrams, Benchmark-style KPI bar by Scenario, and KPI improvement vs reference.",
                 )
+                if st.button(
+                    "Refit radar scales to visible scenarios",
+                    key="scenario_radar_refit_button",
+                    help="Recalculate the radar axes from the scenarios currently selected in Comparison Scenarios and force a fresh radar render.",
+                ):
+                    st.session_state["scenario_radar_refit_nonce"] = int(
+                        st.session_state.get("scenario_radar_refit_nonce", 0)
+                    ) + 1
 
             _comparison_kpi_selected_labels = {
                 _comparison_kpi_labels[_k]
@@ -13680,6 +13688,17 @@ with tab7:
             # The underlying scenario definitions are untouched; this is a presentation/analysis filter only.
             scenario_order = [str(s) for s in _comparison_scenario_options if str(s) in set(_comparison_scenario_selected)]
             _comparison_scenario_set = set(scenario_order)
+
+            # Automatically invalidate the radar render when the visible scenario set changes.
+            # The manual Refit button above increments the same nonce on demand.
+            _radar_visible_signature = tuple(scenario_order)
+            if st.session_state.get("scenario_radar_visible_signature") != _radar_visible_signature:
+                st.session_state["scenario_radar_visible_signature"] = _radar_visible_signature
+                st.session_state["scenario_radar_refit_nonce"] = int(
+                    st.session_state.get("scenario_radar_refit_nonce", 0)
+                ) + 1
+            _radar_refit_nonce = int(st.session_state.get("scenario_radar_refit_nonce", 0))
+
             df_cmp = df_cmp.loc[df_cmp["Scenario"].astype(str).isin(_comparison_scenario_set)].copy()
             df_cmp_display = df_cmp_display.loc[df_cmp_display["Scenario"].astype(str).isin(_comparison_scenario_set)].copy()
             energy_rows = [r for r in energy_rows if str(r.get("Scenario", "")) in _comparison_scenario_set]
@@ -13730,6 +13749,7 @@ with tab7:
                 # dataset for delta tables, marginal-abatement-cost calculations and all other logic.
                 _radar_chart_df = _radar_raw_df.loc[
                     _radar_raw_df["KPI"].astype(str).isin(_comparison_kpi_selected_labels)
+                    & _radar_raw_df["Scenario"].astype(str).isin(_comparison_scenario_set)
                 ].copy()
 
                 st.subheader("Scenario Performance Radar")
@@ -13790,7 +13810,11 @@ with tab7:
                                 mode="improvement",
                                 height=620,
                             )
-                            st_plotly_chart(fig_radar_improvement, use_container_width=True, key="scenario_performance_radar_improvement")
+                            st_plotly_chart(
+                                fig_radar_improvement,
+                                use_container_width=True,
+                                key=f"scenario_performance_radar_improvement_{_radar_refit_nonce}",
+                            )
                             st.caption(
                                 "The reference scenario is not plotted. Improvement = (reference KPI − scenario KPI) / reference KPI. "
                                 "Positive values mean lower/better than the reference; negative values mean higher/worse."
@@ -13806,7 +13830,11 @@ with tab7:
                             mode="absolute",
                             height=620,
                         )
-                        st_plotly_chart(fig_radar_absolute, use_container_width=True, key="scenario_performance_radar_absolute")
+                        st_plotly_chart(
+                            fig_radar_absolute,
+                            use_container_width=True,
+                            key=f"scenario_performance_radar_absolute_{_radar_refit_nonce}",
+                        )
                         st.caption(
                             "Each axis uses its own KPI maximum as the outer scale. Hover over a point to read the absolute value and unit."
                         )
