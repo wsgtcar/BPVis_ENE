@@ -4661,19 +4661,35 @@ def _scenario_kpi_scatter_plotly_figure(
             ))
 
     # Configure independent y-axes. All axes overlay the first one, but each KPI trace
-    # reads against its own scale. Annual KPIs are on the left; total/life-cycle KPIs are on the right.
+    # reads against its own scale. Arrange the y-axes in the same left-to-right order
+    # as the KPI bar groups: the first half sits on the left (outermost -> innermost),
+    # and the second half sits on the right (innermost -> outermost). This keeps each
+    # KPI scale visually closest to the bar group it represents.
     layout_axes = {}
-    # Keep every independent KPI scale on its own position. With all seven KPIs
-    # active there are four left-side axes (the first anchored at the x-domain edge
-    # plus three free axes) and three right-side free axes. Space the free axes
-    # evenly outward so none of their tick labels/titles overlap.
-    positions_left = [0.115, 0.065, 0.015]
-    positions_right = [0.885, 0.935, 0.985]
-    left_i = 0
-    right_i = 0
-    annual_kpis_left = {"End Energy /m²", "Annual Energy Cost /m²", "Annual OPEX /m²", "Annual Emissions /m²"}
+    n_kpis = len(kpis)
+    n_left_axes = (n_kpis + 1) // 2
+    n_right_axes = n_kpis - n_left_axes
+
+    # Compact the scale cluster compared with the previous layout to recover more
+    # horizontal room for the actual diagram while retaining readable separation.
+    axis_spacing = 0.035
+    plot_domain_left = 0.13
+    plot_domain_right = 0.87
+    left_inner_position = 0.12
+    right_inner_position = 0.88
+    positions_left = [
+        left_inner_position - axis_spacing * (n_left_axes - 1 - i)
+        for i in range(n_left_axes)
+    ]
+    positions_right = [
+        right_inner_position + axis_spacing * i
+        for i in range(n_right_axes)
+    ]
+
     for kpi_i, kpi in enumerate(kpis):
-        sub_vals = pd.to_numeric(dfp.loc[dfp["KPI"].astype(str) == kpi, "Value"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        sub_vals = pd.to_numeric(
+            dfp.loc[dfp["KPI"].astype(str) == kpi, "Value"], errors="coerce"
+        ).replace([np.inf, -np.inf], np.nan).dropna()
         vmax = float(sub_vals.max()) if not sub_vals.empty else 1.0
         vmin = float(sub_vals.min()) if not sub_vals.empty else 0.0
         if vmax <= 0:
@@ -4681,36 +4697,27 @@ def _scenario_kpi_scatter_plotly_figure(
         else:
             yrange = [0.0, vmax * 1.24]
         axis_col = axis_palette[kpi_i % len(axis_palette)]
-        side = "left" if str(kpi) in annual_kpis_left else "right"
-        if kpi_i == 0:
-            axis_cfg = dict(
-                title=dict(text=_scenario_kpi_axis_title(kpi), font=dict(size=10, color=axis_col)),
-                tickfont=dict(size=10, color=axis_col),
-                range=yrange,
-                showgrid=True,
-                zeroline=True,
-                side=side,
-            )
-            layout_axes["yaxis"] = axis_cfg
+
+        if kpi_i < n_left_axes:
+            side = "left"
+            pos = positions_left[kpi_i]
         else:
-            if side == "left":
-                pos = positions_left[min(left_i, len(positions_left) - 1)]
-                left_i += 1
-            else:
-                pos = positions_right[min(right_i, len(positions_right) - 1)]
-                right_i += 1
-            axis_cfg = dict(
-                title=dict(text=_scenario_kpi_axis_title(kpi), font=dict(size=10, color=axis_col)),
-                tickfont=dict(size=10, color=axis_col),
-                range=yrange,
-                overlaying="y",
-                side=side,
-                anchor="free",
-                position=float(pos),
-                showgrid=False,
-                zeroline=False,
-            )
-            layout_axes[f"yaxis{kpi_i + 1}"] = axis_cfg
+            side = "right"
+            pos = positions_right[kpi_i - n_left_axes]
+
+        axis_cfg = dict(
+            title=dict(text=_scenario_kpi_axis_title(kpi), font=dict(size=10, color=axis_col)),
+            tickfont=dict(size=10, color=axis_col),
+            range=yrange,
+            side=side,
+            anchor="free",
+            position=float(pos),
+            showgrid=(kpi_i == 0),
+            zeroline=(kpi_i == 0),
+        )
+        if kpi_i > 0:
+            axis_cfg["overlaying"] = "y"
+        layout_axes["yaxis" if kpi_i == 0 else f"yaxis{kpi_i + 1}"] = axis_cfg
 
     fig.update_layout(
         **layout_axes,
@@ -4723,13 +4730,13 @@ def _scenario_kpi_scatter_plotly_figure(
             ticktext=x_labels,
             tickfont=dict(size=11),
             range=[-0.55, max(len(kpis) - 0.45, 0.45)],
-            domain=[0.16, 0.84],
+            domain=[plot_domain_left, plot_domain_right],
         ),
         barmode="overlay",
         bargap=0.25,
         legend_title_text="Scenario",
         legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
-        margin=dict(l=95, r=95, t=80, b=120),
+        margin=dict(l=82, r=82, t=80, b=120),
         height=height,
     )
     return fig
