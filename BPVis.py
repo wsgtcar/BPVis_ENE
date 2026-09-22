@@ -4661,30 +4661,26 @@ def _scenario_kpi_scatter_plotly_figure(
             ))
 
     # Configure independent y-axes. All axes overlay the first one, but each KPI trace
-    # reads against its own scale. Arrange the y-axes in the same left-to-right order
-    # as the KPI bar groups: the first half sits on the left (outermost -> innermost),
-    # and the second half sits on the right (innermost -> outermost). This keeps each
-    # KPI scale visually closest to the bar group it represents.
+    # reads against its own scale. Keep every KPI scale on the LEFT and preserve the
+    # same left-to-right order as the KPI bar groups: KPI 1 uses the outermost scale,
+    # KPI 2 the next scale, and so on until the final KPI uses the innermost scale.
+    #
+    # Each axis receives its own horizontal lane. The title is explicitly offset from
+    # its tick labels so browser zoom cannot make the vertical title overlap the numbers.
     layout_axes = {}
     n_kpis = len(kpis)
-    n_left_axes = (n_kpis + 1) // 2
-    n_right_axes = n_kpis - n_left_axes
 
-    # Compact the scale cluster compared with the previous layout to recover more
-    # horizontal room for the actual diagram while retaining readable separation.
-    axis_spacing = 0.035
-    plot_domain_left = 0.13
-    plot_domain_right = 0.87
-    left_inner_position = 0.12
-    right_inner_position = 0.88
-    positions_left = [
-        left_inner_position - axis_spacing * (n_left_axes - 1 - i)
-        for i in range(n_left_axes)
-    ]
-    positions_right = [
-        right_inner_position + axis_spacing * i
-        for i in range(n_right_axes)
-    ]
+    # Reserve roughly the same total horizontal width previously split across both sides,
+    # but place it entirely on the left. This keeps the plotting area wide while giving
+    # seven simultaneous axes enough separation at common browser zoom levels.
+    plot_domain_left = 0.255
+    plot_domain_right = 0.985
+    axis_outer_position = 0.025
+    axis_inner_position = 0.215
+    if n_kpis <= 1:
+        positions_left = [axis_inner_position]
+    else:
+        positions_left = np.linspace(axis_outer_position, axis_inner_position, n_kpis).tolist()
 
     for kpi_i, kpi in enumerate(kpis):
         sub_vals = pd.to_numeric(
@@ -4698,20 +4694,22 @@ def _scenario_kpi_scatter_plotly_figure(
             yrange = [0.0, vmax * 1.24]
         axis_col = axis_palette[kpi_i % len(axis_palette)]
 
-        if kpi_i < n_left_axes:
-            side = "left"
-            pos = positions_left[kpi_i]
-        else:
-            side = "right"
-            pos = positions_right[kpi_i - n_left_axes]
+        pos = positions_left[kpi_i]
 
         axis_cfg = dict(
-            title=dict(text=_scenario_kpi_axis_title(kpi), font=dict(size=10, color=axis_col)),
-            tickfont=dict(size=10, color=axis_col),
+            title=dict(
+                text=_scenario_kpi_axis_title(kpi),
+                font=dict(size=9, color=axis_col),
+                standoff=16,
+            ),
+            tickfont=dict(size=9, color=axis_col),
+            ticks="outside",
+            ticklen=3,
             range=yrange,
-            side=side,
+            side="left",
             anchor="free",
             position=float(pos),
+            automargin=True,
             showgrid=(kpi_i == 0),
             zeroline=(kpi_i == 0),
         )
@@ -4736,7 +4734,7 @@ def _scenario_kpi_scatter_plotly_figure(
         bargap=0.25,
         legend_title_text="Scenario",
         legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
-        margin=dict(l=82, r=82, t=80, b=120),
+        margin=dict(l=105, r=35, t=80, b=120),
         height=height,
     )
     return fig
