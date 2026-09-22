@@ -4663,8 +4663,12 @@ def _scenario_kpi_scatter_plotly_figure(
     # Configure independent y-axes. All axes overlay the first one, but each KPI trace
     # reads against its own scale. Annual KPIs are on the left; total/life-cycle KPIs are on the right.
     layout_axes = {}
-    positions_left = [0.00, 0.055, 0.11]
-    positions_right = [1.00, 0.945, 0.89]
+    # Keep every independent KPI scale on its own position. With all seven KPIs
+    # active there are four left-side axes (the first anchored at the x-domain edge
+    # plus three free axes) and three right-side free axes. Space the free axes
+    # evenly outward so none of their tick labels/titles overlap.
+    positions_left = [0.115, 0.065, 0.015]
+    positions_right = [0.885, 0.935, 0.985]
     left_i = 0
     right_i = 0
     annual_kpis_left = {"End Energy /m²", "Annual Energy Cost /m²", "Annual OPEX /m²", "Annual Emissions /m²"}
@@ -4690,7 +4694,7 @@ def _scenario_kpi_scatter_plotly_figure(
             layout_axes["yaxis"] = axis_cfg
         else:
             if side == "left":
-                pos = positions_left[min(left_i + 1, len(positions_left) - 1)]
+                pos = positions_left[min(left_i, len(positions_left) - 1)]
                 left_i += 1
             else:
                 pos = positions_right[min(right_i, len(positions_right) - 1)]
