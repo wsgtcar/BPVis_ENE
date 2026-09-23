@@ -17086,210 +17086,222 @@ with tab4:
                 "Scenario colors are used in every comparison chart."
             )
 
-            _load_cmp_scenarios = [
-                str(x) for x in st.session_state.get("scenarios", {}).keys() if str(x).strip()
-            ]
-            if not _load_cmp_scenarios:
-                _load_cmp_scenarios = [active_scenario_loads]
-            elif active_scenario_loads not in _load_cmp_scenarios:
-                _load_cmp_scenarios.insert(0, active_scenario_loads)
-
-            _load_cmp_df = _loads_build_scenario_comparison_df(
-                file_bytes_loads,
-                uploaded_file.name,
-                _load_cmp_scenarios,
-                selected_load,
+            _load_scenario_comparison_enabled = st.checkbox(
+                "Enable scenario comparison",
+                value=False,
+                key="loads_scenario_comparison_enabled",
+                help=(
+                    "When enabled, BPVis compares the selected logical load across all existing scenarios. "
+                    "Leave unchecked for faster normal Loads Analysis reruns."
+                ),
             )
-
-            if _load_cmp_df.empty:
-                st.info("No scenario load data is available for comparison.")
+            if not _load_scenario_comparison_enabled:
+                st.caption("Scenario comparison is disabled. Enable it to calculate and display the four all-scenario load KPI charts.")
             else:
-                _saved_load_cmp_colors = st.session_state.get("color_map_scenarios", {})
-                if not isinstance(_saved_load_cmp_colors, dict):
-                    _saved_load_cmp_colors = {}
-                _load_cmp_colors = {
-                    str(sc): str(_saved_load_cmp_colors.get(
-                        str(sc),
-                        SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)]
-                    ))
-                    for i, sc in enumerate(_load_cmp_scenarios)
-                }
+                _load_cmp_scenarios = [
+                    str(x) for x in st.session_state.get("scenarios", {}).keys() if str(x).strip()
+                ]
+                if not _load_cmp_scenarios:
+                    _load_cmp_scenarios = [active_scenario_loads]
+                elif active_scenario_loads not in _load_cmp_scenarios:
+                    _load_cmp_scenarios.insert(0, active_scenario_loads)
 
-                _load_cmp_df["Scenario"] = _load_cmp_df["Scenario"].astype(str)
-                _load_cmp_df["Scenario"] = pd.Categorical(
-                    _load_cmp_df["Scenario"], categories=_load_cmp_scenarios, ordered=True
+                _load_cmp_df = _loads_build_scenario_comparison_df(
+                    file_bytes_loads,
+                    uploaded_file.name,
+                    _load_cmp_scenarios,
+                    selected_load,
                 )
-                _load_cmp_df = _load_cmp_df.sort_values("Scenario", kind="stable").reset_index(drop=True)
 
-                # 1) Annual load and annual energy required for load coverage share the same energy unit.
-                _fig_load_cmp_annual = go.Figure()
-                for _i_sc, _sc in enumerate(_load_cmp_scenarios):
-                    _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
-                    if _hit.empty:
-                        continue
-                    _row = _hit.iloc[0]
-                    _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
-                    _fig_load_cmp_annual.add_trace(go.Bar(
-                        x=["Total Annual Load", "Energy for Load Coverage"],
-                        y=[
-                            float(_row["Total Annual Load (kWh/a)"]),
-                            float(_row["Annual Energy for Load Coverage (kWh/a)"]),
-                        ],
-                        name=str(_sc),
-                        marker=dict(color=_col),
-                        text=[
-                            f"{float(_row['Total Annual Load (kWh/a)']):,.0f}",
-                            f"{float(_row['Annual Energy for Load Coverage (kWh/a)']):,.0f}",
-                        ],
-                        textposition="outside",
-                        cliponaxis=False,
-                        customdata=np.array([
-                            [str(_row["Matched Load"]), str(_row["Matched Energy Use"])],
-                            [str(_row["Matched Load"]), str(_row["Matched Energy Use"])],
-                        ], dtype=object),
-                        hovertemplate=(
-                            "<b>%{fullData.name}</b><br>%{x}: %{y:,.1f} kWh/a<br>"
-                            "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<extra></extra>"
-                        ),
-                    ))
-                _fig_load_cmp_annual.update_layout(
-                    title="Annual Load and Energy for Load Coverage",
-                    barmode="group",
-                    bargap=0.24,
-                    bargroupgap=0.12,
-                    xaxis_title="",
-                    yaxis_title="kWh/a",
-                    height=520,
-                    legend_title_text="Scenario",
-                    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
-                    margin=dict(l=45, r=20, t=60, b=115),
-                )
-                _fig_load_cmp_annual.update_yaxes(rangemode="tozero")
+                if _load_cmp_df.empty:
+                    st.info("No scenario load data is available for comparison.")
+                else:
+                    _saved_load_cmp_colors = st.session_state.get("color_map_scenarios", {})
+                    if not isinstance(_saved_load_cmp_colors, dict):
+                        _saved_load_cmp_colors = {}
+                    _load_cmp_colors = {
+                        str(sc): str(_saved_load_cmp_colors.get(
+                            str(sc),
+                            SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)]
+                        ))
+                        for i, sc in enumerate(_load_cmp_scenarios)
+                    }
 
-                # 2) Peak and 95th percentile share the same load-power unit.
-                _fig_load_cmp_power = go.Figure()
-                for _i_sc, _sc in enumerate(_load_cmp_scenarios):
-                    _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
-                    if _hit.empty:
-                        continue
-                    _row = _hit.iloc[0]
-                    _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
-                    _fig_load_cmp_power.add_trace(go.Bar(
-                        x=["Peak Load", "95th Percentile Load"],
-                        y=[
-                            float(_row["Peak Load (kW)"]),
-                            float(_row["95th Percentile Load (kW)"]),
-                        ],
-                        name=str(_sc),
-                        marker=dict(color=_col),
-                        text=[
-                            f"{float(_row['Peak Load (kW)']):,.1f}",
-                            f"{float(_row['95th Percentile Load (kW)']):,.1f}",
-                        ],
-                        textposition="outside",
-                        cliponaxis=False,
-                        customdata=np.array([
-                            [str(_row["Matched Load"])],
-                            [str(_row["Matched Load"])],
-                        ], dtype=object),
-                        hovertemplate=(
-                            "<b>%{fullData.name}</b><br>%{x}: %{y:,.1f} kW<br>"
-                            "Matched load: %{customdata[0]}<extra></extra>"
-                        ),
-                    ))
-                _fig_load_cmp_power.update_layout(
-                    title="Peak and 95th Percentile Load",
-                    barmode="group",
-                    bargap=0.24,
-                    bargroupgap=0.12,
-                    xaxis_title="",
-                    yaxis_title="kW",
-                    height=520,
-                    legend_title_text="Scenario",
-                    legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
-                    margin=dict(l=45, r=20, t=60, b=115),
-                )
-                _fig_load_cmp_power.update_yaxes(rangemode="tozero")
+                    _load_cmp_df["Scenario"] = _load_cmp_df["Scenario"].astype(str)
+                    _load_cmp_df["Scenario"] = pd.Categorical(
+                        _load_cmp_df["Scenario"], categories=_load_cmp_scenarios, ordered=True
+                    )
+                    _load_cmp_df = _load_cmp_df.sort_values("Scenario", kind="stable").reset_index(drop=True)
 
-                # 3) Annual system efficiency by scenario.
-                _fig_load_cmp_eff = go.Figure()
-                for _i_sc, _sc in enumerate(_load_cmp_scenarios):
-                    _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
-                    if _hit.empty:
-                        continue
-                    _row = _hit.iloc[0]
-                    _eff = pd.to_numeric(_row["Annual System Efficiency"], errors="coerce")
-                    _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
-                    _fig_load_cmp_eff.add_trace(go.Bar(
-                        x=[str(_sc)],
-                        y=[float(_eff) if pd.notna(_eff) and np.isfinite(float(_eff)) else 0.0],
-                        name=str(_sc),
-                        marker=dict(color=_col),
-                        showlegend=False,
-                        text=[f"{float(_eff):,.2f}" if pd.notna(_eff) and np.isfinite(float(_eff)) else "n/a"],
-                        textposition="outside",
-                        cliponaxis=False,
-                        customdata=np.array([[str(_row["Matched Load"]), str(_row["Matched Energy Use"]) ]], dtype=object),
-                        hovertemplate=(
-                            "<b>%{x}</b><br>Annual System Efficiency: %{text}<br>"
-                            "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<extra></extra>"
-                        ),
-                    ))
-                _fig_load_cmp_eff.update_layout(
-                    title="Annual System Efficiency",
-                    bargap=0.24,
-                    xaxis_title="Scenario",
-                    yaxis_title="Load / Energy",
-                    height=520,
-                    margin=dict(l=45, r=20, t=60, b=75),
-                )
-                _fig_load_cmp_eff.update_yaxes(rangemode="tozero")
+                    # 1) Annual load and annual energy required for load coverage share the same energy unit.
+                    _fig_load_cmp_annual = go.Figure()
+                    for _i_sc, _sc in enumerate(_load_cmp_scenarios):
+                        _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
+                        if _hit.empty:
+                            continue
+                        _row = _hit.iloc[0]
+                        _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
+                        _fig_load_cmp_annual.add_trace(go.Bar(
+                            x=["Total Annual Load", "Energy for Load Coverage"],
+                            y=[
+                                float(_row["Total Annual Load (kWh/a)"]),
+                                float(_row["Annual Energy for Load Coverage (kWh/a)"]),
+                            ],
+                            name=str(_sc),
+                            marker=dict(color=_col),
+                            text=[
+                                f"{float(_row['Total Annual Load (kWh/a)']):,.0f}",
+                                f"{float(_row['Annual Energy for Load Coverage (kWh/a)']):,.0f}",
+                            ],
+                            textposition="outside",
+                            cliponaxis=False,
+                            customdata=np.array([
+                                [str(_row["Matched Load"]), str(_row["Matched Energy Use"])],
+                                [str(_row["Matched Load"]), str(_row["Matched Energy Use"])],
+                            ], dtype=object),
+                            hovertemplate=(
+                                "<b>%{fullData.name}</b><br>%{x}: %{y:,.1f} kWh/a<br>"
+                                "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<extra></extra>"
+                            ),
+                        ))
+                    _fig_load_cmp_annual.update_layout(
+                        title="Annual Load and Energy for Load Coverage",
+                        barmode="group",
+                        bargap=0.24,
+                        bargroupgap=0.12,
+                        xaxis_title="",
+                        yaxis_title="kWh/a",
+                        height=520,
+                        legend_title_text="Scenario",
+                        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+                        margin=dict(l=45, r=20, t=60, b=115),
+                    )
+                    _fig_load_cmp_annual.update_yaxes(rangemode="tozero")
 
-                # 4) Maximum daily load sum by scenario.
-                _fig_load_cmp_daily = go.Figure()
-                for _i_sc, _sc in enumerate(_load_cmp_scenarios):
-                    _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
-                    if _hit.empty:
-                        continue
-                    _row = _hit.iloc[0]
-                    _val = float(_row["Maximum Daily Load Sum (kWh/day)"])
-                    _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
-                    _fig_load_cmp_daily.add_trace(go.Bar(
-                        x=[str(_sc)],
-                        y=[_val],
-                        name=str(_sc),
-                        marker=dict(color=_col),
-                        showlegend=False,
-                        text=[f"{_val:,.0f}"],
-                        textposition="outside",
-                        cliponaxis=False,
-                        customdata=np.array([[str(_row["Matched Load"]) ]], dtype=object),
-                        hovertemplate=(
-                            "<b>%{x}</b><br>Maximum daily load sum: %{y:,.1f} kWh/day<br>"
-                            "Matched load: %{customdata[0]}<extra></extra>"
-                        ),
-                    ))
-                _fig_load_cmp_daily.update_layout(
-                    title="Maximum Daily Load Sum",
-                    bargap=0.24,
-                    xaxis_title="Scenario",
-                    yaxis_title="kWh/day",
-                    height=520,
-                    margin=dict(l=45, r=20, t=60, b=75),
-                )
-                _fig_load_cmp_daily.update_yaxes(rangemode="tozero")
+                    # 2) Peak and 95th percentile share the same load-power unit.
+                    _fig_load_cmp_power = go.Figure()
+                    for _i_sc, _sc in enumerate(_load_cmp_scenarios):
+                        _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
+                        if _hit.empty:
+                            continue
+                        _row = _hit.iloc[0]
+                        _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
+                        _fig_load_cmp_power.add_trace(go.Bar(
+                            x=["Peak Load", "95th Percentile Load"],
+                            y=[
+                                float(_row["Peak Load (kW)"]),
+                                float(_row["95th Percentile Load (kW)"]),
+                            ],
+                            name=str(_sc),
+                            marker=dict(color=_col),
+                            text=[
+                                f"{float(_row['Peak Load (kW)']):,.1f}",
+                                f"{float(_row['95th Percentile Load (kW)']):,.1f}",
+                            ],
+                            textposition="outside",
+                            cliponaxis=False,
+                            customdata=np.array([
+                                [str(_row["Matched Load"])],
+                                [str(_row["Matched Load"])],
+                            ], dtype=object),
+                            hovertemplate=(
+                                "<b>%{fullData.name}</b><br>%{x}: %{y:,.1f} kW<br>"
+                                "Matched load: %{customdata[0]}<extra></extra>"
+                            ),
+                        ))
+                    _fig_load_cmp_power.update_layout(
+                        title="Peak and 95th Percentile Load",
+                        barmode="group",
+                        bargap=0.24,
+                        bargroupgap=0.12,
+                        xaxis_title="",
+                        yaxis_title="kW",
+                        height=520,
+                        legend_title_text="Scenario",
+                        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+                        margin=dict(l=45, r=20, t=60, b=115),
+                    )
+                    _fig_load_cmp_power.update_yaxes(rangemode="tozero")
 
-                _cmp_row1_col1, _cmp_row1_col2 = st.columns(2)
-                with _cmp_row1_col1:
-                    st_plotly_chart(_fig_load_cmp_annual, use_container_width=True, key="loads_scenario_comparison_annual")
-                with _cmp_row1_col2:
-                    st_plotly_chart(_fig_load_cmp_power, use_container_width=True, key="loads_scenario_comparison_power")
+                    # 3) Annual system efficiency by scenario.
+                    _fig_load_cmp_eff = go.Figure()
+                    for _i_sc, _sc in enumerate(_load_cmp_scenarios):
+                        _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
+                        if _hit.empty:
+                            continue
+                        _row = _hit.iloc[0]
+                        _eff = pd.to_numeric(_row["Annual System Efficiency"], errors="coerce")
+                        _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
+                        _fig_load_cmp_eff.add_trace(go.Bar(
+                            x=[str(_sc)],
+                            y=[float(_eff) if pd.notna(_eff) and np.isfinite(float(_eff)) else 0.0],
+                            name=str(_sc),
+                            marker=dict(color=_col),
+                            showlegend=False,
+                            text=[f"{float(_eff):,.2f}" if pd.notna(_eff) and np.isfinite(float(_eff)) else "n/a"],
+                            textposition="outside",
+                            cliponaxis=False,
+                            customdata=np.array([[str(_row["Matched Load"]), str(_row["Matched Energy Use"]) ]], dtype=object),
+                            hovertemplate=(
+                                "<b>%{x}</b><br>Annual System Efficiency: %{text}<br>"
+                                "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<extra></extra>"
+                            ),
+                        ))
+                    _fig_load_cmp_eff.update_layout(
+                        title="Annual System Efficiency",
+                        bargap=0.24,
+                        xaxis_title="Scenario",
+                        yaxis_title="Load / Energy",
+                        height=520,
+                        margin=dict(l=45, r=20, t=60, b=75),
+                    )
+                    _fig_load_cmp_eff.update_yaxes(rangemode="tozero")
 
-                _cmp_row2_col1, _cmp_row2_col2 = st.columns(2)
-                with _cmp_row2_col1:
-                    st_plotly_chart(_fig_load_cmp_eff, use_container_width=True, key="loads_scenario_comparison_efficiency")
-                with _cmp_row2_col2:
-                    st_plotly_chart(_fig_load_cmp_daily, use_container_width=True, key="loads_scenario_comparison_daily")
+                    # 4) Maximum daily load sum by scenario.
+                    _fig_load_cmp_daily = go.Figure()
+                    for _i_sc, _sc in enumerate(_load_cmp_scenarios):
+                        _hit = _load_cmp_df.loc[_load_cmp_df["Scenario"].astype(str) == str(_sc)]
+                        if _hit.empty:
+                            continue
+                        _row = _hit.iloc[0]
+                        _val = float(_row["Maximum Daily Load Sum (kWh/day)"])
+                        _col = _load_cmp_colors.get(str(_sc), SCENARIO_COLOR_PALETTE[_i_sc % len(SCENARIO_COLOR_PALETTE)])
+                        _fig_load_cmp_daily.add_trace(go.Bar(
+                            x=[str(_sc)],
+                            y=[_val],
+                            name=str(_sc),
+                            marker=dict(color=_col),
+                            showlegend=False,
+                            text=[f"{_val:,.0f}"],
+                            textposition="outside",
+                            cliponaxis=False,
+                            customdata=np.array([[str(_row["Matched Load"]) ]], dtype=object),
+                            hovertemplate=(
+                                "<b>%{x}</b><br>Maximum daily load sum: %{y:,.1f} kWh/day<br>"
+                                "Matched load: %{customdata[0]}<extra></extra>"
+                            ),
+                        ))
+                    _fig_load_cmp_daily.update_layout(
+                        title="Maximum Daily Load Sum",
+                        bargap=0.24,
+                        xaxis_title="Scenario",
+                        yaxis_title="kWh/day",
+                        height=520,
+                        margin=dict(l=45, r=20, t=60, b=75),
+                    )
+                    _fig_load_cmp_daily.update_yaxes(rangemode="tozero")
+
+                    _cmp_row1_col1, _cmp_row1_col2 = st.columns(2)
+                    with _cmp_row1_col1:
+                        st_plotly_chart(_fig_load_cmp_annual, use_container_width=True, key="loads_scenario_comparison_annual")
+                    with _cmp_row1_col2:
+                        st_plotly_chart(_fig_load_cmp_power, use_container_width=True, key="loads_scenario_comparison_power")
+
+                    _cmp_row2_col1, _cmp_row2_col2 = st.columns(2)
+                    with _cmp_row2_col1:
+                        st_plotly_chart(_fig_load_cmp_eff, use_container_width=True, key="loads_scenario_comparison_efficiency")
+                    with _cmp_row2_col2:
+                        st_plotly_chart(_fig_load_cmp_daily, use_container_width=True, key="loads_scenario_comparison_daily")
 
         # -------------------------
         # On-site Generation Self-Consumption (hourly) — uses On-site_Generation from Loads_Balance
