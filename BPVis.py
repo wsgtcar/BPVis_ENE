@@ -16400,25 +16400,6 @@ with tab4:
             st.subheader("Load KPI's")
             st.metric("Total Load", f"{total_load_selected:,.0f} kWh")
             st.metric("Maximum Load", f"{max_load_selected:,.1f} kW")
-            custom_percentile = st.number_input(
-                "Custom Percentile (%)",
-                min_value=0.0,
-                max_value=100.0,
-                step=0.1,
-                format="%.1f",
-                key=_custom_percentile_key,
-                help="Percentile calculated from the total selected load series in kW. Decimal values such as 99.6 are supported.",
-            )
-            _custom_percentile_series = sum_load.dropna().astype(float)
-            custom_percentile_load = (
-                float(np.percentile(_custom_percentile_series, float(custom_percentile)))
-                if not _custom_percentile_series.empty else np.nan
-            )
-            st.metric(
-                "Custom Percentile",
-                f"{custom_percentile_load:,.1f} kW" if np.isfinite(custom_percentile_load) else "n/a",
-                help=f"{float(custom_percentile):g}th percentile of the total {ui_name(selected_load)} load.",
-            )
             st.metric("Minimum Load", f"{min_load_selected:,.1f} kW")
             st.metric("Maximum Specific Load", f"{max_specific_load:,.1f} W/m2")
             st.metric("Minimum Specific Load", f"{min_specific_load:,.1f} W/m2")
@@ -16920,6 +16901,49 @@ with tab4:
                 opacity=0.62,
                 hovertemplate=f"<b>{ghost_label}</b><br>Hours %{{x:.1f}}%<br>Load %{{y:.2f}} kW<extra></extra>",
             ))
+        # User-defined percentile of the total selected load (kW), visualized on the load duration curve.
+        st.subheader(f"Load Duration Curve — {ui_name(selected_load)}")
+        ldc_col_chart, ldc_col_kpi = st.columns([4, 1])
+        with ldc_col_kpi:
+            st.markdown("#### Custom Percentile")
+            custom_percentile = st.number_input(
+                "Custom Percentile (%)",
+                min_value=0.0,
+                max_value=100.0,
+                step=0.1,
+                format="%.1f",
+                key=_custom_percentile_key,
+                help="Percentile calculated from the total selected load series in kW. Decimal values such as 99.6 are supported.",
+            )
+        _custom_percentile_series = sum_load.dropna().astype(float)
+        custom_percentile_load = (
+            float(np.percentile(_custom_percentile_series, float(custom_percentile)))
+            if not _custom_percentile_series.empty else np.nan
+        )
+        custom_percentile_exceedance = float(np.clip(100.0 - float(custom_percentile), 0.0, 100.0))
+
+        if np.isfinite(custom_percentile_load):
+            ldc_fig.add_vline(
+                x=custom_percentile_exceedance,
+                line_width=3,
+                line_dash="dash",
+                line_color="#374151",
+                opacity=0.95,
+            )
+            ldc_fig.add_trace(go.Scatter(
+                x=[custom_percentile_exceedance],
+                y=[custom_percentile_load],
+                mode="markers",
+                name="Custom Percentile",
+                showlegend=False,
+                marker=dict(size=14, color="#111827", line=dict(color="white", width=2)),
+                hovertemplate=(
+                    f"<b>{float(custom_percentile):g}th percentile</b><br>"
+                    "Load: %{y:,.2f} kW<br>"
+                    "Equivalent exceedance on duration curve: %{x:.1f}%<extra></extra>"
+                ),
+            ))
+
         ldc_fig.update_layout(
             xaxis_title="Percentage of Hours (%)",
             yaxis_title=f"{ui_name(selected_load)} (kW)",
@@ -16928,8 +16952,18 @@ with tab4:
             showlegend=bool(ghost_load)
         )
 
-        st.subheader(f"Load Duration Curve — {ui_name(selected_load)}")
-        st_plotly_chart(ldc_fig, use_container_width=True)
+        with ldc_col_chart:
+            st_plotly_chart(ldc_fig, use_container_width=True)
+        with ldc_col_kpi:
+            st.metric(
+                "Custom Percentile",
+                f"{custom_percentile_load:,.1f} kW" if np.isfinite(custom_percentile_load) else "n/a",
+                help=f"{float(custom_percentile):g}th percentile of the total {ui_name(selected_load)} load.",
+            )
+            st.caption(
+                f"On the load duration curve, the {float(custom_percentile):g}th percentile corresponds to "
+                f"{custom_percentile_exceedance:.1f}% exceedance."
+            )
 
         # --- Scenario Comparison: same logical load across all existing scenarios ---
         with st.expander("Scenario Comparisson", expanded=False):
