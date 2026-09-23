@@ -9795,6 +9795,63 @@ with tab1:
                 _activate_scenario(new_name)
                 st.rerun()
 
+            # Move the active scenario one position upward in the canonical scenario order.
+            # Scenario names and all scenario-specific data remain attached to the same name;
+            # only the ordering changes. Excel numbered Energy_Balance/Loads_Balance sheets are
+            # regenerated from this order during export, so their numbering follows the new order.
+            _scenario_move_up_disabled = IS_VIEWER_MODE or current_active not in scenario_names or scenario_names.index(current_active) <= 0
+            if st.button(
+                "Move Up",
+                use_container_width=True,
+                key="scenario_btn_move_up",
+                disabled=_scenario_move_up_disabled,
+                help=_viewer_widget_help("Move the active scenario one position up. Exported numbered Energy/Loads sheets follow this order."),
+            ):
+                _save_current_scenario_payload(current_active)
+                _old_order = list(scenarios.keys())
+                if current_active in _old_order:
+                    _idx_move = _old_order.index(current_active)
+                    if _idx_move > 0:
+                        _new_order = list(_old_order)
+                        _new_order[_idx_move - 1], _new_order[_idx_move] = _new_order[_idx_move], _new_order[_idx_move - 1]
+
+                        # Rebuild the canonical scenario dict in the requested order.
+                        scenarios = {name: scenarios[name] for name in _new_order if name in scenarios}
+                        st.session_state["scenarios"] = scenarios
+
+                        # Keep scenario-keyed auxiliary state in the same order without changing
+                        # which raw data belongs to which scenario name.
+                        def _reorder_scenario_state_dict(_state_key):
+                            try:
+                                _d = st.session_state.get(_state_key)
+                                if not isinstance(_d, dict):
+                                    return
+                                _ordered = {name: _d[name] for name in _new_order if name in _d}
+                                for _k, _v in _d.items():
+                                    if _k not in _ordered:
+                                        _ordered[_k] = _v
+                                st.session_state[_state_key] = _ordered
+                            except Exception:
+                                pass
+
+                        for _state_key in [
+                            _RAW_ENERGY_SCENARIO_OVERRIDES_KEY,
+                            _RAW_ENERGY_SCENARIO_DRAFTS_KEY,
+                            _RAW_ENERGY_SCENARIO_DIRTY_KEY,
+                            _RAW_LOADS_SCENARIO_OVERRIDES_KEY,
+                            _RAW_LOADS_SCENARIO_DRAFTS_KEY,
+                            _RAW_LOADS_SCENARIO_DIRTY_KEY,
+                            "color_map_scenarios",
+                        ]:
+                            _reorder_scenario_state_dict(_state_key)
+
+                        # Keep the same active scenario after reordering. The selector is safely
+                        # synchronized on the next run before its widget is instantiated.
+                        st.session_state["active_scenario"] = current_active
+                        st.session_state["_prev_active_scenario"] = current_active
+                        st.session_state["_active_scenario_selector_sync_to"] = current_active
+                        st.rerun()
+
             rename_to = st.text_input("Rename to", value="", key="scenario_rename_to", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
             if st.button("Rename", use_container_width=True, key="scenario_btn_rename", disabled=IS_VIEWER_MODE, help=_viewer_widget_help()) :
                 rename_to_clean = str(rename_to).strip()
