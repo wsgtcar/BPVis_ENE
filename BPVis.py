@@ -269,9 +269,12 @@ def _viewer_read_project_bytes_cached(project_path_str: str, project_mtime_ns: i
 
 class _ViewerProjectFile:
     """Minimal UploadedFile-compatible wrapper used by the existing BPVis data flow."""
-    def __init__(self, name: str, file_bytes: bytes):
+    def __init__(self, name: str, file_bytes: bytes, file_id: Optional[str] = None):
         self.name = str(name)
         self._file_bytes = file_bytes
+        # Match Streamlit UploadedFile's stable revision identity so the main app can avoid
+        # re-hashing the complete Viewer workbook on every rerun.
+        self.file_id = str(file_id) if file_id is not None else None
 
     def getvalue(self) -> bytes:
         return self._file_bytes
@@ -286,7 +289,11 @@ def _viewer_project_file_from_assignment(data_source_file: str):
         )
     stat = project_path.stat()
     file_bytes = _viewer_read_project_bytes_cached(str(project_path), int(stat.st_mtime_ns), int(stat.st_size))
-    return _ViewerProjectFile(project_path.name, file_bytes)
+    return _ViewerProjectFile(
+        project_path.name,
+        file_bytes,
+        file_id=f"viewer:{project_path}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}",
+    )
 
 
 def _auth_parse_expiration_date(value):
@@ -1085,6 +1092,24 @@ def _apply_master_energy_use_filter_to_loads_df(df: pd.DataFrame) -> pd.DataFram
 
 
 def _workbook_token(file_bytes: bytes, filename: str = "") -> str:
+    """Return a stable workbook token without repeatedly hashing the full workbook on reruns.
+
+    The uploaded workbook bytes are captured once per Streamlit run. Once their token has been
+    established, all downstream Energy_Balance/Loads_Balance getters reuse it. This avoids
+    repeatedly calculating an MD5 over the complete .xlsx file every time a tab requests data.
+    """
+    try:
+        cached_token = st.session_state.get("_bpvis_current_workbook_token")
+        cached_name = st.session_state.get("_bpvis_current_workbook_filename")
+        cached_bytes_id = st.session_state.get("_bpvis_current_workbook_bytes_id")
+        if (
+            cached_token
+            and str(cached_name or "") == str(filename or "")
+            and cached_bytes_id == id(file_bytes)
+        ):
+            return str(cached_token)
+    except Exception:
+        pass
     try:
         return f"{filename}|{hashlib.md5(file_bytes).hexdigest()}"
     except Exception:
@@ -1490,14 +1515,16 @@ def get_global_energy_balance_df(file_bytes: bytes, filename: str = "") -> pd.Da
 
 
 def get_scenario_energy_balance_override(scenario_name: Optional[str]) -> Optional[pd.DataFrame]:
-    """Return a scenario-specific Energy_Balance override if one exists."""
+    """Return a scenario-specific Energy_Balance override if one exists.
+
+    Overrides are sanitized when they are loaded or committed. Re-sanitizing here on every
+    calculation rerun needlessly copies/converts the same dataframe many times.
+    """
     if scenario_name is None or not str(scenario_name).strip():
         return None
     overrides = _scenario_energy_overrides()
     df = overrides.get(str(scenario_name))
-    if isinstance(df, pd.DataFrame):
-        return sanitize_energy_balance_df(df)
-    return None
+    return df if isinstance(df, pd.DataFrame) else None
 
 
 def set_scenario_energy_balance_override(scenario_name: str, df: pd.DataFrame) -> None:
@@ -1525,14 +1552,16 @@ def delete_scenario_energy_balance_override(scenario_name: str) -> None:
 
 
 def get_scenario_loads_balance_override(scenario_name: Optional[str]) -> Optional[pd.DataFrame]:
-    """Return a scenario-specific Loads_Balance override if one exists."""
+    """Return a scenario-specific Loads_Balance override if one exists.
+
+    Loads_Balance can contain 8,760+ rows. Overrides are already sanitized when loaded or
+    committed, so sanitizing them again on every getter call is an expensive no-op.
+    """
     if scenario_name is None or not str(scenario_name).strip():
         return None
     overrides = _scenario_loads_overrides()
     df = overrides.get(str(scenario_name))
-    if isinstance(df, pd.DataFrame):
-        return sanitize_loads_balance_df(df)
-    return None
+    return df if isinstance(df, pd.DataFrame) else None
 
 
 def set_scenario_loads_balance_override(scenario_name: str, df: pd.DataFrame) -> None:
@@ -9064,8 +9093,34 @@ def find_stranding_year(asset: pd.Series, limit: pd.Series) -> Optional[int]:
 # =========================
 preloaded = None
 if uploaded_file:
+    # Capture the workbook bytes once per Streamlit run. All downstream tabs reuse this exact
+    # bytes object instead of repeatedly calling UploadedFile.getvalue().
     file_bytes = uploaded_file.getvalue()
-    cfg_saved = read_config_from_excel(file_bytes)
+
+    # Establish a cheap stable workbook revision ID before any expensive parsing. Edit-mode
+    # uploads expose Streamlit's file_id; Viewer-mode project wrappers expose an equivalent
+    # revision ID based on path/mtime/size. Content hashing is only a fallback.
+    _upload_file_id = getattr(uploaded_file, "file_id", None)
+    if _upload_file_id:
+        wb_token = f"{uploaded_file.name}|upload:{_upload_file_id}"
+    else:
+        wb_token = f"{uploaded_file.name}|{hashlib.md5(file_bytes).hexdigest()}"
+    st.session_state["_bpvis_current_workbook_token"] = wb_token
+    st.session_state["_bpvis_current_workbook_filename"] = uploaded_file.name
+    st.session_state["_bpvis_current_workbook_bytes_id"] = id(file_bytes)
+
+    # st.cache_data still has to hash byte arguments to check a cache hit. Keep an additional
+    # session-level config cache keyed by the cheap workbook revision token so normal widget
+    # reruns do not hash the full .xlsx just to retrieve unchanged configuration sheets.
+    if (
+        st.session_state.get("_bpvis_config_workbook_token") == wb_token
+        and isinstance(st.session_state.get("_bpvis_config_cached"), dict)
+    ):
+        cfg_saved = st.session_state["_bpvis_config_cached"]
+    else:
+        cfg_saved = read_config_from_excel(file_bytes)
+        st.session_state["_bpvis_config_workbook_token"] = wb_token
+        st.session_state["_bpvis_config_cached"] = cfg_saved
 
     saved_name, saved_area, saved_currency, saved_building_use, saved_country, saved_lat, saved_lon, saved_year = \
         parse_project_df_with_building_use(cfg_saved["project"])
@@ -9141,8 +9196,7 @@ if uploaded_file:
     }
 
     # --- Seed Project Data from file on each new upload (token-based)
-    #     This keeps Project Data global (not scenario-dependent) and ensures it reloads correctly from the workbook.
-    wb_token = f"{uploaded_file.name}|{hashlib.md5(file_bytes).hexdigest()}"
+    #     wb_token was established once at the beginning of preload and is reused throughout this rerun.
 
     # --- Seed Raw Data (Energy_Balance / Loads_Balance) from file on each new upload (token-based)
     #     Primary scenario-specific raw data is stored in numbered duplicate sheets:
@@ -9486,9 +9540,9 @@ with tab1:
         # ---- Load data
         # Keep an unfiltered copy for configuration/scenario persistence; calculations use the filtered copy.
         df_all_energy_uses = get_energy_balance_df(
-            uploaded_file.getvalue(), uploaded_file.name, apply_master_filter=False
+            file_bytes, uploaded_file.name, apply_master_filter=False
         )
-        df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
+        df = get_energy_balance_df(file_bytes, uploaded_file.name)
 
         # ---- Wide->Long transform for plotting and grouping
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
@@ -9556,12 +9610,12 @@ with tab1:
         # Resolve Energy_Balance again after scenario initialization so first render also uses
         # an active scenario-specific raw-data override when one was loaded from the workbook.
         df_all_energy_uses = get_energy_balance_df(
-            uploaded_file.getvalue(),
+            file_bytes,
             uploaded_file.name,
             scenario_name=st.session_state.get("active_scenario"),
             apply_master_filter=False,
         )
-        df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=st.session_state.get("active_scenario"))
+        df = get_energy_balance_df(file_bytes, uploaded_file.name, scenario_name=st.session_state.get("active_scenario"))
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
         df_melted_all = df_all_energy_uses.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
         end_uses = df_melted_all["End_Use"].unique().tolist()
@@ -9618,7 +9672,7 @@ with tab1:
                 """Return End Uses from the scenario-specific Energy_Balance if available."""
                 try:
                     _df = get_energy_balance_df(
-                        uploaded_file.getvalue(),
+                        file_bytes,
                         uploaded_file.name,
                         scenario_name=_scenario_name,
                         apply_master_filter=False,
@@ -9683,14 +9737,14 @@ with tab1:
                 try:
                     set_scenario_energy_balance_override(
                         new_name,
-                        get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
+                        get_energy_balance_df(file_bytes, uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
                     )
                 except Exception:
                     pass
                 try:
                     set_scenario_loads_balance_override(
                         new_name,
-                        get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
+                        get_loads_balance_df(file_bytes, uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
                     )
                 except Exception:
                     pass
@@ -9716,14 +9770,14 @@ with tab1:
                 try:
                     set_scenario_energy_balance_override(
                         new_name,
-                        get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
+                        get_energy_balance_df(file_bytes, uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
                     )
                 except Exception:
                     pass
                 try:
                     set_scenario_loads_balance_override(
                         new_name,
-                        get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
+                        get_loads_balance_df(file_bytes, uploaded_file.name, scenario_name=current_active, apply_master_filter=False),
                     )
                 except Exception:
                     pass
@@ -9971,7 +10025,7 @@ with tab1:
             _tariff_preview_loads = pd.DataFrame()
             try:
                 _tariff_preview_energy = get_energy_balance_df(
-                    uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(st.session_state.get("active_scenario", ""))
+                    file_bytes, uploaded_file.name, scenario_name=str(st.session_state.get("active_scenario", ""))
                 )
                 _tariff_preview_rows = _tariff_preview_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
                 _tariff_preview_rows["kWh"] = pd.to_numeric(_tariff_preview_rows["kWh"], errors="coerce").fillna(0.0)
@@ -9983,7 +10037,7 @@ with tab1:
                     lambda _u: str(st.session_state.get(f"source_{_u}", "Electricity"))
                 )
                 _tariff_preview_loads = get_loads_balance_df(
-                    uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(st.session_state.get("active_scenario", "")),
+                    file_bytes, uploaded_file.name, scenario_name=str(st.session_state.get("active_scenario", "")),
                     apply_master_filter=False,
                 )
             except Exception:
@@ -10183,7 +10237,7 @@ with tab1:
 
             # Detect loads from Loads_Balance (if present)
             try:
-                _df_loads_sidebar = get_loads_balance_df(uploaded_file.getvalue(), uploaded_file.name, apply_master_filter=False)
+                _df_loads_sidebar = get_loads_balance_df(file_bytes, uploaded_file.name, apply_master_filter=False)
                 _load_cols = [c for c in _df_loads_sidebar.columns if c not in ["hoy", "doy", "day", "month", "weekday", "hour"]]
             except Exception:
                 _load_cols = []
@@ -10391,12 +10445,12 @@ with tab1:
 
                 scenario_order_export = list(st.session_state.get("scenarios", {}).keys())
                 scenario_energy_sheets_export = build_scenario_energy_balance_sheet_map_for_export(
-                    uploaded_file.getvalue(),
+                    file_bytes,
                     uploaded_file.name,
                     scenario_order_export,
                 )
                 scenario_loads_sheets_export = build_scenario_loads_balance_sheet_map_for_export(
-                    uploaded_file.getvalue(),
+                    file_bytes,
                     uploaded_file.name,
                     scenario_order_export,
                 )
@@ -10442,7 +10496,7 @@ with tab1:
                             st.session_state["scenarios"][st.session_state["active_scenario"]] = capture_scenario_from_widgets(end_uses)
                             if st.session_state.get("_lcc_global_initialized"):
                                 _apply_lcc_global_to_all_scenarios(end_uses)
-                        report_pdf = generate_bpvis_pdf_report(uploaded_file.getvalue(), uploaded_file.name)
+                        report_pdf = generate_bpvis_pdf_report(file_bytes, uploaded_file.name)
                         st.session_state["_generated_report_pdf"] = report_pdf
                         st.session_state["_generated_report_name"] = f"{_report_sanitize_filename(st.session_state.get('project_name', 'BPVis_Project'))}_{_report_sanitize_filename(st.session_state.get('active_scenario', 'Scenario'))}_Report_v2_4_7.pdf"
                     st.success("Report generated successfully.")
@@ -11647,7 +11701,7 @@ with tab6:
             else:
                 project_year_val = int(st.session_state.get("project_year", 2025))
                 # Use annual energy from the uploaded Energy_Balance sheet, adjusted by the active scenario:
-                df_crrem = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
+                df_crrem = get_energy_balance_df(file_bytes, uploaded_file.name)
                 df_crrem_m = df_crrem.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
                 # Apply efficiency factors (scenario-specific)
@@ -12841,9 +12895,9 @@ with tab_lcc:
 
         # Current project/scenario context. Calculations use the master-filtered data,
         # while the LCC configuration keeps the complete underlying End Use list.
-        df_lcc_energy = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name).copy()
+        df_lcc_energy = get_energy_balance_df(file_bytes, uploaded_file.name).copy()
         df_lcc_energy_all = get_energy_balance_df(
-            uploaded_file.getvalue(), uploaded_file.name, apply_master_filter=False
+            file_bytes, uploaded_file.name, apply_master_filter=False
         ).copy()
         end_uses_lcc = [str(c) for c in df_lcc_energy_all.columns if str(c) != "Month"]
         project_year_lcc = int(st.session_state.get("project_year", 2025))
@@ -13086,7 +13140,7 @@ with tab_lcc:
             active_payload_lcc["lcc_global"] = deepcopy(lcc_global_active)
 
         df_lcc_loads = get_loads_balance_df(
-            uploaded_file.getvalue(), uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
+            file_bytes, uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
         )
         active_lcc_cashflow = compute_lcc_cashflow_table_cached(
             df_lcc_energy,
@@ -13130,7 +13184,7 @@ with tab_lcc:
             if ref_scenario_lcc and ref_scenario_lcc in scenarios_lcc and ref_scenario_lcc != active_selected:
                 ref_payload_lcc = deepcopy(scenarios_lcc.get(ref_scenario_lcc, {}))
                 ref_df_lcc_energy = get_energy_balance_df(
-                    uploaded_file.getvalue(),
+                    file_bytes,
                     uploaded_file.name,
                     scenario_name=ref_scenario_lcc,
                 ).copy()
@@ -13139,7 +13193,7 @@ with tab_lcc:
                 ref_payload_lcc["lcc"] = _normalize_lcc_payload(ref_payload_lcc.get("lcc", {}), ref_valid_enduses_lcc)
                 ref_payload_lcc["lcc_global"] = deepcopy(ref_lcc_global_active)
                 ref_df_lcc_loads = get_loads_balance_df(
-                    uploaded_file.getvalue(), uploaded_file.name, scenario_name=ref_scenario_lcc, apply_master_filter=False
+                    file_bytes, uploaded_file.name, scenario_name=ref_scenario_lcc, apply_master_filter=False
                 )
                 ref_lcc_cashflow = compute_lcc_cashflow_table_cached(
                     ref_df_lcc_energy,
@@ -13484,7 +13538,7 @@ with tab7:
                 factors = (payload.get("factors") or {})
                 tariffs = (payload.get("tariffs") or {})
 
-                df_s_raw = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(name))
+                df_s_raw = get_energy_balance_df(file_bytes, uploaded_file.name, scenario_name=str(name))
                 df_base = df_s_raw.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
                 df_s = df_base.copy()
                 df_s["Efficiency_Factor"] = df_s["End_Use"].map(lambda u: float(eff.get(u, 1.0))).fillna(1.0)
@@ -13534,7 +13588,7 @@ with tab7:
                 df_net["co2_factor"] = df_net["Energy_Source"].map(lambda s: float(factors.get(s, 0.0))).fillna(0.0)
                 try:
                     _df_loads_tariff_sc = get_loads_balance_df(
-                        uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(name), apply_master_filter=False
+                        file_bytes, uploaded_file.name, scenario_name=str(name), apply_master_filter=False
                     )
                 except Exception:
                     _df_loads_tariff_sc = pd.DataFrame()
@@ -13755,13 +13809,13 @@ with tab7:
             try:
                 _radar_enduses_all = []
                 try:
-                    _radar_base_df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
+                    _radar_base_df = get_energy_balance_df(file_bytes, uploaded_file.name)
                     _radar_enduses_all.extend([c for c in _radar_base_df.columns if c != "Month"])
                 except Exception:
                     pass
                 for _sc_tmp in scenario_order:
                     try:
-                        _df_tmp = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(_sc_tmp))
+                        _df_tmp = get_energy_balance_df(file_bytes, uploaded_file.name, scenario_name=str(_sc_tmp))
                         _radar_enduses_all.extend([c for c in _df_tmp.columns if c != "Month"])
                     except Exception:
                         pass
@@ -13773,7 +13827,7 @@ with tab7:
                     _radar_crrem_dataset = None
 
                 _radar_raw_df = _build_scenario_performance_radar_raw_df(
-                    uploaded_file.getvalue(),
+                    file_bytes,
                     uploaded_file.name,
                     scenarios,
                     scenario_order,
@@ -14037,13 +14091,13 @@ with tab7:
                 # discounted costs as dashed lines, using the same scenario color for both.
                 all_enduses_lcc_cmp = []
                 try:
-                    _base_lcc_df_cmp = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
+                    _base_lcc_df_cmp = get_energy_balance_df(file_bytes, uploaded_file.name)
                     all_enduses_lcc_cmp.extend([c for c in _base_lcc_df_cmp.columns if c != "Month"])
                 except Exception:
                     pass
                 try:
                     for _sc_name in scenario_order:
-                        _df_tmp_lcc = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(_sc_name))
+                        _df_tmp_lcc = get_energy_balance_df(file_bytes, uploaded_file.name, scenario_name=str(_sc_name))
                         all_enduses_lcc_cmp.extend([c for c in _df_tmp_lcc.columns if c != "Month"])
                 except Exception:
                     pass
@@ -14071,10 +14125,10 @@ with tab7:
                         _payload_sc = scenarios.get(_sc_name, {}) or {}
                         _color_sc = scenario_color_map.get(_sc_name, SCENARIO_COLOR_PALETTE[_idx_sc % len(SCENARIO_COLOR_PALETTE)])
                         try:
-                            _df_energy_sc = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(_sc_name))
+                            _df_energy_sc = get_energy_balance_df(file_bytes, uploaded_file.name, scenario_name=str(_sc_name))
                             _end_uses_sc = [_canon_enduse_name(str(c)) for c in _df_energy_sc.columns if c != "Month"]
                             _df_loads_sc = get_loads_balance_df(
-                                uploaded_file.getvalue(), uploaded_file.name, scenario_name=str(_sc_name), apply_master_filter=False
+                                file_bytes, uploaded_file.name, scenario_name=str(_sc_name), apply_master_filter=False
                             )
                             _cf_sc = compute_lcc_cashflow_table_cached(
                                 _df_energy_sc,
@@ -14261,7 +14315,7 @@ with tab7:
                         _payload_sc = scenarios.get(_sc_name, {}) or {}
                         try:
                             _df_energy_em_sc = get_energy_balance_df(
-                                uploaded_file.getvalue(),
+                                file_bytes,
                                 uploaded_file.name,
                                 scenario_name=str(_sc_name),
                             )
@@ -14740,7 +14794,7 @@ with tab7:
 with tab1_factors:
     if uploaded_file:
         # ---- Load data
-        df_eff = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
+        df_eff = get_energy_balance_df(file_bytes, uploaded_file.name)
 
         # ---- Wide->Long transform for plotting and grouping
         df_melted_eff = df_eff.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
@@ -14977,7 +15031,7 @@ with tab1_factors:
 with tab2:
     if uploaded_file:
         # Ensure Energy_Source exists (same mapping as Tab 1)
-        df = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
+        df = get_energy_balance_df(file_bytes, uploaded_file.name)
         df_melted = df.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
         # ---- Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
         eff_map = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted["End_Use"].unique()}
@@ -15221,7 +15275,7 @@ with tab2:
 with tab3:
     if uploaded_file:
         # Ensure we have the same melted data + mapping used in other tabs
-        df_cost_base = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name).copy()
+        df_cost_base = get_energy_balance_df(file_bytes, uploaded_file.name).copy()
         df_melted_cost = df_cost_base.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
         # ---- Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
         eff_map_cost = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted_cost["End_Use"].unique()}
@@ -15250,7 +15304,7 @@ with tab3:
         }
         try:
             _cost_loads = get_loads_balance_df(
-                uploaded_file.getvalue(), uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
+                file_bytes, uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
             )
         except Exception:
             _cost_loads = pd.DataFrame()
@@ -15551,7 +15605,7 @@ def _loads_find_matching_load(reference_load: str, df_loads: pd.DataFrame) -> Op
     return None
 
 
-def _loads_build_scenario_comparison_df(
+def _loads_build_scenario_comparison_df_uncached(
         file_bytes: bytes,
         filename: str,
         scenario_names: list,
@@ -15637,6 +15691,65 @@ def _loads_build_scenario_comparison_df(
         })
 
     return pd.DataFrame(rows)
+
+
+_LOADS_SCENARIO_COMPARISON_CACHE_KEY = "_loads_scenario_comparison_cache"
+
+def _loads_build_scenario_comparison_df(
+        file_bytes: bytes,
+        filename: str,
+        scenario_names: list,
+        reference_load: str,
+) -> pd.DataFrame:
+    """Cached wrapper for the all-scenario Loads Analysis KPI comparison.
+
+    Streamlit executes expander contents on every script rerun even while the expander is
+    collapsed. This comparison touches every scenario's 8,760-row Loads_Balance, so cache it
+    in session state until the workbook/raw data/master Energy Use filter/load selection changes.
+    """
+    names = tuple(str(x) for x in (scenario_names or []) if str(x).strip())
+    try:
+        energy_overrides = _scenario_energy_overrides()
+        loads_overrides = _scenario_loads_overrides()
+        override_signature = tuple(
+            (name, id(energy_overrides.get(name)), id(loads_overrides.get(name)))
+            for name in names
+        )
+    except Exception:
+        override_signature = tuple()
+
+    try:
+        master_selected = tuple(st.session_state.get(MASTER_ENERGY_FILTER_SELECTED_KEY, []) or [])
+    except Exception:
+        master_selected = tuple()
+
+    signature = (
+        _workbook_token(file_bytes, filename),
+        int(st.session_state.get(_RAW_COMMIT_VERSION_KEY, 0) or 0),
+        names,
+        str(_loads_energy_match_key(reference_load)),
+        bool(_master_energy_filter_enabled()),
+        master_selected,
+        override_signature,
+    )
+
+    cache = st.session_state.get(_LOADS_SCENARIO_COMPARISON_CACHE_KEY)
+    if not isinstance(cache, dict):
+        cache = {}
+    cached = cache.get(signature)
+    if isinstance(cached, pd.DataFrame):
+        return cached.copy(deep=False)
+
+    result = _loads_build_scenario_comparison_df_uncached(
+        file_bytes, filename, list(names), reference_load
+    )
+    # Keep the cache bounded. The result is small, but signatures can accumulate while users
+    # inspect different logical loads or master-filter combinations.
+    if len(cache) >= 16:
+        cache.clear()
+    cache[signature] = result.copy(deep=True)
+    st.session_state[_LOADS_SCENARIO_COMPARISON_CACHE_KEY] = cache
+    return result
 
 
 def _loads_color_for(load_name: str, fallback: str = "#c02419") -> str:
@@ -16152,9 +16265,9 @@ def _loads_typical_day_profile_figure(
 with tab4:
     if uploaded_file:
         # ---- Load data for the active scenario. The optional ghost overlay can point to another scenario.
-        file_bytes_loads = uploaded_file.getvalue()
+        file_bytes_loads = file_bytes
         active_scenario_loads = str(st.session_state.get("active_scenario", globals().get("active_selected", "Base")) or "Base")
-        df_loads = get_loads_balance_df(file_bytes_loads, uploaded_file.name, scenario_name=active_scenario_loads)
+        df_loads = get_loads_balance_df(file_bytes_loads, uploaded_file.name, scenario_name=active_scenario_loads).copy(deep=False)
 
         # columns that are load metrics
         load_cols = _loads_available_load_columns(df_loads)
@@ -16208,7 +16321,7 @@ with tab4:
         with ghost_load_col:
             if ghost_scenario_option != "None":
                 ghost_scenario = str(ghost_scenario_option)
-                df_ghost_loads = get_loads_balance_df(file_bytes_loads, uploaded_file.name, scenario_name=ghost_scenario)
+                df_ghost_loads = get_loads_balance_df(file_bytes_loads, uploaded_file.name, scenario_name=ghost_scenario).copy(deep=False)
                 ghost_load_options = _loads_available_load_columns(df_ghost_loads)
                 if ghost_scenario == active_scenario_loads:
                     ghost_load_options = [c for c in ghost_load_options if c != selected_load]
@@ -17314,7 +17427,7 @@ with tab5:
             # -------------------------
             # Recompute project KPIs (aligned with other tabs)
             # -------------------------
-            df_energy = get_energy_balance_df(uploaded_file.getvalue(), uploaded_file.name)
+            df_energy = get_energy_balance_df(file_bytes, uploaded_file.name)
             df_melted = df_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
 
             # Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
@@ -17368,7 +17481,7 @@ with tab5:
             }
             try:
                 _bm_loads = get_loads_balance_df(
-                    uploaded_file.getvalue(), uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
+                    file_bytes, uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
                 )
             except Exception:
                 _bm_loads = pd.DataFrame()
@@ -17781,8 +17894,8 @@ with tab5:
 # =========================
 with tab8:
     if (not IS_VIEWER_MODE) and uploaded_file:
-        file_bytes = uploaded_file.getvalue()
-        wb_hash = hashlib.md5(file_bytes).hexdigest()[:10]
+        # Reuse the workbook bytes/token captured during preload; avoid another full-file copy/hash.
+        wb_hash = str(wb_token).split("|")[-1][:10]
 
         st.write("## Raw Data")
         st.caption(
