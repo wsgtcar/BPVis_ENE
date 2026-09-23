@@ -16263,6 +16263,11 @@ with tab4:
         p95_specific_load = np.percentile(specific_load.dropna(), 95)
         p80_specific_load = np.percentile(specific_load.dropna(), 80)
 
+        # User-defined percentile of the total selected load (kW), independent from specific-load KPIs.
+        _custom_percentile_key = "loads_custom_percentile"
+        if _custom_percentile_key not in st.session_state:
+            st.session_state[_custom_percentile_key] = 95.0
+
         # Annual System Efficiency = annual load / annual energy use with the same logical name.
         # Match is tolerant of the Excel `_load` / `_kWh` suffixes and common project prefixes/suffixes.
         annual_system_efficiency = None
@@ -16395,6 +16400,25 @@ with tab4:
             st.subheader("Load KPI's")
             st.metric("Total Load", f"{total_load_selected:,.0f} kWh")
             st.metric("Maximum Load", f"{max_load_selected:,.1f} kW")
+            custom_percentile = st.number_input(
+                "Custom Percentile (%)",
+                min_value=0.0,
+                max_value=100.0,
+                step=0.1,
+                format="%.1f",
+                key=_custom_percentile_key,
+                help="Percentile calculated from the total selected load series in kW. Decimal values such as 99.6 are supported.",
+            )
+            _custom_percentile_series = sum_load.dropna().astype(float)
+            custom_percentile_load = (
+                float(np.percentile(_custom_percentile_series, float(custom_percentile)))
+                if not _custom_percentile_series.empty else np.nan
+            )
+            st.metric(
+                "Custom Percentile",
+                f"{custom_percentile_load:,.1f} kW" if np.isfinite(custom_percentile_load) else "n/a",
+                help=f"{float(custom_percentile):g}th percentile of the total {ui_name(selected_load)} load.",
+            )
             st.metric("Minimum Load", f"{min_load_selected:,.1f} kW")
             st.metric("Maximum Specific Load", f"{max_specific_load:,.1f} W/m2")
             st.metric("Minimum Specific Load", f"{min_specific_load:,.1f} W/m2")
