@@ -15662,6 +15662,33 @@ def _loads_find_matching_load(reference_load: str, df_loads: pd.DataFrame) -> Op
     return None
 
 
+def _loads_scenario_efficiency_factor(scenario_name: str, energy_use: Optional[str]) -> float:
+    """Return the stored sidebar efficiency factor for an Energy_Balance end use.
+
+    This follows the exact convention used by Energy Balance (with factors):
+    factored energy = raw Energy_Balance energy / efficiency factor.
+    """
+    if not energy_use:
+        return 1.0
+    try:
+        scenarios = st.session_state.get("scenarios", {}) or {}
+        payload = scenarios.get(str(scenario_name), {}) or {}
+        eff_map = payload.get("efficiency", {}) or {}
+        value = eff_map.get(str(energy_use), None)
+        if value is None:
+            target = _canon_enduse_name(str(energy_use))
+            for key, candidate in eff_map.items():
+                if _canon_enduse_name(str(key)) == target:
+                    value = candidate
+                    break
+        factor = float(value if value is not None else 1.0)
+        if not np.isfinite(factor) or abs(factor) <= 1e-12:
+            return 1.0
+        return factor
+    except Exception:
+        return 1.0
+
+
 def _loads_build_scenario_comparison_df_uncached(
         file_bytes: bytes,
         filename: str,
@@ -15673,10 +15700,10 @@ def _loads_build_scenario_comparison_df_uncached(
     KPI definitions intentionally follow the existing Loads Analysis conventions:
     - Total Annual Load: sum of the presented load series (hourly kW -> kWh/a).
     - Peak Load: maximum load value in the year.
-    - Annual System Efficiency: annual load / matched annual Energy_Balance consumption.
+    - Annual System Efficiency: annual load / factor-adjusted matched annual Energy_Balance consumption.
     - Maximum Daily Load Sum: maximum sum of the load grouped by day-of-year.
     - 95th Percentile Load: 95th percentile of the total load series (not specific W/m²).
-    - Annual Energy for Load Coverage: matched annual Energy_Balance consumption; 0 if none is found.
+    - Annual Energy for Load Coverage: matched annual Energy_Balance consumption divided by the scenario efficiency factor; 0 if none is found.
     """
     rows = []
     for sc_name in [str(x) for x in (scenario_names or []) if str(x).strip()]:
@@ -15687,6 +15714,7 @@ def _loads_build_scenario_comparison_df_uncached(
         p95_load = 0.0
         max_daily_load_sum = 0.0
         annual_energy_for_coverage = 0.0
+        efficiency_factor = 1.0
         annual_system_efficiency = np.nan
 
         try:
@@ -15723,11 +15751,14 @@ def _loads_build_scenario_comparison_df_uncached(
                 df_sc_energy = get_energy_balance_df(file_bytes, filename, scenario_name=sc_name)
                 matched_energy_use = _loads_find_matching_energy_use(matched_load, df_sc_energy)
                 if matched_energy_use and matched_energy_use in df_sc_energy.columns:
-                    annual_energy_for_coverage = float(
+                    _raw_annual_energy_for_coverage = float(
                         pd.to_numeric(df_sc_energy[matched_energy_use], errors="coerce").fillna(0.0).sum()
                     )
+                    efficiency_factor = _loads_scenario_efficiency_factor(sc_name, matched_energy_use)
+                    annual_energy_for_coverage = float(_raw_annual_energy_for_coverage) / float(efficiency_factor)
                 else:
                     annual_energy_for_coverage = 0.0
+                    efficiency_factor = 1.0
             except Exception:
                 annual_energy_for_coverage = 0.0
                 matched_energy_use = None
@@ -15739,6 +15770,7 @@ def _loads_build_scenario_comparison_df_uncached(
             "Scenario": sc_name,
             "Matched Load": str(matched_load or "Not found"),
             "Matched Energy Use": str(matched_energy_use or "Not found"),
+            "Efficiency Factor": float(efficiency_factor),
             "Total Annual Load (kWh/a)": float(annual_load),
             "Peak Load (kW)": float(peak_load),
             "Annual System Efficiency": annual_system_efficiency,
@@ -15780,6 +15812,23 @@ def _loads_build_scenario_comparison_df(
     except Exception:
         master_selected = tuple()
 
+    # Efficiency factors affect both Energy for Load Coverage and Annual System Efficiency.
+    # Include them in the cache signature so sidebar edits never return stale comparison KPIs.
+    try:
+        _scenarios_for_eff = st.session_state.get("scenarios", {}) or {}
+        efficiency_signature = tuple(
+            (
+                name,
+                tuple(sorted(
+                    (str(k), float(v))
+                    for k, v in ((_scenarios_for_eff.get(name, {}) or {}).get("efficiency", {}) or {}).items()
+                )),
+            )
+            for name in names
+        )
+    except Exception:
+        efficiency_signature = tuple()
+
     signature = (
         _workbook_token(file_bytes, filename),
         int(st.session_state.get(_RAW_COMMIT_VERSION_KEY, 0) or 0),
@@ -15788,6 +15837,7 @@ def _loads_build_scenario_comparison_df(
         bool(_master_energy_filter_enabled()),
         master_selected,
         override_signature,
+        efficiency_signature,
     )
 
     cache = st.session_state.get(_LOADS_SCENARIO_COMPARISON_CACHE_KEY)
@@ -16438,10 +16488,12 @@ with tab4:
         if _custom_percentile_key not in st.session_state:
             st.session_state[_custom_percentile_key] = 95.0
 
-        # Annual System Efficiency = annual load / annual energy use with the same logical name.
+        # Annual System Efficiency = annual load / factor-adjusted annual energy use with the same logical name.
+        # This uses the exact Energy Balance (with factors) convention: adjusted kWh = raw kWh / sidebar efficiency factor.
         # Match is tolerant of the Excel `_load` / `_kWh` suffixes and common project prefixes/suffixes.
         annual_system_efficiency = None
         matched_energy_use_name = None
+        matched_energy_efficiency_factor = 1.0
         try:
             _df_energy_for_load_kpi = get_energy_balance_df(
                 file_bytes_loads,
@@ -16450,14 +16502,24 @@ with tab4:
             )
             matched_energy_use_name = _loads_find_matching_energy_use(selected_load, _df_energy_for_load_kpi)
             if matched_energy_use_name:
-                _annual_energy_use = float(pd.to_numeric(
+                _raw_annual_energy_use = float(pd.to_numeric(
                     _df_energy_for_load_kpi[matched_energy_use_name], errors="coerce"
                 ).fillna(0.0).sum())
+                try:
+                    matched_energy_efficiency_factor = float(
+                        st.session_state.get(f"eff_{matched_energy_use_name}", 1.0)
+                    )
+                except Exception:
+                    matched_energy_efficiency_factor = 1.0
+                if (not np.isfinite(matched_energy_efficiency_factor)) or abs(matched_energy_efficiency_factor) <= 1e-12:
+                    matched_energy_efficiency_factor = 1.0
+                _annual_energy_use = float(_raw_annual_energy_use) / float(matched_energy_efficiency_factor)
                 if abs(_annual_energy_use) > 1e-12:
                     annual_system_efficiency = float(total_load_selected) / float(_annual_energy_use)
         except Exception:
             annual_system_efficiency = None
             matched_energy_use_name = None
+            matched_energy_efficiency_factor = 1.0
 
         totals_by_month = df_loads.groupby("month", as_index=False)[selected_load].sum()
         totals_by_month["month"] = pd.Categorical(
@@ -16579,7 +16641,8 @@ with tab4:
                 "Annual System Efficiency",
                 f"{annual_system_efficiency:,.2f}" if annual_system_efficiency is not None and np.isfinite(annual_system_efficiency) else "n/a",
                 help=(
-                    f"Annual {ui_name(selected_load)} load divided by annual {ui_name(matched_energy_use_name)} energy use."
+                    f"Annual {ui_name(selected_load)} load divided by factor-adjusted annual {ui_name(matched_energy_use_name)} energy use "
+                    f"(raw Energy_Balance kWh / efficiency factor {matched_energy_efficiency_factor:g}), consistent with Energy Balance (with factors)."
                     if matched_energy_use_name else
                     "No matching Energy_Balance end use was found for the selected load."
                 ),
@@ -17140,6 +17203,7 @@ with tab4:
             st.caption(
                 f"Compare the load corresponding to **{ui_name(selected_load)}** across all existing scenarios. "
                 "Load and Energy_Balance names are matched while ignoring common prefixes/suffixes. "
+                "Energy for Load Coverage uses the scenario-specific Efficiency Factor, consistent with Energy Balance (with factors). "
                 "Scenario colors are used in every comparison chart."
             )
 
@@ -17213,12 +17277,13 @@ with tab4:
                             textposition="outside",
                             cliponaxis=False,
                             customdata=np.array([
-                                [str(_row["Matched Load"]), str(_row["Matched Energy Use"])],
-                                [str(_row["Matched Load"]), str(_row["Matched Energy Use"])],
+                                [str(_row["Matched Load"]), str(_row["Matched Energy Use"]), float(_row["Efficiency Factor"])],
+                                [str(_row["Matched Load"]), str(_row["Matched Energy Use"]), float(_row["Efficiency Factor"])],
                             ], dtype=object),
                             hovertemplate=(
                                 "<b>%{fullData.name}</b><br>%{x}: %{y:,.1f} kWh/a<br>"
-                                "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<extra></extra>"
+                                "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<br>"
+                                "Efficiency factor: %{customdata[2]:.3f}<extra></extra>"
                             ),
                         ))
                     _fig_load_cmp_annual.update_layout(
@@ -17298,10 +17363,15 @@ with tab4:
                             text=[f"{float(_eff):,.2f}" if pd.notna(_eff) and np.isfinite(float(_eff)) else "n/a"],
                             textposition="outside",
                             cliponaxis=False,
-                            customdata=np.array([[str(_row["Matched Load"]), str(_row["Matched Energy Use"]) ]], dtype=object),
+                            customdata=np.array([[
+                                str(_row["Matched Load"]),
+                                str(_row["Matched Energy Use"]),
+                                float(_row["Efficiency Factor"]),
+                            ]], dtype=object),
                             hovertemplate=(
                                 "<b>%{x}</b><br>Annual System Efficiency: %{text}<br>"
-                                "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<extra></extra>"
+                                "Matched load: %{customdata[0]}<br>Matched energy use: %{customdata[1]}<br>"
+                                "Efficiency factor: %{customdata[2]:.3f}<extra></extra>"
                             ),
                         ))
                     _fig_load_cmp_eff.update_layout(
