@@ -3608,6 +3608,36 @@ def compute_lcc_cashflow_table_cached(
     )
 
 
+def nominal_payback_period(active_cf: pd.DataFrame, reference_cf: pd.DataFrame, project_year: int) -> Optional[float]:
+    """Return nominal payback period in years for active scenario vs reference scenario."""
+    if active_cf is None or active_cf.empty or reference_cf is None or reference_cf.empty:
+        return None
+    years = sorted(set(active_cf["Year"].astype(int).tolist()) | set(reference_cf["Year"].astype(int).tolist()))
+    if not years:
+        return None
+    active = active_cf.groupby("Year")["Nominal Cost"].sum().reindex(years).fillna(0.0)
+    ref = reference_cf.groupby("Year")["Nominal Cost"].sum().reindex(years).fillna(0.0)
+    incremental = ref - active  # positive means active scenario saves money against reference
+    cumulative = incremental.cumsum()
+
+    if cumulative.iloc[0] >= 0:
+        return 0.0
+    prev_cum = float(cumulative.iloc[0])
+    prev_offset = int(years[0] - int(project_year))
+    for idx in range(1, len(years)):
+        curr_cum = float(cumulative.iloc[idx])
+        curr_offset = int(years[idx] - int(project_year))
+        if curr_cum >= 0:
+            annual_gain = curr_cum - prev_cum
+            if annual_gain <= 0:
+                return float(curr_offset)
+            frac = abs(prev_cum) / annual_gain
+            return float(prev_offset + frac * (curr_offset - prev_offset))
+        prev_cum = curr_cum
+        prev_offset = curr_offset
+    return None
+
+
 def discounted_payback_period(active_cf: pd.DataFrame, reference_cf: pd.DataFrame, project_year: int) -> Optional[float]:
     """Return discounted payback period in years for active scenario vs reference scenario."""
     if active_cf is None or active_cf.empty or reference_cf is None or reference_cf.empty:
@@ -13237,6 +13267,7 @@ with tab_lcc:
                 lcc_global_active = deepcopy(lcc_global_active)
                 lcc_global_active["payback_reference_scenario"] = ref_scenario_lcc
             ref_lcc_cashflow = pd.DataFrame()
+            nominal_payback_value = None
             payback_value = None
             if ref_scenario_lcc and ref_scenario_lcc in scenarios_lcc and ref_scenario_lcc != active_selected:
                 ref_payload_lcc = deepcopy(scenarios_lcc.get(ref_scenario_lcc, {}))
@@ -13260,6 +13291,7 @@ with tab_lcc:
                     lcc_global=ref_lcc_global_active,
                     df_loads=ref_df_lcc_loads,
                 )
+                nominal_payback_value = nominal_payback_period(active_lcc_cashflow, ref_lcc_cashflow, project_year_lcc)
                 payback_value = discounted_payback_period(active_lcc_cashflow, ref_lcc_cashflow, project_year_lcc)
 
             st.write("## LCC Balance")
@@ -13337,6 +13369,10 @@ with tab_lcc:
 
             with c2:
                 st.subheader("LCC KPI's")
+                st.metric("Investment Cost", f"{currency_lcc} {type_totals.get('Investment', 0.0):,.0f}")
+                st.metric("Maintenance Cost", f"{currency_lcc} {type_totals.get('Maintenance', 0.0):,.0f}")
+                st.metric("Replacement Cost", f"{currency_lcc} {type_totals.get('Replacement', 0.0):,.0f}")
+                st.metric("Energy Cost", f"{currency_lcc} {type_totals.get('Energy', 0.0):,.0f}")
                 st.metric("Total Nominal Cost", f"{currency_lcc} {total_nominal_lcc:,.0f}")
                 st.metric("Total Discounted Cost", f"{currency_lcc} {total_discounted_lcc:,.0f}")
                 if project_area_lcc > 0:
@@ -13345,11 +13381,8 @@ with tab_lcc:
                 else:
                     st.metric("Nominal Cost per m²", "n/a")
                     st.metric("Discounted Cost per m²", "n/a")
+                st.metric("Nominal Payback Period", _format_payback(nominal_payback_value))
                 st.metric("Discounted Payback Period", _format_payback(payback_value))
-                st.metric("Energy Cost", f"{currency_lcc} {type_totals.get('Energy', 0.0):,.0f}")
-                st.metric("Investment Cost", f"{currency_lcc} {type_totals.get('Investment', 0.0):,.0f}")
-                st.metric("Maintenance Cost", f"{currency_lcc} {type_totals.get('Maintenance', 0.0):,.0f}")
-                st.metric("Replacement Cost", f"{currency_lcc} {type_totals.get('Replacement', 0.0):,.0f}")
 
             c3, c4 = st.columns([3, 1])
             with c3:
@@ -13543,8 +13576,9 @@ with tab_lcc:
                 st.dataframe(cashflow_display, use_container_width=True)
 
             st.caption(
-                "Discounted Payback Period is calculated against the selected reference scenario from discounted incremental cash flows: "
-                "reference scenario cost minus active scenario cost. If no reference scenario is selected, payback is shown as not reached."
+                "Nominal and Discounted Payback Periods are calculated against the selected reference scenario from incremental cash flows "
+                "(reference scenario cost minus active scenario cost). Nominal Payback uses undiscounted costs; Discounted Payback uses discounted costs. "
+                "If no reference scenario is selected, payback is shown as not reached."
             )
 
     if not uploaded_file:
