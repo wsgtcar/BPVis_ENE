@@ -100,7 +100,7 @@ from typing import Optional, Tuple, Dict
 # Page setup & constants
 # =========================
 st.set_page_config(
-    page_title="WSGT_BPVis_ENE 2.4.7",
+    page_title="WSGT_BPVis_ENE 3.0.0",
     page_icon="Pamo_Icon_White.png",
     layout="wide"
 )
@@ -872,7 +872,7 @@ if "project_name" not in st.session_state:
 # =========================
 st.sidebar.image("Pamo_Icon_Black.png", width=80)
 st.sidebar.write("## BPVis ENE")
-st.sidebar.write("Version 2.4.7")
+st.sidebar.write("Version 3.0.0")
 if IS_VIEWER_MODE:
     st.sidebar.write("**Viewer Mode**")
 
@@ -3710,7 +3710,7 @@ def _format_payback(pb: Optional[float]) -> str:
 # =========================
 # Report generation helpers (PDF)
 # =========================
-REPORT_VERSION = "2.4.7"
+REPORT_VERSION = "3.0.0"
 
 
 def _report_sanitize_filename(text: str) -> str:
@@ -8565,6 +8565,55 @@ def create_benchmark_bar_chart(values_dict: Dict[str, float], thresholds_dict: D
     return fig
 
 
+DASHBOARD_SETUP_SHEET = 'Dashboard_Setup'
+DASHBOARD_SETUP_KEYS = {'dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile'} | {
+    f'dashboard_radar_{i}' for i in range(3)} | {
+    f'dashboard_scatter_{i}{suffix}' for i in range(3) for suffix in ['', '_x', '_y']}
+
+
+def _dashboard_setup_payload():
+    values = dict(st.session_state.get('_dashboard_saved_setup',{}))
+    for key in DASHBOARD_SETUP_KEYS:
+        if key in st.session_state:
+            values[key] = st.session_state[key]
+    return {key:value for key,value in values.items() if key in DASHBOARD_SETUP_KEYS}
+
+
+def _dashboard_setup_frame():
+    # One setting per row avoids Excel's single-cell string length limit.
+    return pd.DataFrame([{'Setting':k,'Value':json.dumps({'value':v},ensure_ascii=False)}
+                         for k,v in _dashboard_setup_payload().items()],columns=['Setting','Value'])
+
+
+def _dashboard_restore_setup(frame):
+    values = {}
+    if isinstance(frame,pd.DataFrame) and {'Setting','Value'}.issubset(frame.columns):
+        for _,row in frame.iterrows():
+            key = str(row['Setting'])
+            if key not in DASHBOARD_SETUP_KEYS:
+                continue
+            try:
+                value = json.loads(str(row['Value']))
+                if isinstance(value,dict) and 'value' in value:
+                    value = value['value']
+                if key == 'dashboard_load_percentile':
+                    if isinstance(value,(int,float)) and not isinstance(value,bool) and np.isfinite(value) and 0 <= value <= 100:
+                        values[key] = float(value)
+                    continue
+                is_list = key=='dashboard_scenarios_v3' or key.startswith('dashboard_radar_')
+                if (is_list and isinstance(value,list) and all(isinstance(v,str) for v in value)) or (
+                    not is_list and (isinstance(value,str) or (key=='dashboard_focus_v3' and value is None))):
+                    values[key] = value
+            except (ValueError,TypeError):
+                continue
+    for key in DASHBOARD_SETUP_KEYS:
+        st.session_state.pop(key,None)
+    st.session_state.update(values)
+    st.session_state['_dashboard_saved_setup'] = values.copy()
+    st.session_state['_dashboard_restore_focus'] = 'dashboard_focus_v3' in values
+    st.session_state.pop('_dashboard_sidebar_sync_v3',None)
+
+
 def write_config_to_excel(original_bytes: bytes,
                           project_df: pd.DataFrame,
                           factors_df: pd.DataFrame,
@@ -8588,6 +8637,7 @@ def write_config_to_excel(original_bytes: bytes,
     sheets = cfg["all_sheets"]  # dict[name] -> df
 
     # overwrite/create the config sheets
+    sheets[DASHBOARD_SETUP_SHEET] = _dashboard_setup_frame()
     sheets[SHEET_PROJECT] = project_df
     sheets[SHEET_FACTORS] = factors_df
     sheets[SHEET_TARIFFS] = tariffs_df
@@ -9795,6 +9845,7 @@ if uploaded_file:
             st.session_state["model_inputs_qa_df"] = default_model_inputs_qa_df()
 
     if st.session_state.get("_loaded_workbook_token") != wb_token:
+        _dashboard_restore_setup((cfg_saved.get("all_sheets") or {}).get(DASHBOARD_SETUP_SHEET))
         # Reset committed/draft LCC global state on a new workbook upload so saved
         # LCC_Global values (including the payback reference scenario) are loaded
         # from the workbook instead of reusing stale values from the previous session.
@@ -10025,9 +10076,9 @@ st.title(st.session_state["project_name"])
 # =========================
 if IS_VIEWER_MODE:
     # Viewer Mode exposes only the nine analysis/comparison tabs. Edit-only tabs are not created.
-    tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab_lcc, tab7 = st.tabs(
-        ["Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)",
-         "Energy Cost (with Factors)", "Loads Analysis", "Benchmark",
+    tab5, tab1, tab1_factors, tab2, tab3, tab4, tab6, tab_lcc, tab7 = st.tabs(
+        ["Project Dashboard", "Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)",
+         "Energy Cost (with Factors)", "Loads Analysis",
          "CRREM-Analysis", "LCC-Analysis", "Scenarios"]
     )
     # Dummy empty containers keep the existing downstream `with tab_...` blocks structurally intact.
@@ -10035,9 +10086,9 @@ if IS_VIEWER_MODE:
     tab_model_qa = st.container()
     tab8 = st.container()
 else:
-    tab1, tab1_factors, tab2, tab3, tab4, tab5, tab6, tab_lcc, tab7, tab_model_qa, tab8 = st.tabs(
-        ["Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)",
-         "Energy Cost (with Factors)", "Loads Analysis", "Benchmark",
+    tab5, tab1, tab1_factors, tab2, tab3, tab4, tab6, tab_lcc, tab7, tab_model_qa, tab8 = st.tabs(
+        ["Project Dashboard", "Energy Balance (without Factors)", "Energy Balance (with Factors)", "CO2 Emissions (with Factors)",
+         "Energy Cost (with Factors)", "Loads Analysis",
          "CRREM-Analysis", "LCC-Analysis", "Scenarios", "Model Inputs QA", "Raw Data"]
     )
 
@@ -14324,6 +14375,7 @@ with tab_lcc:
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
 
+_dashboard_comparison_all = pd.DataFrame()
 with tab7:
     if uploaded_file:
         st.write("## Scenario Comparison")
@@ -14517,6 +14569,8 @@ with tab7:
             df_cmp["Scenario"] = df_cmp["Scenario"].astype(str)
             df_cmp["Scenario"] = pd.Categorical(df_cmp["Scenario"], categories=scenario_order, ordered=True)
             df_cmp = df_cmp.sort_values("Scenario", kind="stable").reset_index(drop=True)
+            # Dashboard retains all scenarios before the independent comparison filter.
+            _dashboard_comparison_all = df_cmp.copy(deep=True)
             df_cmp_display = df_cmp[[
                 "Scenario",
                 "Net Energy (kWh/a)",
@@ -17189,6 +17243,478 @@ def _loads_typical_day_profile_figure(
 
 
 # =========================
+# Project Dashboard — release 3.0.0
+# =========================
+def _dashboard_stranding(asset, limit):
+    """Do not confuse missing/partial pathways with a non-stranded asset."""
+    joined = pd.concat([asset.rename('asset'), limit.rename('limit')], axis=1)
+    if joined.empty or joined.isna().any().any() or not np.isfinite(joined.to_numpy()).all():
+        return np.nan, 'Unavailable: incomplete pathway or asset data'
+    year = find_stranding_year(asset, limit)
+    horizon = int(joined.index.max())
+    return (float(year), str(year)) if year is not None else (float(horizon + 1), f'Not stranded through {horizon}')
+
+
+def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, year, currency, load_mapping):
+    """Use committed scenario calculations; never active-scenario widget factors."""
+    data = comparison.copy().set_index('Scenario')
+    data.index = data.index.astype(str)
+    result = pd.DataFrame(index=list(scenarios))
+    notes = []
+    for new, old, factor in [
+        ('EUI gross', 'Gross EUI (kWh/m²·a)', 1), ('EUI net', 'Net EUI (kWh/m²·a)', 1),
+        ('Carbon gross', 'Gross CO2 (t/a)', 1000 / area), ('Carbon net', 'Net CO2 (t/a)', 1000 / area),
+        ('Energy cost gross', f'Gross Cost ({currency}/a)', 1 / area),
+        ('Energy cost net', f'Net Cost ({currency}/a)', 1 / area),
+        ('Generation', 'On-site Generation (kWh/a)', 1 / area),
+    ]:
+        result[new] = pd.to_numeric(data[old], errors='coerce') * factor
+    result['Coverage'] = 100 * result['Generation'] / result['EUI gross'].where(result['EUI gross'] > 0)
+    try:
+        crrem = load_crrem_dataset(st.session_state.get('project_country', 'Germany'))
+    except Exception as exc:
+        crrem = None
+        notes.append(f'CRREM dataset: {exc}')
+    enduses = []
+    energies = {}
+    for name in scenarios:
+        energies[name] = get_energy_balance_df(file_bytes, filename, scenario_name=name)
+        enduses.extend(c for c in energies[name].columns if c != 'Month')
+    lcc_global = _get_lcc_global_state_payload(list(dict.fromkeys(enduses)))
+    # Full current operational scope; independent of the Scenarios/LCC display filters.
+    lcc_raw = _build_scenario_performance_radar_raw_df(
+        file_bytes, filename, scenarios, list(scenarios), comparison, area, year, currency,
+        lcc_global, crrem_dataset=crrem, scenario_analysis_period=50,
+        apply_lcc_filter=False, include_capex=True, include_annual_opex=True)
+    for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_lcc_kpi_label(50)), ('CAPEX', 'Capex /m²'), ('OPEX', 'Annual OPEX /m²')]:
+        result[new] = lcc_raw.loc[lcc_raw['KPI'] == old].set_index('Scenario')['Value']
+    for service in ['Heating', 'Cooling']:
+        result[f'{service} peak'] = np.nan
+        result[f'{service} efficiency'] = np.nan
+        reference = load_mapping.get(service)
+        if reference:
+            load_data = _loads_build_scenario_comparison_df(file_bytes, filename, list(scenarios), reference)
+            for _, row in load_data.iterrows():
+                name = row['Scenario']
+                source_loads = get_loads_balance_df(file_bytes, filename, scenario_name=name)
+                matched = row['Matched Load']
+                valid = matched in source_loads.columns and pd.to_numeric(source_loads[matched], errors='coerce').notna().any()
+                if valid:
+                    result.loc[name, f'{service} peak'] = float(row['Peak Load (kW)']) * 1000 / area
+                    result.loc[name, f'{service} efficiency'] = row['Annual System Efficiency']
+    # Purchased-energy peaks use the same explicit source load columns as demand tariffs.
+    # Do not infer them from thermal peaks or add non-coincident component peaks.
+    for source in ['Electricity', 'District Heating', 'District Cooling']:
+        result[f'{source} peak'] = np.nan
+        for name in scenarios:
+            df_source_loads = get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False)
+            peak, matched = _tariff_peak_for_source(df_source_loads, source)
+            if peak is not None and np.isfinite(peak):
+                result.loc[name, f'{source} peak'] = float(peak) * 1000 / area
+            else:
+                notes.append(f'{name}: {source} peak unavailable; no valid source load column.')
+    raw_loads = {name: get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False) for name in scenarios}
+    for name, frame in raw_loads.items():
+        for col in _loads_available_load_columns(frame):
+            key = 'load::' + str(col)
+            if key not in result:
+                result[key] = np.nan
+            values = pd.to_numeric(frame[col], errors='coerce').replace([np.inf,-np.inf],np.nan).dropna()
+            if len(values):
+                result.loc[name,key] = max(0.,float(values.max())) * 1000 / area
+    result['LCC50 discounted'] = np.nan
+    for name,payload in scenarios.items():
+        try:
+            uses = [c for c in energies[name].columns if c != 'Month']
+            assumptions = _scenario_comparison_lcc_global_payload(lcc_global,uses,apply_lcc_filter=False)
+            assumptions['analysis_period'] = 50
+            cashflow = compute_lcc_cashflow_table_cached(energies[name],payload,uses,year,lcc_global=assumptions,df_loads=raw_loads[name])
+            if cashflow is not None and not cashflow.empty:
+                result.loc[name,'LCC50 discounted'] = float(cashflow['Discounted Cost'].sum()) / area
+        except Exception as exc:
+            notes.append(f'{name}: discounted LCC unavailable ({exc}).')
+    for total,intensity in [('Gross energy total','EUI gross'),('Net energy total','EUI net'),
+        ('Gross carbon total','Carbon gross'),('Net carbon total','Carbon net'),('Lifetime carbon total','LCA50'),
+        ('Generation total','Generation'),('Gross cost total','Energy cost gross'),('Net cost total','Energy cost net'),
+        ('CAPEX total','CAPEX'),('OPEX total','OPEX'),('LCC50 total','LCC50'),('LCC50 discounted total','LCC50 discounted')]:
+        result[total] = result[intensity] * area
+    for name, payload in scenarios.items():
+        for metric in ['Carbon stranding', 'EUI stranding']:
+            result.loc[name, metric] = np.nan
+            result.loc[name, metric + ' status'] = 'Unavailable: CRREM pathway missing'
+        if not crrem:
+            continue
+        try:
+            target = '1.5C' if str(payload.get('crrem_target', '1.5°C')).startswith('1.5') else '2C'
+            use = payload.get('crrem_use_type', 'Office')
+            mixed = payload.get('crrem_mixed_use', [])
+            if use == 'Mixed Use':
+                mix = _mixed_use_records_to_df(mixed)
+                codes = dict(zip(crrem['property_types']['app_use'], crrem['property_types']['crrem_code']))
+                if mix.empty or abs(mix['Area Share %'].sum() - 100) > 0.5 or any(
+                    str(u) not in codes for u in mix['Use Type']):
+                    raise ValueError('Incomplete mixed-use shares or use types')
+            carbon_limit, eui_limit = _report_crrem_limits_for_context(crrem, target, use, mixed, list(range(year, 2051)))
+            if carbon_limit.empty or eui_limit.empty:
+                raise ValueError('No pathway for the selected use, target and years')
+            years = list(carbon_limit.index)
+            if years != list(range(year, int(max(years)) + 1)):
+                raise ValueError('Pathway does not cover every year from the project start')
+            # Both trajectories include the same committed CRREM measures.
+            carbon = compute_crrem_like_scenario_emissions_series_cached(energies[name], payload, crrem, year, years) * 1000 / area
+            eui = compute_crrem_like_scenario_eui_series(energies[name], payload, year, years, area)
+            for metric, asset, limit in [('Carbon stranding', carbon, carbon_limit), ('EUI stranding', eui, eui_limit)]:
+                value, status = _dashboard_stranding(asset, limit)
+                result.loc[name, metric] = value
+                result.loc[name, metric + ' status'] = status + f' · {target} · {use}'
+        except Exception as exc:
+            notes.append(f'{name}: CRREM unavailable ({exc}).')
+    result = result.replace([np.inf, -np.inf], np.nan)
+    result.index.name = 'Scenario'
+    return result, list(dict.fromkeys(notes))
+
+
+def _dashboard_load_statistic_value(series, area, statistic, percentile=99.0):
+    """Hourly demand/import profiles: include zero-load hours; ignore non-finite samples."""
+    values = pd.to_numeric(series,errors='coerce').replace([np.inf,-np.inf],np.nan).dropna().clip(lower=0.)
+    if values.empty or not np.isfinite(area) or area <= 0:
+        return np.nan
+    if statistic == 'Sum':
+        # Loads_Balance is hourly kW; each row contributes one hour of energy.
+        return float(values.sum()) / area
+    if statistic == 'Custom percentile':
+        return float(values.quantile(float(percentile)/100.,interpolation='linear')) * 1000 / area
+    return float(values.max()) * 1000 / area
+
+
+def _dashboard_load_radar_data(data, category, file_bytes, filename, names, area, mapping, statistic, percentile):
+    """Change only the load radar; peak-based scatter plots retain their peak data."""
+    if statistic == 'Peak':
+        return data, category, 'Peak Loads'
+    result = data.copy()
+    updated = []
+    unit = 'kWh/m²' if statistic=='Sum' else 'W/m²'
+    label = 'Load Sums' if statistic=='Sum' else f'P{percentile:g} Loads'
+    for key,title,_,direction in category:
+        stat_key = 'load-stat::'+key
+        result[stat_key] = np.nan
+        updated.append((stat_key,title,unit,direction))
+        for name in names:
+            frame = get_loads_balance_df(file_bytes,filename,scenario_name=name,
+                apply_master_filter=key in ['Heating peak','Cooling peak'])
+            if key.startswith('load::'):
+                matched = key[len('load::'):]
+            elif key in ['Heating peak','Cooling peak']:
+                reference = mapping.get(key[:-5])
+                matched = _loads_find_matching_load(reference,frame) if reference else None
+            else:
+                matched = _tariff_find_matching_load_column(frame,key[:-5])
+            if matched in frame.columns:
+                result.loc[name,stat_key] = _dashboard_load_statistic_value(frame[matched],area,statistic,percentile)
+    return result, updated, label
+
+
+def _dashboard_catalog(currency, loads=()):
+    """key, label, engineering unit, better direction; first five remain the defaults."""
+    energy = [
+        ('EUI gross','Gross EUI','kWh/m²·a','low'),('EUI net','Net EUI','kWh/m²·a','low'),
+        ('Carbon net','Net CO₂','kgCO₂e/m²·a','low'),('Carbon gross','Gross CO₂','kgCO₂e/m²·a','low'),
+        ('LCA50','LCA50','kgCO₂e/m²','low'),('Generation','On-site generation','kWh/m²·a','high'),
+        ('Coverage','Renewables coverage','%','high'),('Heating efficiency','Heating efficiency','kWh thermal/kWh input','high'),
+        ('Cooling efficiency','Cooling efficiency','kWh thermal/kWh input','high'),
+        ('Gross energy total','Gross annual energy','kWh/a','low'),('Net energy total','Net annual energy','kWh/a','low'),
+        ('Gross carbon total','Gross annual emissions','kgCO₂e/a','low'),('Net carbon total','Net annual emissions','kgCO₂e/a','low'),
+        ('Lifetime carbon total','Total emissions · 50 years','kgCO₂e','low'),('Generation total','Annual on-site generation','kWh/a','high')]
+    cost = [('Energy cost gross','Gross Energy Cost',currency+'/m²·a','low'),
+        ('Energy cost net','Net Energy Cost',currency+'/m²·a','low'),('LCC50','LCC50',currency+'/m²','low'),
+        ('CAPEX','CAPEX',currency+'/m²','low'),('OPEX','OPEX',currency+'/m²·a','low'),
+        ('LCC50 discounted','Discounted LCC50',currency+'/m²','low'),
+        ('Gross cost total','Gross annual energy cost',currency+'/a','low'),
+        ('Net cost total','Net annual energy cost',currency+'/a','low'),
+        ('CAPEX total','Total CAPEX',currency,'low'),('OPEX total','Annual OPEX',currency+'/a','low'),
+        ('LCC50 total','Total LCC50',currency,'low'),('LCC50 discounted total','Total discounted LCC50',currency,'low')]
+    peaks = [(s+' peak',s,'W/m²','low') for s in ['Heating','Cooling','Electricity','District Heating','District Cooling']]
+    standard = {'heating','spaceheating','cooling','spacecooling','electricity','districtheating','districtcooling'}
+    peaks += [('load::'+str(c),str(c),'W/m²','low') for c in loads if _loads_energy_match_key(c) not in standard]
+    return [energy,cost,peaks]
+
+
+def _dashboard_scatter_presets():
+    return {
+        'System Efficiency': None, 'On-site Renewables': ('Generation','Coverage'), 'CRREM Stranding': None,
+        'Energy vs Carbon': ('EUI net','Carbon net'),
+        'Investment vs Lifetime Cost': ('CAPEX','LCC50'),
+        'Investment vs Operating Cost': ('CAPEX','OPEX'),
+        'Energy Cost vs Carbon': ('Energy cost net','Carbon net'),
+        'Heating vs Cooling Peaks': ('Heating peak','Cooling peak'),
+        'Lifetime Carbon vs Lifetime Cost': ('LCA50','LCC50'),
+        'Custom comparison': None,
+    }
+
+
+def _dashboard_figure(all_data, selected, focus, colors, currency, year, categories=None, scatter_panels=None, load_title="Peak Loads"):
+    """Reflow optional panels; preserve independent scales and all existing focus behaviour."""
+    from plotly.subplots import make_subplots
+    from html import escape
+    catalog = _dashboard_catalog(currency, [k[6:] for k in all_data.columns if str(k).startswith('load::')])
+    definitions = {item[0]:item for group in catalog for item in group}
+    if categories is None:
+        categories = [g[:5] for g in catalog]
+    if scatter_panels is None:
+        scatter_panels = [('System Efficiency',None),('On-site Renewables',('Generation','Coverage')),('CRREM Stranding',None)]
+    n = len(scatter_panels)
+    specs = [[]]
+    for category in categories:
+        specs[0].extend([{'type':'polar' if len(category)>=3 else 'xy','colspan':2},None])
+    # Each lower panel gets an equal share of the complete row.
+    starts = list(range(1,7,6//n)) if n else []
+    if n:
+        lower = [None]*6
+        for col in starts:
+            lower[col-1] = {'type':'xy','colspan':6//n}
+        specs.append(lower)
+    titles = []
+    group_names = ['Energy & Carbon','Cost & Investment',load_title]
+    for name,cat in zip(group_names,categories):
+        titles.append(name + (' · → better ←' if len(cat)>=3 else ' · better ←') if cat else '')
+    titles += [name for name,pair in scatter_panels]
+    kwargs = dict(rows=2 if n else 1,cols=6,specs=specs,subplot_titles=titles,horizontal_spacing=0.04)
+    if n:
+        kwargs.update(row_heights=[0.60,0.40],vertical_spacing=0.19)
+    fig = make_subplots(**kwargs)
+    legend_seen = set()
+    def add(trace, name, row, col):
+        trace.name = str(name)
+        trace.legendgroup = str(name)
+        trace.legendrank = selected.index(name)
+        trace.showlegend = name not in legend_seen
+        legend_seen.add(name)
+        trace.opacity = 1.0 if focus is None or name==focus else 0.20
+        fig.add_trace(trace,row=row,col=col)
+    order = [s for s in selected if s!=focus]+([focus] if focus in selected else [])
+    for name in order:
+        d = all_data.loc[name]
+        safe = escape(str(name)); color = colors[name]
+        offset = (selected.index(name)-(len(selected)-1)/2)*min(.075,.55/max(len(selected),1))
+        for idx,category in enumerate(categories):
+            col = idx*2+1
+            if not category:
+                fig.update_xaxes(visible=False,row=1,col=col)
+                fig.update_yaxes(visible=False,row=1,col=col)
+                continue
+            radial, hover, labels = [],[],[]
+            for key,label,unit,direction in category:
+                vals = pd.to_numeric(all_data[key],errors='coerce').replace([np.inf,-np.inf],np.nan).dropna()
+                lo = min(0.,float(vals.min())) if len(vals) else 0.
+                hi = max(0.,float(vals.max())) if len(vals) else 1.
+                value = d[key]; valid = pd.notna(value) and np.isfinite(value)
+                r = 100*(float(value)-lo)/(hi-lo or 1.) if valid else None
+                if direction=='high' and r is not None:
+                    r = 100-r
+                radial.append(r);labels.append(label)
+                text = f'<b>{safe}</b><br>{escape(label)}: {value:,.2f} {unit}' if valid else f'<b>{safe}</b><br>{escape(label)}: unavailable'
+                text += f'<br>Axis bounds: {lo:,.2f} to {hi:,.2f} {unit}<br>Better: '+('higher (axis reversed)' if direction=='high' else 'lower')
+                if key.startswith('load-stat::'):
+                    text += '<br>'+escape(load_title)
+                    text += '<br>Sum of hourly loads (1 h per row)' if unit=='kWh/m²' else '<br>Linear percentile over all available hourly loads, including zero-load hours'
+                if key in ['LCA50','Lifetime carbon total']:
+                    text += '<br>50-year operational emissions; excludes embodied carbon'
+                hover.append(text)
+            if len(category)>=3:
+                add(go.Scatterpolar(r=radial+[radial[0]],theta=labels+[labels[0]],mode='lines+markers',connectgaps=False,
+                    line=dict(color=color,width=5.6 if name==focus else 3),marker=dict(size=11,color=color),
+                    fill='toself' if all(v is not None for v in radial) else 'none',fillcolor=_plotly_rgba_from_color(color,.10),
+                    hoveron='points',text=hover+[hover[0]],hovertemplate='%{text}<extra></extra>'),name,1,col)
+            else:
+                add(go.Scatter(x=radial,y=[j+offset for j in range(len(labels))],mode='markers',marker=dict(size=11,color=color),
+                    text=hover,hovertemplate='%{text}<extra></extra>'),name,1,col)
+                fig.update_xaxes(range=[-5,105],title_text='Relative position · better ←',showticklabels=False,row=1,col=col)
+                fig.update_yaxes(tickvals=list(range(len(labels))),ticktext=labels,range=[-.5,len(labels)-.5],row=1,col=col)
+        for col,(kind,pair) in zip(starts,scatter_panels):
+            if kind in ['System Efficiency','CRREM Stranding']:
+                crrem = kind=='CRREM Stranding'
+                keys = ['Carbon stranding','EUI stranding'] if crrem else ['Heating efficiency','Cooling efficiency']
+                for j,key in enumerate(keys):
+                    value = d[key]
+                    status = str(d[key+' status']) if crrem else f'{value:,.2f} kWh thermal/kWh input'
+                    symbol = ('triangle-right-open' if status.startswith('Not stranded') else 'circle') if crrem else ('circle' if j==0 else 'diamond')
+                    add(go.Scatter(x=[value],y=[j+offset],mode='markers',marker=dict(size=11,color=color,symbol=symbol),
+                        text=[f'<b>{safe}</b><br>{escape(key)}: {escape(status)}'],hovertemplate='%{text}<extra></extra>'),name,2,col)
+                fig.update_yaxes(tickvals=[0,1],ticktext=['Carbon','EUI'] if crrem else ['Heating','Cooling'],range=[-.5,1.5],row=2,col=col)
+                fig.update_xaxes(title_text='Year · better →' if crrem else 'kWh thermal / kWh input · better →',row=2,col=col)
+                if crrem:
+                    fig.update_xaxes(range=[min(year,2049)-1,2053],tickvals=list(range(min(year,2050),2051,5))+[2051],
+                        ticktext=[str(y) for y in range(min(year,2050),2051,5)]+['>2050'],row=2,col=col)
+                else:
+                    fig.update_xaxes(rangemode='tozero',row=2,col=col)
+            else:
+                x,y = pair
+                xd,yd = definitions[x],definitions[y]
+                extra = '<br>Annual generation / consumption; not self-consumption' if kind=='On-site Renewables' else ''
+                text = f'<b>{safe}</b><br>{escape(xd[1])}: {d[x]:,.2f} {xd[2]}<br>{escape(yd[1])}: {d[y]:,.2f} {yd[2]}'+extra
+                add(go.Scatter(x=[d[x]],y=[d[y]],mode='markers',marker=dict(size=11,color=color),text=[text],hovertemplate='%{text}<extra></extra>'),name,2,col)
+                fig.update_xaxes(title_text=f'{xd[1]} · {xd[2]} · better '+('→' if xd[3]=='high' else '←'),row=2,col=col)
+                fig.update_yaxes(title_text=f'{yd[1]} · {yd[2]} · better '+('↑' if yd[3]=='high' else '↓'),row=2,col=col)
+    fig.update_polars(radialaxis=dict(range=[0,105],showticklabels=False,gridcolor='#e2e8f0',showline=False),
+        angularaxis=dict(tickfont=dict(size=12),gridcolor='#e2e8f0',rotation=90,direction='clockwise'),bgcolor='rgba(0,0,0,0)')
+    fig.update_xaxes(showgrid=True,gridcolor='#edf0f4',zeroline=False,tickfont=dict(size=10),title_font=dict(size=11))
+    fig.update_yaxes(showgrid=True,gridcolor='#edf0f4',zeroline=False,tickfont=dict(size=10),title_font=dict(size=11))
+    fig.update_annotations(font=dict(size=12,color='#475569'),yshift=44)
+    fig.update_layout(height=790 if n else 500,margin=dict(l=75,r=65,t=135,b=65),font=dict(family='Arial',size=12),
+        paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
+        legend=dict(orientation='h',y=1.19,yanchor='bottom',x=0,font=dict(size=12),groupclick='togglegroup'),
+        hoverlabel=dict(font_size=12),uirevision=str([[c[0] for c in cat] for cat in categories])+str(scatter_panels))
+    return fig
+
+
+def _render_project_dashboard(file_bytes, filename, comparison, area, year, currency):
+    scenarios = st.session_state.get('scenarios', {})
+    if not scenarios:
+        st.info('Create a scenario to populate the dashboard.')
+        return
+    if not np.isfinite(area) or area <= 0:
+        st.info('Enter a project area greater than zero to calculate dashboard intensities.')
+        return
+    names = list(scenarios)
+    colors = {name: st.session_state.get('color_map_scenarios', {}).get(name, SCENARIO_COLOR_PALETTE[i % len(SCENARIO_COLOR_PALETTE)]) for i,name in enumerate(names)}
+    loads = []
+    for name in names:
+        try:
+            loads.extend(_loads_available_load_columns(get_loads_balance_df(file_bytes,filename,scenario_name=name,apply_master_filter=False)))
+        except Exception:
+            pass
+    loads = list(dict.fromkeys(loads))
+    catalog = _dashboard_catalog(currency, loads)
+    # Reinstate hidden custom-axis widget values from durable setup state.
+    for setting,value in st.session_state.get('_dashboard_saved_setup',{}).items():
+        if setting not in st.session_state:
+            st.session_state[setting] = value
+    with st.expander('Dashboard setup', expanded=False):
+        st.caption('Your dashboard setup is included when you save/export the project.')
+        left, right = st.columns([3,1])
+        key = 'dashboard_scenarios_v3'
+        if key not in st.session_state:
+            st.session_state[key] = names
+        else:
+            st.session_state[key] = [n for n in st.session_state[key] if n in names]
+        # Sync only on project/sidebar changes so manual dashboard focus survives reruns.
+        focus_key = 'dashboard_focus_v3'
+        active = st.session_state.get('active_scenario')
+        project_token = (filename, hashlib.sha256(file_bytes).hexdigest())
+        sync_token = (project_token, active)
+        restoring_focus = st.session_state.pop('_dashboard_restore_focus',False)
+        if st.session_state.get('_dashboard_sidebar_sync_v3') != sync_token:
+            if active in names and not restoring_focus:
+                # A sidebar selection becomes visible even if previously filtered out here.
+                if active not in st.session_state[key]:
+                    st.session_state[key] = [n for n in names if n in st.session_state[key] or n == active]
+                st.session_state[focus_key] = active
+            st.session_state['_dashboard_sidebar_sync_v3'] = sync_token
+        with left:
+            selected = st.multiselect('Dashboard scenarios',names,key=key,help='Independent of the Scenarios tab. Colours and radar scales remain fixed when filtering.')
+        with right:
+            focus_key = 'dashboard_focus_v3'
+            if selected:
+                if focus_key not in st.session_state or st.session_state[focus_key] not in [None] + selected:
+                    active = st.session_state.get('active_scenario')
+                    st.session_state[focus_key] = active if active in selected else selected[0]
+                focus = st.selectbox('Metric focus',[None] + selected,key=focus_key,
+                    format_func=lambda value: 'None' if value is None else str(value),
+                    help='None shows all scenarios at full colour and the top metrics for the sidebar active scenario. Follows sidebar scenario changes; manual focus does not change the sidebar.')
+            else:
+                focus = None
+        statistic_options = ['Peak','Sum','Custom percentile']
+        if st.session_state.get('dashboard_load_statistic') not in statistic_options:
+            st.session_state['dashboard_load_statistic'] = 'Peak'
+        if 'dashboard_load_percentile' not in st.session_state:
+            st.session_state['dashboard_load_percentile'] = 99.0
+        stat_col,pct_col,_ = st.columns([1,1,2])
+        with stat_col:
+            load_statistic = st.selectbox('Load radar statistic',statistic_options,key='dashboard_load_statistic',
+                help='Applies only to the load radar. Peak and percentile use W/m². Sum uses kWh/m² over the imported hourly profile; zero-load hours are included and negative loads are treated as zero.')
+        with pct_col:
+            load_percentile = st.number_input('Load percentile (%)',min_value=0.0,max_value=100.0,step=0.1,
+                key='dashboard_load_percentile',disabled=load_statistic!='Custom percentile',
+                help='For example, 99 gives the 99th percentile. Uses linear interpolation across available hourly values, including zero-load hours.')
+        categories = []
+        for idx,(col,group,label) in enumerate(zip(st.columns(3),catalog,['Energy & Carbon metrics','Cost & Investment metrics','Load metrics'])):
+            options = [v[0] for v in group]
+            labels = {v[0]:v[1]+' · '+v[2] for v in group}
+            statekey = f'dashboard_radar_{idx}'
+            if statekey not in st.session_state:
+                st.session_state[statekey] = options[:5]
+            else:
+                st.session_state[statekey] = [v for v in st.session_state[statekey] if v in options]
+            with col:
+                chosen = st.multiselect(label,options,key=statekey,format_func=lambda k,m=labels:m[k],
+                    help='Choose axes in display order. With fewer than three KPIs, a dot comparison replaces the polygon. Higher-is-better axes are reversed, so nearer the centre remains better.')
+            lookup = {v[0]:v for v in group}
+            categories.append([lookup[k] for k in chosen])
+        presets = _dashboard_scatter_presets()
+        definitions = {v[0]:v for group in catalog for v in group}
+        scatter_panels = []
+        for idx,(col,default) in enumerate(zip(st.columns(3),['System Efficiency','On-site Renewables','CRREM Stranding'])):
+            statekey = f'dashboard_scatter_{idx}'
+            options = ['None']+list(presets)
+            if st.session_state.get(statekey) not in options:
+                st.session_state[statekey] = default
+            with col:
+                kind = st.selectbox(f'Lower chart {idx+1}',options,key=statekey,help='None removes this panel. Remaining charts expand to use the full row.')
+                pair = presets.get(kind)
+                if kind=='Custom comparison':
+                    axes=[]
+                    for axis,default_axis in [('x','EUI net'),('y','Carbon net')]:
+                        axiskey = f'dashboard_scatter_{idx}_{axis}'
+                        if st.session_state.get(axiskey) not in definitions:
+                            st.session_state[axiskey] = default_axis
+                        axes.append(st.selectbox(axis.upper()+' metric',list(definitions),key=axiskey,
+                            format_func=lambda k: definitions[k][1]+' · '+definitions[k][2]))
+                    pair = tuple(axes)
+            if kind!='None':
+                scatter_panels.append((kind,pair))
+        st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
+    if not selected:
+        st.info('Select at least one scenario to display the dashboard.')
+        return
+    mapping = {}
+    aliases = {'Heating':{'heating','spaceheating'},'Cooling':{'cooling','spacecooling'}}
+    for service in aliases:
+        options = [c for c in loads if _loads_energy_match_key(c) in aliases[service]]
+        mapping[service] = options[0] if len(options) == 1 else None
+    with st.spinner('Preparing project dashboard…'):
+        data, notes = _dashboard_build_data(file_bytes,filename,scenarios,comparison,area,year,currency,mapping)
+    # No visual focus: metrics still describe the sidebar scenario, even if filtered out.
+    metric_scenario = focus if focus is not None else (active if active in names else names[0])
+    st.subheader(str(metric_scenario).replace('*', r'\*').replace('_', r'\_'))
+    columns = st.columns(4)
+    for col,(key,label,unit) in zip(columns,[('EUI net','Net EUI','kWh/m²·a'),('Carbon net','Net emissions','kgCO₂e/m²·a'),('LCC50','LCC · 50 years',currency+'/m²'),('Coverage','Renewables coverage','%')]):
+        value = data.loc[metric_scenario,key]
+        col.metric(label, f'{value:,.1f} {unit}' if pd.notna(value) and np.isfinite(value) else 'N/A',help=f'{metric_scenario} · '+('Nominal 50-year total, including replacements and residual value.' if key=='LCC50' else 'Scenario-based annual result; coverage = on-site generation / gross consumption.'))
+    if not any(categories) and not scatter_panels:
+        return
+    data, categories[2], load_title = _dashboard_load_radar_data(
+        data,categories[2],file_bytes,filename,names,area,mapping,load_statistic,load_percentile)
+    fig = _dashboard_figure(data,selected,focus,colors,currency,year,categories,scatter_panels,load_title)
+    st.plotly_chart(fig,use_container_width=True,key='project_dashboard_v3',config={'displaylogo':False,'toImageButtonOptions':{'format':'svg','filename':'BPVis_Project_Dashboard','width':1600,'height':900}})
+    displayed = {item[0] for category in categories for item in category}
+    for kind,pair in scatter_panels:
+        displayed.update(pair or (['Heating efficiency','Cooling efficiency'] if kind=='System Efficiency' else ['Carbon stranding','EUI stranding']))
+    unavailable = data.loc[selected,sorted(displayed)].isna().sum().sum()
+    if unavailable:
+        st.caption(f'{unavailable} KPI values unavailable. Missing load columns or CRREM inputs are not plotted.')
+
+
+with tab5:
+    if uploaded_file:
+        _render_project_dashboard(file_bytes, uploaded_file.name, _dashboard_comparison_all,
+            float(st.session_state.get('project_area', 0) or 0),
+            int(st.session_state.get('project_year', 2025)), _curr)
+    else:
+        st.info('Upload project data to populate the Project Dashboard.')
+
+
+
+# =========================
 # Tab 4 — Loads Analysis (Loads Analysis Tab)
 # =========================
 with tab4:
@@ -18406,484 +18932,6 @@ with tab4:
 
     if not uploaded_file:
         st.write("### ← Please upload data on sidebar")
-
-# =========================
-# Tab 5 — Benchmark (Benchmark Tab)
-# =========================
-with tab5:
-    if uploaded_file:
-        st.write("## Benchmark")
-
-        # -------------------------
-        # Load benchmark thresholds
-        # -------------------------
-        benchmark_df = load_benchmark_data(building_use)
-        if benchmark_df is None:
-            st.error(f"Benchmark data not found for building use: {building_use}")
-            st.write("Please ensure the benchmark template file exists in the templates folder.")
-        else:
-            # -------------------------
-            # Recompute project KPIs (aligned with other tabs)
-            # -------------------------
-            df_energy = get_energy_balance_df(file_bytes, uploaded_file.name)
-            df_melted = df_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
-
-            # Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
-            eff_map_bm = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted["End_Use"].unique()}
-            df_melted["Efficiency_Factor"] = df_melted["End_Use"].map(eff_map_bm).fillna(1.0)
-            df_melted["kWh"] = df_melted["kWh"] / df_melted["Efficiency_Factor"]
-
-            # Map to energy sources (align with user mappings in the sidebar)
-            df_melted["Energy_Source"] = df_melted["End_Use"].map(
-                {k: st.session_state.get(f"source_{k}", "Electricity") for k in df_melted["End_Use"].unique()}
-            )
-
-            # Totals by end use (kWh and intensity)
-            totals = df_melted.groupby("End_Use", as_index=False)["kWh"].sum()
-            totals["kWh_per_m2"] = (totals["kWh"] / project_area).round(2)
-
-            # Gross vs net (gross = consumption only, net includes on-site generation like PV as negative)
-            eui_gross = float(totals.loc[totals["kWh_per_m2"] > 0, "kWh_per_m2"].sum())
-            eui_net = float(totals["kWh_per_m2"].sum())
-
-            # CO2 calculations (net accounting)
-            factor_map = {
-                "Electricity": co2_Emissions_Electricity,
-                "Green Electricity": co2_Emissions_Green_Electricity,
-                "Gas": co2_emissions_gas,
-                "District Heating": co2_emissions_dh,
-                "District Cooling": co2_emissions_dc,
-                "Biomass": co2_emissions_biomass,
-            }
-            df_co2 = df_melted.copy()
-            df_co2["CO2_factor_kg_per_kWh"] = df_co2["Energy_Source"].map(factor_map).fillna(0.0)
-            df_co2["kgCO2"] = df_co2["kWh"] * df_co2["CO2_factor_kg_per_kWh"]
-            totals_co2 = df_co2.groupby("End_Use", as_index=False)["kgCO2"].sum()
-            totals_co2["kgCO2_per_m2"] = (totals_co2["kgCO2"] / project_area).round(2)
-
-            co2_intensity_gross = float(totals_co2.loc[totals_co2["kgCO2_per_m2"] > 0, "kgCO2_per_m2"].sum())
-            co2_intensity_net = float(totals_co2["kgCO2_per_m2"].sum())
-
-            # Cost calculations (net accounting), including optional annual peak-demand charges.
-            cost_map = {
-                "Electricity": cost_electricity,
-                "Gas": cost_gas,
-                "District Heating": cost_dh,
-                "District Cooling": cost_dc,
-                "Green Electricity": cost_green_electricity,
-                "Biomass": cost_biomass,
-            }
-            _bm_tariff_payload = {
-                "tariffs": cost_map,
-                TARIFF_DEMAND_CONFIG_KEY: _capture_tariff_demand_from_widgets(),
-            }
-            try:
-                _bm_loads = get_loads_balance_df(
-                    file_bytes, uploaded_file.name, scenario_name=active_selected, apply_master_filter=False
-                )
-            except Exception:
-                _bm_loads = pd.DataFrame()
-            _bm_tariff_details = _tariff_rate_details_for_rows(
-                df_melted, _bm_tariff_payload, _bm_loads, energy_col="kWh", source_col="Energy_Source"
-            )
-            df_cost = _tariff_apply_rates_to_rows(
-                df_melted, _bm_tariff_details, energy_col="kWh", source_col="Energy_Source",
-                tariff_col="cost_per_kWh", cost_col="cost",
-            )
-            totals_cost = df_cost.groupby("End_Use", as_index=False)["cost"].sum()
-            totals_cost["cost_per_m2"] = (totals_cost["cost"] / project_area).round(2)
-
-            cost_intensity_gross = float(totals_cost.loc[totals_cost["cost_per_m2"] > 0, "cost_per_m2"].sum())
-            cost_intensity_net = float(totals_cost["cost_per_m2"].sum())
-
-            # -------------------------
-            # Benchmark thresholds dict
-            # -------------------------
-            benchmark_dict = {}
-            for _, row in benchmark_df.iterrows():
-                kpi_name = row.get("KPI_Name")
-                if pd.isna(kpi_name):
-                    continue
-                benchmark_dict[str(kpi_name)] = {
-                    "Good_Threshold": float(row.get("Good_Threshold", float("nan"))),
-                    "Excellent_Threshold": float(row.get("Excellent_Threshold", float("nan"))),
-                }
-
-            # Use same currency the user selected (fallback to preloaded or €)
-            _curr = None
-            try:
-                _curr = currency_symbol
-            except Exception:
-                _curr = preloaded.get("currency") if preloaded else None
-            if not _curr:
-                _curr = "€"
-
-            # -------------------------
-            # Header metrics
-            # -------------------------
-            total_consumption_kwh = float(df_melted.loc[df_melted["kWh"] > 0, "kWh"].sum())
-            total_generation_kwh = float(-df_melted.loc[df_melted["kWh"] < 0, "kWh"].sum())
-            pv_coverage = (total_generation_kwh / total_consumption_kwh) if total_consumption_kwh > 0 else 0.0
-            st.metric("Active Scenario", active_selected)
-            a1, a2 = st.columns([3, 1])
-            with a1:
-                b1, b2, b3 = st.columns(3)
-                with b1:
-                    st.metric("Building Use", building_use, help="User input (sidebar)")
-                with b2:
-                    st.metric("Building Area", f"{project_area:,.0f} m²", help="User input (sidebar)")
-                with b3:
-                    st.metric("On-site generation share", f"{pv_coverage * 100:.0f} %",
-                              help="Derived from negative energy balance entries (e.g., on-site generation)")
-                with b3:
-                    st.metric("EUI (Net)", f"{eui_net:.1f} kWh/m²·a")
-                with b2:
-                    st.metric("Energy Cost Intensity (Net)", f"{cost_intensity_net:.1f} €/m²·a")
-                with b1:
-                    st.metric("CO₂ Intensity (Net)", f"{co2_intensity_net:.1f} kgCO₂/m²·a")
-                with b1:
-                    st.metric("CO₂ Intensity (Gross)", f"{co2_intensity_gross:.1f} kgCO₂/m²·a")
-                with b2:
-                    st.metric("Energy Cost Intensity (Gross)", f"{cost_intensity_gross:.1f} €/m²·a")
-                with b3:
-                    st.metric("EUI (Gross)", f"{eui_gross:.1f} kWh/m²·a")
-
-            with a2:
-                try:
-                    latitude_map = float(latitude)
-                    longitude_map = float(longitude)
-                    df_map = pd.DataFrame({"lat": [latitude_map], "lon": [longitude_map]})
-                    st.metric("Project Location", "", help="User input (sidebar)")
-                    st.map(data=df_map, latitude="lat", longitude="lon", height=220, zoom=9)
-                except Exception:
-                    st.metric("Project Location", "–")
-                    st.caption("Latitude/Longitude not available.")
-
-            st.markdown("---")
-
-
-            # -------------------------
-            # KPI benchmark visuals (no more speedometers)
-            # -------------------------
-            def _benchmark_band_chart(
-                    title: str,
-                    unit: str,
-                    value_net: float,
-                    value_gross: float,
-                    good_thr: float,
-                    excellent_thr: float,
-            ) -> go.Figure:
-                # Range: extend beyond good threshold for readability
-                candidates = [v for v in [value_net, value_gross, good_thr, excellent_thr] if pd.notna(v)]
-                xmax = max(candidates) if candidates else max(value_net, value_gross, 1.0)
-                xmax = xmax * 1.20 if xmax > 0 else 1.0
-
-                fig = go.Figure()
-
-                # Background bands (Excellent -> Good -> Poor)
-                if pd.notna(excellent_thr) and pd.notna(good_thr):
-                    fig.add_shape(
-                        type="rect", x0=0, x1=excellent_thr, y0=0, y1=1,
-                        fillcolor=get_benchmark_color("Excellent"), opacity=0.12, line_width=0
-                    )
-                    fig.add_shape(
-                        type="rect", x0=excellent_thr, x1=good_thr, y0=0, y1=1,
-                        fillcolor=get_benchmark_color("Good"), opacity=0.12, line_width=0
-                    )
-                    fig.add_shape(
-                        type="rect", x0=good_thr, x1=xmax, y0=0, y1=1,
-                        fillcolor=get_benchmark_color("Poor"), opacity=0.12, line_width=0
-                    )
-                    # Threshold lines
-                    fig.add_vline(x=excellent_thr, line_width=2, line_dash="dot",
-                                  line_color=get_benchmark_color("Excellent"))
-                    fig.add_vline(x=good_thr, line_width=2, line_dash="dot", line_color=get_benchmark_color("Poor"))
-
-                if value_net < excellent_thr:
-                    MARKER_NET_COLOR = get_benchmark_color("Excellent")
-                elif value_net < good_thr:
-                    MARKER_NET_COLOR = get_benchmark_color("Good")
-                else:
-                    MARKER_NET_COLOR = get_benchmark_color("Poor")
-
-                if value_gross < excellent_thr:
-                    MARKER_GROSS_COLOR = get_benchmark_color("Excellent")
-                elif value_gross < good_thr:
-                    MARKER_GROSS_COLOR = get_benchmark_color("Good")
-                else:
-                    MARKER_GROSS_COLOR = get_benchmark_color("Poor")
-
-                # Markers for gross / net
-                fig.add_trace(go.Scatter(
-                    x=[value_gross], y=[0.3],
-                    mode="markers",
-                    marker=dict(size=40, symbol="square-open", color=MARKER_GROSS_COLOR,
-                                line=dict(width=2, color=MARKER_GROSS_COLOR)),
-                    name="Gross",
-                    hovertemplate=f"Gross: %{{x:.2f}} {unit}<extra></extra>",
-                ))
-
-                fig.add_trace(go.Scatter(
-                    x=[value_net], y=[0.7],
-                    mode="markers",
-                    marker=dict(size=40, symbol="square", color=MARKER_NET_COLOR,
-                                line=dict(width=2, color=MARKER_NET_COLOR)),
-                    name="Net",
-                    hovertemplate=f"Net: %{{x:.2f}} {unit}<extra></extra>",
-                ))
-
-                fig.update_yaxes(visible=False, range=[0, 1])
-                fig.update_xaxes(range=[0, xmax], title_text=unit, zeroline=False)
-                fig.update_layout(
-                    title=title,
-                    height=400,
-                    margin=dict(l=20, r=20, t=50, b=10),
-                    legend=dict(orientation="h", yanchor="top", y=-0.35, xanchor="center", x=0.5),
-                )
-                return fig
-
-
-            st.write("## Core benchmark KPIs")
-
-            kpi_specs = [
-                dict(
-                    template_key="Energy_Density",
-                    title="Energy Density (EUI) vs Benchmark",
-                    unit="kWh/m²·a",
-                    net=eui_net,
-                    gross=eui_gross,
-                    metric_net_fmt="{:.1f} kWh/m²·a",
-                    metric_gross_fmt="{:.1f} kWh/m²·a",
-                ),
-                dict(
-                    template_key="CO2_Emissions",
-                    title="Carbon Intensity vs Benchmark",
-                    unit="kgCO₂/m²·a",
-                    net=co2_intensity_net,
-                    gross=co2_intensity_gross,
-                    metric_net_fmt="{:.1f} kgCO₂/m²·a",
-                    metric_gross_fmt="{:.1f} kgCO₂/m²·a",
-                ),
-                dict(
-                    template_key="Energy_Cost",
-                    title="Energy Cost vs Benchmark",
-                    unit=f"{_curr}/m²·a",
-                    net=cost_intensity_net,
-                    gross=cost_intensity_gross,
-                    metric_net_fmt=_curr + " {:.2f}/m²·a",
-                    metric_gross_fmt=_curr + " {:.2f}/m²·a",
-                ),
-            ]
-
-            for spec in kpi_specs:
-                tkey = spec["template_key"]
-                good_thr = benchmark_dict.get(tkey, {}).get("Good_Threshold", float("nan"))
-                excellent_thr = benchmark_dict.get(tkey, {}).get("Excellent_Threshold", float("nan"))
-
-                c1, c2 = st.columns([3, 1], gap="large")
-
-                with c1:
-                    fig_band = _benchmark_band_chart(
-                        title=spec["title"],
-                        unit=spec["unit"],
-                        value_net=float(spec["net"]),
-                        value_gross=float(spec["gross"]),
-                        good_thr=good_thr,
-                        excellent_thr=excellent_thr,
-                    )
-                    st_plotly_chart(fig_band, use_container_width=True, key=f"bm_band_{tkey}")
-
-                with c2:
-                    if pd.notna(good_thr) and pd.notna(excellent_thr):
-                        category = get_benchmark_category(float(spec["net"]), float(good_thr), float(excellent_thr))
-                        st.metric("Net", spec["metric_net_fmt"].format(float(spec["net"])))
-                        st.metric("Gross", spec["metric_gross_fmt"].format(float(spec["gross"])))
-                        st.write("**WS Benchmark**")
-                        if category == "Excellent":
-                            st.image("Pamo_Icon_Platin.png", width=90)
-                            st.write("**Platin**")
-                        elif category == "Good":
-                            st.image("Pamo_Icon_Green.png", width=90)
-                            st.write("**Green**")
-                        else:
-                            st.image("Pamo_Icon_Gray.png", width=90)
-                            st.write("*not Benchmarked*")
-                    else:
-                        st.metric("Net", spec["metric_net_fmt"].format(float(spec["net"])))
-                        st.metric("Gross", spec["metric_gross_fmt"].format(float(spec["gross"])))
-                        st.caption("No benchmark thresholds available for this KPI.")
-
-            st.markdown("---")
-
-            # -------------------------
-            # Drivers / breakdowns (aligned with other tabs' chart style)
-            # -------------------------
-            with st.expander(label="Validation Diagrams (under development)", expanded=False):
-                st.subheader("Drivers and breakdowns")
-
-                # Energy waterfall: Gross -> On-site generation -> Net
-                gen_intensity = eui_net - eui_gross  # negative when generation exists
-                fig_water = go.Figure(
-                    go.Waterfall(
-                        x=["Gross consumption", "On-site generation", "Net (site)"],
-                        y=[eui_gross, gen_intensity, eui_net],
-                        measure=["relative", "relative", "total"],
-                        text=[f"{eui_gross:.1f}", f"{gen_intensity:.1f}", f"{eui_net:.1f}"],
-                        textposition="outside",
-                    )
-                )
-                fig_water.update_layout(
-                    title="EUI accounting (Gross → Net)",
-                    xaxis_title="",
-                    yaxis_title="kWh/m²·a",
-                    height=380,
-                    margin=dict(l=20, r=20, t=60, b=40),
-                    showlegend=False,
-                )
-
-                # End-use breakdown (kWh/m²·a)
-                df_end_use = totals.copy()
-                df_end_use = df_end_use.sort_values("kWh_per_m2", ascending=True)
-
-                _enduse_order = df_end_use["End_Use"].tolist()
-                _enduse_cmap = {eu: color_map.get(eu, "#999999") for eu in df_end_use["End_Use"].unique()}
-
-                fig_end_use = px.bar(
-                    df_end_use,
-                    x="kWh_per_m2",
-                    y="End_Use",
-                    color="End_Use",
-                    orientation="h",
-                    title="Energy intensity by end use (Net accounting)",
-                    color_discrete_map=_enduse_cmap,
-                    category_orders={"End_Use": _enduse_order},
-                    text_auto=".1f",
-                )
-                fig_end_use.update_layout(
-                    xaxis_title="kWh/m²·a",
-                    yaxis_title="",
-                    legend_title_text="",
-                    height=380,
-                    margin=dict(l=10, r=10, t=60, b=40),
-                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                )
-                fig_end_use.add_vline(x=0, line_width=1, line_color="#666666")
-
-                a1, a2 = st.columns(2, gap="large")
-                with a1:
-                    st_plotly_chart(fig_water, use_container_width=True, key="bm_waterfall_eui")
-                with a2:
-                    st_plotly_chart(fig_end_use, use_container_width=True, key="bm_enduse_energy")
-
-                # Source split (energy & CO2) — handle negative entries explicitly as on-site generation
-                df_src = df_melted.copy()
-                df_src["Energy_Source_BM"] = df_src.apply(
-                    lambda r: "On-site generation" if r["kWh"] < 0 else r["Energy_Source"],
-                    axis=1,
-                )
-
-                _src_labels = list(pd.unique(df_src["Energy_Source_BM"]))
-                _src_cmap = {s: color_map_sources.get(s, color_map.get(s, "#999999")) for s in _src_labels}
-                if "On-site generation" in _src_cmap:
-                    _src_cmap["On-site generation"] = color_map.get("On-site_Generation", CRREM_COLOR_MEASURES)
-
-                src_energy = df_src.groupby("Energy_Source_BM", as_index=False)["kWh"].sum()
-                src_energy["kWh_per_m2"] = (src_energy["kWh"] / project_area).round(2)
-                src_energy = src_energy.sort_values("kWh_per_m2", ascending=True)
-
-                fig_src_energy = px.bar(
-                    src_energy,
-                    x="kWh_per_m2",
-                    y="Energy_Source_BM",
-                    color="Energy_Source_BM",
-                    orientation="h",
-                    title="Energy intensity by energy source (Net accounting)",
-                    color_discrete_map=_src_cmap,
-                    category_orders={"Energy_Source_BM": src_energy["Energy_Source_BM"].tolist()},
-                    text_auto=".1f",
-                )
-                fig_src_energy.update_layout(
-                    xaxis_title="kWh/m²·a",
-                    yaxis_title="",
-                    legend_title_text="",
-                    height=360,
-                    margin=dict(l=10, r=10, t=60, b=40),
-                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                )
-                fig_src_energy.add_vline(x=0, line_width=1, line_color="#666666")
-
-                df_src_co2 = df_co2.copy()
-                df_src_co2["Energy_Source_BM"] = df_src["Energy_Source_BM"].values
-                src_co2 = df_src_co2.groupby("Energy_Source_BM", as_index=False)["kgCO2"].sum()
-                src_co2["kgCO2_per_m2"] = (src_co2["kgCO2"] / project_area).round(2)
-                src_co2 = src_co2.sort_values("kgCO2_per_m2", ascending=True)
-
-                fig_src_co2 = px.bar(
-                    src_co2,
-                    x="kgCO2_per_m2",
-                    y="Energy_Source_BM",
-                    color="Energy_Source_BM",
-                    orientation="h",
-                    title="CO₂ intensity by energy source (Net accounting)",
-                    color_discrete_map=_src_cmap,
-                    category_orders={"Energy_Source_BM": src_co2["Energy_Source_BM"].tolist()},
-                    text_auto=".1f",
-                )
-                fig_src_co2.update_layout(
-                    xaxis_title="kgCO₂/m²·a",
-                    yaxis_title="",
-                    legend_title_text="",
-                    height=360,
-                    margin=dict(l=10, r=10, t=60, b=40),
-                    legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                )
-                fig_src_co2.add_vline(x=0, line_width=1, line_color="#666666")
-
-                b1, b2 = st.columns(2, gap="large")
-                with b1:
-                    st_plotly_chart(fig_src_energy, use_container_width=True, key="bm_source_energy")
-                with b2:
-                    st_plotly_chart(fig_src_co2, use_container_width=True, key="bm_source_co2")
-
-                with st.expander("Cost breakdown (Net accounting)", expanded=False):
-                    df_src_cost = df_cost.copy()
-                    df_src_cost["Energy_Source_BM"] = df_src["Energy_Source_BM"].values
-                    src_cost = df_src_cost.groupby("Energy_Source_BM", as_index=False)["cost"].sum()
-                    src_cost["cost_per_m2"] = (src_cost["cost"] / project_area).round(2)
-                    src_cost = src_cost.sort_values("cost_per_m2", ascending=True)
-
-                    fig_src_cost = px.bar(
-                        src_cost,
-                        x="cost_per_m2",
-                        y="Energy_Source_BM",
-                        color="Energy_Source_BM",
-                        orientation="h",
-                        title="Energy cost by energy source (Net accounting)",
-                        color_discrete_map=_src_cmap,
-                        category_orders={"Energy_Source_BM": src_cost["Energy_Source_BM"].tolist()},
-                        text_auto=".2f",
-                    )
-                    fig_src_cost.update_layout(
-                        xaxis_title=f"{_curr}/m²·a",
-                        yaxis_title="",
-                        legend_title_text="",
-                        height=360,
-                        margin=dict(l=10, r=10, t=60, b=40),
-                        legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="center", x=0.5),
-                    )
-                    fig_src_cost.add_vline(x=0, line_width=1, line_color="#666666")
-                    st_plotly_chart(fig_src_cost, use_container_width=True, key="bm_source_cost")
-
-                    # Optional: show raw numbers for transparency
-                    st.dataframe(
-                        src_cost.rename(columns={"Energy_Source_BM": "Energy Source",
-                                                 "cost_per_m2": f"Cost intensity ({_curr}/m²·a)"}),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-    if not uploaded_file:
-        st.write("Please upload the project Excel file to see benchmark results.")
 
 # =========================
 # Tab 8 — Raw Data (editable Energy_Balance + Loads_Balance)
