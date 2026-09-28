@@ -17392,6 +17392,42 @@ def _dashboard_stranding(asset, limit):
     return (float(year), str(year)) if year is not None else (float(horizon + 1), f'Not stranded through {horizon}')
 
 
+def _dashboard_hotwater_efficiencies(energy_frames, load_frames, scenarios):
+    """Keep each named HotWater system separate; require an unambiguous matching load."""
+    result = pd.DataFrame(index=list(scenarios))
+    for name, payload in scenarios.items():
+        energy = energy_frames[name]
+        loads = load_frames[name]
+        for use in [c for c in energy.columns if c != 'Month']:
+            normalized = _loads_energy_match_key(str(use))
+            if not (normalized.startswith('hotwater') or normalized.startswith('domestichotwater')
+                    or normalized.startswith('dhw')):
+                continue
+            key = 'efficiency::' + str(use)
+            if key not in result:
+                result[key] = np.nan
+            candidates = [c for c in _loads_available_load_columns(loads)
+                          if _loads_energy_match_key(str(c)) == normalized]
+            exact = [c for c in candidates if str(c) == str(use)]
+            matched = exact[0] if len(exact) == 1 else (candidates[0] if len(candidates) == 1 else None)
+            if matched is None:
+                continue
+            demand = pd.to_numeric(loads[matched], errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
+            consumption = pd.to_numeric(energy[use], errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
+            factor = _to_float_lcc((payload.get('efficiency', {}) or {}).get(str(use), 1.0), 1.0)
+            if demand.empty or consumption.empty or not np.isfinite(factor) or factor <= 0:
+                continue
+            input_energy = float(consumption.sum()) / factor
+            if input_energy > 1e-12:
+                result.loc[name, key] = float(demand.sum()) / input_energy
+    return result
+
+
+def _dashboard_system_efficiency_keys(data):
+    return ['Heating efficiency', 'Cooling efficiency'] + [
+        key for key in data.columns if str(key).startswith('efficiency::')]
+
+
 def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, year, currency, load_mapping,
                           selected_energy_uses=None, filter_scope="LCC only"):
     """Use committed scenario calculations; never active-scenario widget factors."""
@@ -17426,6 +17462,7 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
         apply_lcc_filter=False, include_capex=True, include_annual_opex=True)
     for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_discounted_lcc_kpi_label(50)), ('LCC50 nominal', _scenario_lcc_kpi_label(50)), ('CAPEX', 'Capex /m²'), ('OPEX', 'Annual OPEX /m²')]:
         result[new] = lcc_raw.loc[lcc_raw['KPI'] == old].set_index('Scenario')['Value']
+    efficiency_energy_frames = dict(energies)
     # Dashboard-only copies: never change global LCC assumptions, scenario payloads or cached frames.
     if selected_energy_uses is not None:
         result = result.astype(float)
@@ -17512,6 +17549,8 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
             else:
                 notes.append(f'{name}: {source} peak unavailable; no valid source load column.')
     raw_loads = {name: get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False) for name in scenarios}
+    hotwater_efficiencies = _dashboard_hotwater_efficiencies(efficiency_energy_frames, raw_loads, scenarios)
+    result = result.join(hotwater_efficiencies)
     for name, frame in raw_loads.items():
         for col in _loads_available_load_columns(frame):
             key = 'load::' + str(col)
@@ -17721,14 +17760,18 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
         for col,(kind,pair) in zip(starts,scatter_panels):
             if kind in ['System Efficiency','CRREM Stranding']:
                 crrem = kind=='CRREM Stranding'
-                keys = ['Carbon stranding','EUI stranding'] if crrem else ['Heating efficiency','Cooling efficiency']
+                keys = ['Carbon stranding','EUI stranding'] if crrem else _dashboard_system_efficiency_keys(all_data)
                 for j,key in enumerate(keys):
                     value = d[key]
                     status = str(d[key+' status']) if crrem else f'{value:,.2f} kWh thermal/kWh input'
-                    symbol = ('triangle-right-open' if status.startswith('Not stranded') else 'circle') if crrem else ('circle' if j==0 else 'diamond')
+                    symbol = ('triangle-right-open' if status.startswith('Not stranded') else 'circle') if crrem else ['circle', 'diamond', 'square', 'triangle-up', 'cross', 'star'][j % 6]
                     add(go.Scatter(x=[value],y=[j+offset],mode='markers',marker=dict(size=11,color=color,symbol=symbol),
-                        text=[f'<b>{safe}</b><br>{escape(key)}: {escape(status)}'],hovertemplate='%{text}<extra></extra>'),name,2,col)
-                fig.update_yaxes(tickvals=[0,1],ticktext=['Carbon','EUI'] if crrem else ['Heating','Cooling'],range=[-.5,1.5],row=2,col=col)
+                        text=[f'<b>{safe}</b><br>{escape(key.removeprefix("efficiency::"))}: {escape(status)}'],hovertemplate='%{text}<extra></extra>'),name,2,col)
+                system_labels = ['Carbon','EUI'] if crrem else [
+                    key.split('::', 1)[1] if key.startswith('efficiency::') else key.removesuffix(' efficiency')
+                    for key in keys]
+                fig.update_yaxes(tickvals=list(range(len(keys))), ticktext=system_labels,
+                                 range=[-.5, len(keys)-.5], row=2, col=col)
                 fig.update_xaxes(title_text='Year · better →' if crrem else 'kWh thermal / kWh input · better →',row=2,col=col)
                 if crrem:
                     fig.update_xaxes(range=[min(year,2049)-1,2053],tickvals=list(range(min(year,2050),2051,5))+[2051],
@@ -17748,7 +17791,7 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
     fig.update_xaxes(showgrid=True,gridcolor='#edf0f4',zeroline=False,tickfont=dict(size=10),title_font=dict(size=11))
     fig.update_yaxes(showgrid=True,gridcolor='#edf0f4',zeroline=False,tickfont=dict(size=10),title_font=dict(size=11))
     fig.update_annotations(font=dict(size=12,color='#475569'),yshift=44)
-    fig.update_layout(height=790 if n else 500,margin=dict(l=75,r=65,t=135,b=65),font=dict(family='Arial',size=12),
+    fig.update_layout(height=1043 if n else 660,margin=dict(l=75,r=65,t=178.2,b=85.8),font=dict(family='Arial',size=12),
         paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
         legend=dict(orientation='h',y=1.19,yanchor='bottom',x=0,font=dict(size=12),groupclick='togglegroup'),
         hoverlabel=dict(font_size=12),uirevision=str([[c[0] for c in cat] for cat in categories])+str(scatter_panels))
@@ -17947,7 +17990,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
     st.plotly_chart(fig,use_container_width=True,key='project_dashboard_v3',config={'displaylogo':False,'toImageButtonOptions':{'format':'svg','filename':'BPVis_Project_Dashboard','width':1600,'height':900}})
     displayed = {item[0] for category in categories for item in category}
     for kind,pair in scatter_panels:
-        displayed.update(pair or (['Heating efficiency','Cooling efficiency'] if kind=='System Efficiency' else ['Carbon stranding','EUI stranding']))
+        displayed.update(pair or (_dashboard_system_efficiency_keys(data) if kind=='System Efficiency' else ['Carbon stranding','EUI stranding']))
     unavailable = data.loc[selected,sorted(displayed)].isna().sum().sum()
     if unavailable:
         st.caption(f'{unavailable} KPI values unavailable. Missing load columns or CRREM inputs are not plotted.')
