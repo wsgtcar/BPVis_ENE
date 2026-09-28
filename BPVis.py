@@ -8651,7 +8651,7 @@ def create_benchmark_bar_chart(values_dict: Dict[str, float], thresholds_dict: D
 
 
 DASHBOARD_SETUP_SHEET = 'Dashboard_Setup'
-DASHBOARD_SETUP_KEYS = {'dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile'} | {
+DASHBOARD_SETUP_KEYS = {'dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis'} | {
     f'dashboard_radar_{i}' for i in range(3)} | {
     f'dashboard_scatter_{i}{suffix}' for i in range(3) for suffix in ['', '_x', '_y']}
 
@@ -17423,7 +17423,7 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
         file_bytes, filename, scenarios, list(scenarios), comparison, area, year, currency,
         lcc_global, crrem_dataset=crrem, scenario_analysis_period=50,
         apply_lcc_filter=False, include_capex=True, include_annual_opex=True)
-    for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_discounted_lcc_kpi_label(50)), ('CAPEX', 'Capex /m²'), ('OPEX', 'Annual OPEX /m²')]:
+    for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_discounted_lcc_kpi_label(50)), ('LCC50 nominal', _scenario_lcc_kpi_label(50)), ('CAPEX', 'Capex /m²'), ('OPEX', 'Annual OPEX /m²')]:
         result[new] = lcc_raw.loc[lcc_raw['KPI'] == old].set_index('Scenario')['Value']
     for service in ['Heating', 'Cooling']:
         result[f'{service} peak'] = np.nan
@@ -17464,7 +17464,7 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
     for total,intensity in [('Gross energy total','EUI gross'),('Net energy total','EUI net'),
         ('Gross carbon total','Carbon gross'),('Net carbon total','Carbon net'),('Lifetime carbon total','LCA50'),
         ('Generation total','Generation'),('Gross cost total','Energy cost gross'),('Net cost total','Energy cost net'),
-        ('CAPEX total','CAPEX'),('OPEX total','OPEX'),('LCC50 total','LCC50'),('LCC50 discounted total','LCC50 discounted')]:
+        ('CAPEX total','CAPEX'),('OPEX total','OPEX'),('LCC50 total','LCC50'),('LCC50 nominal total','LCC50 nominal'),('LCC50 discounted total','LCC50 discounted')]:
         result[total] = result[intensity] * area
     for name, payload in scenarios.items():
         for metric in ['Carbon stranding', 'EUI stranding']:
@@ -17730,6 +17730,13 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
                 st.session_state[axis_key] = lcc_aliases.get(value, value)
     with st.expander('Dashboard setup', expanded=False):
         st.caption('Your dashboard setup is included when you save/export the project.')
+        if st.session_state.get('dashboard_lcc_basis') not in ['Discounted', 'Nominal']:
+            st.session_state['dashboard_lcc_basis'] = 'Discounted'
+        lcc_basis = st.radio(
+            'LCC basis for radar and scatter plots', ['Discounted', 'Nominal'],
+            horizontal=True, key='dashboard_lcc_basis',
+            help='Applies to all LCC axes, including total and per-m² values. Both bases are always shown in the metric cards.',
+        )
         left, right = st.columns([3,1])
         key = 'dashboard_scenarios_v3'
         if key not in st.session_state:
@@ -17825,10 +17832,28 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
     # No visual focus: metrics still describe the sidebar scenario, even if filtered out.
     metric_scenario = focus if focus is not None else (active if active in names else names[0])
     st.subheader(str(metric_scenario).replace('*', r'\*').replace('_', r'\_'))
-    columns = st.columns(4)
-    for col,(key,label,unit) in zip(columns,[('EUI net','Net EUI','kWh/m²·a'),('Carbon net','Net emissions','kgCO₂e/m²·a'),('LCC50','LCC · 50 years',currency+'/m²'),('Coverage','Renewables coverage','%')]):
+    columns = st.columns(5)
+    metric_definitions = [
+        ('EUI net', 'Net EUI', 'kWh/m²·a'),
+        ('Carbon net', 'Net emissions', 'kgCO₂e/m²·a'),
+        ('LCC50 nominal', 'Nominal LCC · 50 years', currency+'/m²'),
+        ('LCC50 discounted', 'Discounted LCC · 50 years', currency+'/m²'),
+        ('Coverage', 'Renewables coverage', '%'),
+    ]
+    for col,(key,label,unit) in zip(columns,metric_definitions):
         value = data.loc[metric_scenario,key]
-        col.metric(label, f'{value:,.1f} {unit}' if pd.notna(value) and np.isfinite(value) else 'N/A',help=f'{metric_scenario} · '+('Nominal 50-year total, including replacements and residual value.' if key=='LCC50' else 'Scenario-based annual result; coverage = on-site generation / gross consumption.'))
+        if key.startswith('LCC50'):
+            basis = 'Nominal' if key == 'LCC50 nominal' else 'Discounted'
+            detail = f'{basis} 50-year life-cycle cost per m², using the global LCC assumptions.'
+        else:
+            detail = 'Scenario-based annual result; coverage = on-site generation / gross consumption.'
+        col.metric(label, f'{value:,.1f} {unit}' if pd.notna(value) and np.isfinite(value) else 'N/A',
+                   help=f'{metric_scenario} · {detail}')
+    # Route every LCC plot axis through the selected basis; cards retain both original values.
+    data = data.copy()
+    data['LCC50'] = data[f'LCC50 {lcc_basis.lower()}']
+    data['LCC50 total'] = data[f'LCC50 {lcc_basis.lower()} total']
+    st.caption(f'LCC in radar and scatter plots: {lcc_basis.lower()} · 50 years.')
     if not any(categories) and not scatter_panels:
         return
     data, categories[2], load_title = _dashboard_load_radar_data(
