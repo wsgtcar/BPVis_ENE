@@ -8651,7 +8651,7 @@ def create_benchmark_bar_chart(values_dict: Dict[str, float], thresholds_dict: D
 
 
 DASHBOARD_SETUP_SHEET = 'Dashboard_Setup'
-DASHBOARD_SETUP_KEYS = {'dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis'} | {
+DASHBOARD_SETUP_KEYS = {'dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis','dashboard_energy_uses','dashboard_energy_filter_scope'} | {
     f'dashboard_radar_{i}' for i in range(3)} | {
     f'dashboard_scatter_{i}{suffix}' for i in range(3) for suffix in ['', '_x', '_y']}
 
@@ -8685,7 +8685,7 @@ def _dashboard_restore_setup(frame):
                     if isinstance(value,(int,float)) and not isinstance(value,bool) and np.isfinite(value) and 0 <= value <= 100:
                         values[key] = float(value)
                     continue
-                is_list = key=='dashboard_scenarios_v3' or key.startswith('dashboard_radar_')
+                is_list = key in {'dashboard_scenarios_v3', 'dashboard_energy_uses'} or key.startswith('dashboard_radar_')
                 if (is_list and isinstance(value,list) and all(isinstance(v,str) for v in value)) or (
                     not is_list and (isinstance(value,str) or (key=='dashboard_focus_v3' and value is None))):
                     values[key] = value
@@ -17392,7 +17392,8 @@ def _dashboard_stranding(asset, limit):
     return (float(year), str(year)) if year is not None else (float(horizon + 1), f'Not stranded through {horizon}')
 
 
-def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, year, currency, load_mapping):
+def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, year, currency, load_mapping,
+                          selected_energy_uses=None, filter_scope="LCC only"):
     """Use committed scenario calculations; never active-scenario widget factors."""
     data = comparison.copy().set_index('Scenario')
     data.index = data.index.astype(str)
@@ -17425,6 +17426,66 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
         apply_lcc_filter=False, include_capex=True, include_annual_opex=True)
     for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_discounted_lcc_kpi_label(50)), ('LCC50 nominal', _scenario_lcc_kpi_label(50)), ('CAPEX', 'Capex /m²'), ('OPEX', 'Annual OPEX /m²')]:
         result[new] = lcc_raw.loc[lcc_raw['KPI'] == old].set_index('Scenario')['Value']
+    # Dashboard-only copies: never change global LCC assumptions, scenario payloads or cached frames.
+    if selected_energy_uses is not None:
+        result = result.astype(float)
+        selected_uses = {_canon_enduse_name(str(u)) for u in selected_energy_uses}
+        broader_scope = filter_scope == "LCC and other energy KPIs"
+        for name, payload in scenarios.items():
+            frame = energies[name]
+            uses = [_canon_enduse_name(str(c)) for c in frame.columns if c != 'Month']
+            assumptions = dict(lcc_global)
+            assumptions['analysis_period'] = 50
+            # Calculate the full allocation first, then retain only selected end-use shares.
+            # This also handles an empty selection without the LCC engine's default fallback.
+            assumptions['selected_operational_end_uses'] = uses
+            loads_frame = get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False)
+            cashflow = compute_lcc_cashflow_table_cached(
+                frame, payload, uses, year, lcc_global=assumptions, df_loads=loads_frame)
+            cashflow = cashflow.loc[cashflow['End_Use'].map(lambda u: _canon_enduse_name(str(u))).isin(selected_uses)].copy()
+            result.loc[name, 'LCC50 nominal'] = cashflow['Nominal Cost'].sum() / area
+            result.loc[name, 'LCC50'] = cashflow['Discounted Cost'].sum() / area
+            if broader_scope:
+                # Rates are derived from the full energy basis, preserving allocated demand charges.
+                rows = _lcc_energy_rows_for_payload(frame, payload, uses)
+                rates = _tariff_rate_details_for_rows(
+                    rows, payload, loads_frame, energy_col='kWh', source_col='Energy_Source',
+                    per_kwh_map=payload.get('tariffs', {}) or {})
+                rows = _tariff_apply_rates_to_rows(rows, rates, energy_col='kWh', source_col='Energy_Source',
+                                                 tariff_col='Tariff', cost_col='Annual Cost')
+                rows = rows.loc[rows['End_Use'].isin(selected_uses)].copy()
+                onsite = set(get_onsite_generation_enduses(uses))
+                consumption = ~rows['End_Use'].isin(onsite)
+                factors = payload.get('factors', {}) or {}
+                carbon = rows['kWh'] * rows['Energy_Source'].map(lambda src: float(factors.get(src, 0.0)))
+                result.loc[name, 'EUI net'] = rows['kWh'].sum() / area
+                result.loc[name, 'EUI gross'] = rows.loc[consumption, 'kWh'].sum() / area
+                result.loc[name, 'Generation'] = -rows.loc[~consumption, 'kWh'].sum() / area
+                result.loc[name, 'Carbon net'] = carbon.sum() / area
+                result.loc[name, 'Carbon gross'] = carbon.loc[consumption].sum() / area
+                result.loc[name, 'Energy cost net'] = rows['Annual Cost'].sum() / area
+                result.loc[name, 'Energy cost gross'] = rows.loc[consumption, 'Annual Cost'].sum() / area
+                gross = result.loc[name, 'EUI gross']
+                result.loc[name, 'Coverage'] = 100 * result.loc[name, 'Generation'] / gross if gross > 0 else np.nan
+                # Keep initial CAPEX consistent with its existing un-escalated definition.
+                investments = _lcc_investments_records_to_df((payload.get('lcc', {}) or {}).get('investments', []), end_uses=uses)
+                capex = 0.0
+                for _, investment in investments.iterrows():
+                    assigned = _lcc_parse_assigned_enduses(investment.get('Assigned End Uses', ''), end_uses=uses)
+                    if not assigned:
+                        assigned = _lcc_default_selected_enduses(uses)[:1]
+                    share = sum(u in selected_uses for u in assigned) / max(1, len(assigned))
+                    capex += _to_float_lcc(investment.get('Investment Cost'), 0.0) * share
+                result.loc[name, 'CAPEX'] = capex / area
+                result.loc[name, 'OPEX'] = cashflow.loc[
+                    (cashflow['Year'] == year) & cashflow['Cost Type'].isin(['Energy', 'Maintenance']), 'Nominal Cost'].sum() / area
+                # Filter columns rather than zeroing them, so excluded generation cannot be
+                # reintroduced by future CRREM production measures.
+                energies[name] = frame.loc[:, [c for c in frame.columns if c == 'Month' or
+                    _canon_enduse_name(str(c)) in selected_uses]].copy()
+                result.loc[name, 'LCA50'] = compute_crrem_like_scenario_emissions_series_cached(
+                    energies[name], payload, crrem, year, list(range(year, year + 50))).sum() * 1000 / area
+
     for service in ['Heating', 'Cooling']:
         result[f'{service} peak'] = np.nan
         result[f'{service} efficiency'] = np.nan
@@ -17711,6 +17772,11 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         except Exception:
             pass
     loads = list(dict.fromkeys(loads))
+    dashboard_energy_options = []
+    for name in names:
+        frame = get_energy_balance_df(file_bytes, filename, scenario_name=name)
+        dashboard_energy_options.extend(_canon_enduse_name(str(c)) for c in frame.columns if c != 'Month')
+    dashboard_energy_options = list(dict.fromkeys(dashboard_energy_options))
     catalog = _dashboard_catalog(currency, loads)
     # Reinstate hidden custom-axis widget values from durable setup state.
     for setting,value in st.session_state.get('_dashboard_saved_setup',{}).items():
@@ -17737,6 +17803,24 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
             horizontal=True, key='dashboard_lcc_basis',
             help='Applies to all LCC axes, including total and per-m² values. Both bases are always shown in the metric cards.',
         )
+        energy_filter_key = 'dashboard_energy_uses'
+        if energy_filter_key not in st.session_state:
+            st.session_state[energy_filter_key] = _lcc_default_selected_enduses(dashboard_energy_options)
+        else:
+            st.session_state[energy_filter_key] = [u for u in st.session_state[energy_filter_key] if u in dashboard_energy_options]
+        dashboard_selected_uses = st.multiselect(
+            'Dashboard energy uses', dashboard_energy_options, key=energy_filter_key, format_func=ui_name,
+            help='Includes only selected energy uses and their allocated investment, maintenance and replacement costs in dashboard LCC. An empty selection gives zero LCC. Shared costs keep their original allocation.',
+        )
+        filter_scopes = ['LCC only', 'LCC and other energy KPIs']
+        if st.session_state.get('dashboard_energy_filter_scope') not in filter_scopes:
+            st.session_state['dashboard_energy_filter_scope'] = 'LCC only'
+        dashboard_filter_scope = st.radio(
+            'Apply dashboard energy-use filter to', filter_scopes, horizontal=True,
+            key='dashboard_energy_filter_scope',
+            help='LCC only affects the two LCC cards and all LCC plot values. The broader option also filters EUI, emissions, energy costs, generation, coverage, CAPEX, OPEX and CRREM trajectories. Load and efficiency metrics retain their measured profiles. Other tabs are unaffected.',
+        )
+        st.caption('These filters affect only Project Dashboard. Available energy uses follow the project master filter.')
         left, right = st.columns([3,1])
         key = 'dashboard_scenarios_v3'
         if key not in st.session_state:
@@ -17828,7 +17912,8 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         options = [c for c in loads if _loads_energy_match_key(c) in aliases[service]]
         mapping[service] = options[0] if len(options) == 1 else None
     with st.spinner('Preparing project dashboard…'):
-        data, notes = _dashboard_build_data(file_bytes,filename,scenarios,comparison,area,year,currency,mapping)
+        data, notes = _dashboard_build_data(file_bytes,filename,scenarios,comparison,area,year,currency,mapping,
+                                            selected_energy_uses=dashboard_selected_uses, filter_scope=dashboard_filter_scope)
     # No visual focus: metrics still describe the sidebar scenario, even if filtered out.
     metric_scenario = focus if focus is not None else (active if active in names else names[0])
     st.subheader(str(metric_scenario).replace('*', r'\*').replace('_', r'\_'))
