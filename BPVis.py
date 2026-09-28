@@ -4283,6 +4283,14 @@ def _scenario_lcc_kpi_label(period_years: int) -> str:
     return f"LCC {int(period_years)} years /m²"
 
 
+def _scenario_discounted_lcc_kpi_label(period_years: int) -> str:
+    return f"Discounted LCC {int(period_years)} years /m²"
+
+
+def _is_scenario_discounted_lcc_kpi(kpi: str) -> bool:
+    return str(kpi).startswith("Discounted LCC ") and str(kpi).endswith(" years /m²")
+
+
 def _scenario_lc_emissions_kpi_label(period_years: int) -> str:
     return f"Total Emissions {int(period_years)} years /m²"
 
@@ -4309,10 +4317,18 @@ def _scenario_radar_kpi_order(period_years: Optional[int] = None, radar_raw_df: 
         period_years = int(period_years or _get_scenario_comparison_analysis_period())
         lcc_label = _scenario_lcc_kpi_label(period_years)
         emis_label = _scenario_lc_emissions_kpi_label(period_years)
+    discounted_label = _scenario_discounted_lcc_kpi_label(
+        period_years or _get_scenario_comparison_analysis_period())
+    if isinstance(radar_raw_df, pd.DataFrame) and "KPI" in radar_raw_df.columns:
+        discounted_label = next(
+            (str(k) for k in radar_raw_df["KPI"] if _is_scenario_discounted_lcc_kpi(k)),
+            discounted_label,
+        )
     order = [
         "End Energy /m²",
         "Annual Energy Cost /m²",
         lcc_label,
+        discounted_label,
         "Annual Emissions /m²",
         emis_label,
     ]
@@ -4339,6 +4355,8 @@ def _scenario_kpi_short_label(kpi: str) -> str:
         return "Annual OPEX<br>/m²"
     if k == "Capex /m²":
         return "Capex<br>/m²"
+    if _is_scenario_discounted_lcc_kpi(k):
+        return f"Discounted LCC<br>{k.split(' ')[2]} years /m²"
     if _is_scenario_lcc_kpi(k):
         try:
             yrs = k.split(" ")[1]
@@ -4370,7 +4388,7 @@ def _scenario_kpi_axis_title(kpi: str, currency_label: str = "Cost") -> str:
         return f"{currency_label}/m²·a" if currency_label and currency_label != "Cost" else "Cost/m²·a"
     if k == "Capex /m²":
         return f"{currency_label}/m²" if currency_label and currency_label != "Cost" else "Cost/m²"
-    if _is_scenario_lcc_kpi(k):
+    if _is_scenario_lcc_kpi(k) or _is_scenario_discounted_lcc_kpi(k):
         return f"{currency_label}/m²" if currency_label and currency_label != "Cost" else "Cost/m²"
     if k == "Annual Emissions /m²":
         return "kgCO₂e/m²·a"
@@ -4463,10 +4481,11 @@ def _build_scenario_performance_radar_raw_df(
             except Exception:
                 capex_m2 = np.nan
 
-        # 2 + 3) Annual energy cost /m² and scenario-period nominal LCC /m².
+        # 2 + 3) Annual energy cost /m² and nominal / discounted scenario-period LCC /m².
         annual_energy_cost_m2 = np.nan
         annual_opex_m2 = np.nan
         lcc_50_nominal_m2 = np.nan
+        lcc_discounted_m2 = np.nan
         try:
             df_energy_sc_50 = get_energy_balance_df(file_bytes, filename, scenario_name=sc_name_str)
             end_uses_sc_50 = [_canon_enduse_name(str(c)) for c in df_energy_sc_50.columns if str(c) != "Month"]
@@ -4503,6 +4522,7 @@ def _build_scenario_performance_radar_raw_df(
                     )
                     annual_opex_m2 = (_annual_energy_cost + _annual_maintenance_cost) / area
                 lcc_50_nominal_m2 = float(cf_sc_50["Nominal Cost"].sum()) / area
+                lcc_discounted_m2 = float(cf_sc_50["Discounted Cost"].sum()) / area
         except Exception:
             pass
 
@@ -4529,6 +4549,8 @@ def _build_scenario_performance_radar_raw_df(
              "Unit": f"{currency_symbol_in}/m²·a"},
             {"Scenario": sc_name_str, "KPI": lcc_period_kpi_label, "Value": lcc_50_nominal_m2,
              "Unit": f"{currency_symbol_in}/m²"},
+            {"Scenario": sc_name_str, "KPI": _scenario_discounted_lcc_kpi_label(scenario_analysis_period),
+             "Value": lcc_discounted_m2, "Unit": f"{currency_symbol_in}/m²"},
             {"Scenario": sc_name_str, "KPI": "Annual Emissions /m²", "Value": annual_emissions_m2,
              "Unit": "kgCO₂e/m²·a"},
             {"Scenario": sc_name_str, "KPI": lc_emissions_period_kpi_label, "Value": total_emissions_50_m2,
@@ -4550,6 +4572,52 @@ def _build_scenario_performance_radar_raw_df(
         axis=1,
     )
     return out
+
+
+def _scenario_lcc_cost_type_figure(cost_df: pd.DataFrame, scenario_order: list,
+                                   basis: str, currency: str):
+    """Compare total LCC with one stacked bar per selected scenario (absolute costs)."""
+    value_col = f"{basis} Cost"
+    selected = [str(sc) for sc in scenario_order]
+    data = cost_df.loc[cost_df["Scenario"].astype(str).isin(selected)].copy()
+    data["Scenario"] = data["Scenario"].astype(str)
+    fig = go.Figure()
+    if data.empty:
+        return fig
+    present = set(data["Scenario"])
+    ordered = [sc for sc in selected if sc in present]
+    totals = data.groupby("Scenario")[value_col].sum().reindex(ordered)
+    types = ["Investment", "Energy", "Maintenance", "Replacement"]
+    types += [str(t) for t in data["Cost Type"].unique() if str(t) not in types]
+    for cost_type in types:
+        part = data.loc[data["Cost Type"] == cost_type]
+        if part.empty:
+            continue
+        values = part.groupby("Scenario")[value_col].sum().reindex(ordered, fill_value=0.0)
+        shares = values.div(totals.replace(0.0, np.nan)).mul(100.0)
+        fig.add_trace(go.Bar(
+            x=ordered, y=values.tolist(), name=cost_type,
+            marker_color=LCC_COST_TYPE_COLORS.get(cost_type, "#808080"),
+            text=[f"{share:.1f}%" if pd.notna(share) and value != 0 else ""
+                  for share, value in zip(shares, values)],
+            texttemplate="%{text}",
+            textposition="inside",
+            insidetextanchor="middle",
+            textangle=0,
+            customdata=np.column_stack([shares.to_numpy(), totals.to_numpy()]),
+            hovertemplate=("%{x}<br>" + cost_type + ": %{y:,.0f} " + currency
+                           + "<br>Share of total: %{customdata[0]:.1f}%"
+                           + "<br>Total: %{customdata[1]:,.0f} " + currency + "<extra></extra>"),
+        ))
+    fig.update_layout(
+        barmode="relative", height=550,
+        xaxis=dict(title="Scenario", categoryorder="array", categoryarray=ordered),
+        yaxis=dict(title=f"{basis} LCC ({currency})", rangemode="tozero"),
+        legend_title_text="Cost type",
+        legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
+        margin=dict(l=40, r=20, t=35, b=120),
+    )
+    return fig
 
 
 def _prepare_scenario_radar_plot_dfs(
@@ -14630,6 +14698,7 @@ with tab7:
                 "annual_opex",
                 "capex",
                 "lcc",
+                "discounted_lcc",
                 "annual_emissions",
                 "total_emissions",
             ]
@@ -14639,6 +14708,7 @@ with tab7:
                 "annual_opex": "Annual OPEX /m²",
                 "capex": "Capex /m²",
                 "lcc": _scenario_lcc_kpi_label(scenario_comparison_period),
+                "discounted_lcc": _scenario_discounted_lcc_kpi_label(scenario_comparison_period),
                 "annual_emissions": "Annual Emissions /m²",
                 "total_emissions": _scenario_lc_emissions_kpi_label(scenario_comparison_period),
             }
@@ -15032,6 +15102,7 @@ with tab7:
                     fig_lcc_cmp = go.Figure()
                     fig_energy_cost_annual_cmp = go.Figure()
                     lcc_summary_rows = []
+                    lcc_cost_type_rows = []
                     energy_cost_annual_rows = []
 
                     for _idx_sc, _sc_name in enumerate(scenario_order):
@@ -15058,6 +15129,13 @@ with tab7:
 
                         if _cf_sc is None or _cf_sc.empty:
                             continue
+
+                        # Use the same cash flows and period as the cumulative LCC comparison.
+                        _cf_sc = _cf_sc.loc[_cf_sc["Year"].isin(lcc_years_cmp)].copy()
+                        _cost_types_sc = _cf_sc.groupby("Cost Type", as_index=False)[
+                            ["Nominal Cost", "Discounted Cost"]].sum()
+                        for _cost_row in _cost_types_sc.to_dict("records"):
+                            lcc_cost_type_rows.append({"Scenario": str(_sc_name), **_cost_row})
 
                         _annual_lcc_sc = (
                             _cf_sc.groupby("Year", as_index=True)[["Nominal Cost", "Discounted Cost"]]
@@ -15294,6 +15372,24 @@ with tab7:
                                 "Cumulative Net CO₂ (t)": float(_cum_emissions_series_t.loc[_y_cmp]),
                             })
 
+                    # Total LCC by scenario, stacked consistently by cost type in both bases.
+                    lcc_stack_nominal, lcc_stack_discounted = st.columns(2)
+                    for _stack_col, _stack_basis in (
+                        (lcc_stack_nominal, "Nominal"), (lcc_stack_discounted, "Discounted")
+                    ):
+                        with _stack_col:
+                            st.subheader(f"{_stack_basis} LCC — {analysis_period_lcc_cmp} years")
+                            if lcc_cost_type_rows:
+                                _stack_fig = _scenario_lcc_cost_type_figure(
+                                    pd.DataFrame(lcc_cost_type_rows), scenario_order, _stack_basis, _curr
+                                )
+                                st_plotly_chart(
+                                    _stack_fig, use_container_width=True,
+                                    key=f"scenario_lcc_cost_type_{_stack_basis.lower()}",
+                                )
+                            else:
+                                st.info("No LCC cash flows available. Add LCC inputs in the LCC-Analysis tab.")
+
                     # First row: LCC diagrams (annual first, cumulative second)
                     lc1, lc2 = st.columns(2)
                     with lc1:
@@ -15374,6 +15470,9 @@ with tab7:
                         if lcc_summary_rows:
                             st.write("#### Cumulative LCC summary")
                             st.dataframe(pd.DataFrame(lcc_summary_rows), use_container_width=True)
+                        if lcc_cost_type_rows:
+                            st.write("#### LCC by scenario and cost type")
+                            st.dataframe(pd.DataFrame(lcc_cost_type_rows), use_container_width=True)
                         if energy_cost_annual_rows:
                             st.write("#### Annual energy cost by scenario and year")
                             st.dataframe(pd.DataFrame(energy_cost_annual_rows), use_container_width=True)
