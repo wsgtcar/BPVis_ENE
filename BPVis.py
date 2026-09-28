@@ -4575,11 +4575,21 @@ def _build_scenario_performance_radar_raw_df(
 
 
 def _scenario_lcc_cost_type_figure(cost_df: pd.DataFrame, scenario_order: list,
-                                   basis: str, currency: str):
-    """Compare total LCC with one stacked bar per selected scenario (absolute costs)."""
+                                   basis: str, currency: str, label_mode: str = "Percentage (%)",
+                                   per_m2: bool = False, project_area: float = 0.0):
+    """Compare LCC totals or costs per project m², with cost or share labels."""
     value_col = f"{basis} Cost"
+    show_percent = label_mode == "Percentage (%)"
+    per_m2 = bool(per_m2 and not show_percent)
+    unit = f"{currency}/m²" if per_m2 else currency
+    value_format = ",.2f" if per_m2 else ",.0f"
     selected = [str(sc) for sc in scenario_order]
     data = cost_df.loc[cost_df["Scenario"].astype(str).isin(selected)].copy()
+    if per_m2:
+        area = float(project_area or 0.0)
+        if not np.isfinite(area) or area <= 0:
+            raise ValueError("A positive project area is required to display LCC per m².")
+        data[value_col] = data[value_col] / area
     data["Scenario"] = data["Scenario"].astype(str)
     fig = go.Figure()
     if data.empty:
@@ -4595,24 +4605,31 @@ def _scenario_lcc_cost_type_figure(cost_df: pd.DataFrame, scenario_order: list,
             continue
         values = part.groupby("Scenario")[value_col].sum().reindex(ordered, fill_value=0.0)
         shares = values.div(totals.replace(0.0, np.nan)).mul(100.0)
+        labels = [
+            "" if value == 0 else (
+                (f"{share:.1f}%" if pd.notna(share) else "") if show_percent
+                else (f"{value:{value_format}}" if per_m2 else f"{value:{value_format}} {unit}")
+            )
+            for share, value in zip(shares, values)
+        ]
         fig.add_trace(go.Bar(
             x=ordered, y=values.tolist(), name=cost_type,
             marker_color=LCC_COST_TYPE_COLORS.get(cost_type, "#808080"),
-            text=[f"{share:.1f}%" if pd.notna(share) and value != 0 else ""
-                  for share, value in zip(shares, values)],
+            text=labels,
             texttemplate="%{text}",
             textposition="inside",
             insidetextanchor="middle",
             textangle=0,
             customdata=np.column_stack([shares.to_numpy(), totals.to_numpy()]),
-            hovertemplate=("%{x}<br>" + cost_type + ": %{y:,.0f} " + currency
+            hovertemplate=("%{x}<br>" + cost_type + ": %{y:" + value_format + "} " + unit
                            + "<br>Share of total: %{customdata[0]:.1f}%"
-                           + "<br>Total: %{customdata[1]:,.0f} " + currency + "<extra></extra>"),
+                           + "<br>Scenario LCC: %{customdata[1]:" + value_format + "} " + unit + "<extra></extra>"),
         ))
     fig.update_layout(
         barmode="relative", height=550,
         xaxis=dict(title="Scenario", categoryorder="array", categoryarray=ordered),
-        yaxis=dict(title=f"{basis} LCC ({currency})", rangemode="tozero"),
+        yaxis=dict(title="" if show_percent else f"{basis} LCC ({unit})", rangemode="tozero",
+                   showticklabels=not show_percent, showexponent="none" if show_percent else "all"),
         legend_title_text="Cost type",
         legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
         margin=dict(l=40, r=20, t=35, b=120),
@@ -15373,15 +15390,36 @@ with tab7:
                             })
 
                     # Total LCC by scenario, stacked consistently by cost type in both bases.
+                    _lcc_stack_label_mode = st.radio(
+                        "LCC bar labels",
+                        options=["Percentage (%)", "Absolute values"],
+                        horizontal=True,
+                        key="scenario_lcc_cost_type_label_mode",
+                        help="Choose labels for both LCC charts. Percentages show each cost type's share of its scenario total; vertical axis title and values are hidden in percentage mode.",
+                    )
+                    _lcc_stack_per_m2 = False
+                    if _lcc_stack_label_mode == "Absolute values":
+                        _lcc_stack_per_m2 = st.radio(
+                            "LCC absolute values",
+                            options=["Total", "Per m²"],
+                            horizontal=True,
+                            key="scenario_lcc_cost_type_absolute_unit",
+                            help="Per m² divides costs by the project area used for scenario KPIs.",
+                        ) == "Per m²"
+                    _lcc_stack_area_valid = np.isfinite(float(_area or 0.0)) and float(_area or 0.0) > 0
                     lcc_stack_nominal, lcc_stack_discounted = st.columns(2)
                     for _stack_col, _stack_basis in (
                         (lcc_stack_nominal, "Nominal"), (lcc_stack_discounted, "Discounted")
                     ):
                         with _stack_col:
                             st.subheader(f"{_stack_basis} LCC — {analysis_period_lcc_cmp} years")
-                            if lcc_cost_type_rows:
+                            if _lcc_stack_per_m2 and not _lcc_stack_area_valid:
+                                st.info("Enter a positive project area to display LCC per m².")
+                            elif lcc_cost_type_rows:
                                 _stack_fig = _scenario_lcc_cost_type_figure(
-                                    pd.DataFrame(lcc_cost_type_rows), scenario_order, _stack_basis, _curr
+                                    pd.DataFrame(lcc_cost_type_rows), scenario_order, _stack_basis, _curr,
+                                    label_mode=_lcc_stack_label_mode,
+                                    per_m2=_lcc_stack_per_m2, project_area=_area,
                                 )
                                 st_plotly_chart(
                                     _stack_fig, use_container_width=True,
@@ -17385,7 +17423,7 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
         file_bytes, filename, scenarios, list(scenarios), comparison, area, year, currency,
         lcc_global, crrem_dataset=crrem, scenario_analysis_period=50,
         apply_lcc_filter=False, include_capex=True, include_annual_opex=True)
-    for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_lcc_kpi_label(50)), ('CAPEX', 'Capex /m²'), ('OPEX', 'Annual OPEX /m²')]:
+    for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_discounted_lcc_kpi_label(50)), ('CAPEX', 'Capex /m²'), ('OPEX', 'Annual OPEX /m²')]:
         result[new] = lcc_raw.loc[lcc_raw['KPI'] == old].set_index('Scenario')['Value']
     for service in ['Heating', 'Cooling']:
         result[f'{service} peak'] = np.nan
@@ -17421,17 +17459,8 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
             values = pd.to_numeric(frame[col], errors='coerce').replace([np.inf,-np.inf],np.nan).dropna()
             if len(values):
                 result.loc[name,key] = max(0.,float(values.max())) * 1000 / area
-    result['LCC50 discounted'] = np.nan
-    for name,payload in scenarios.items():
-        try:
-            uses = [c for c in energies[name].columns if c != 'Month']
-            assumptions = _scenario_comparison_lcc_global_payload(lcc_global,uses,apply_lcc_filter=False)
-            assumptions['analysis_period'] = 50
-            cashflow = compute_lcc_cashflow_table_cached(energies[name],payload,uses,year,lcc_global=assumptions,df_loads=raw_loads[name])
-            if cashflow is not None and not cashflow.empty:
-                result.loc[name,'LCC50 discounted'] = float(cashflow['Discounted Cost'].sum()) / area
-        except Exception as exc:
-            notes.append(f'{name}: discounted LCC unavailable ({exc}).')
+    # Preserve legacy data keys while all dashboard LCC metrics share discounted cash flows.
+    result['LCC50 discounted'] = result['LCC50']
     for total,intensity in [('Gross energy total','EUI gross'),('Net energy total','EUI net'),
         ('Gross carbon total','Carbon gross'),('Net carbon total','Carbon net'),('Lifetime carbon total','LCA50'),
         ('Generation total','Generation'),('Gross cost total','Energy cost gross'),('Net cost total','Energy cost net'),
@@ -17527,11 +17556,10 @@ def _dashboard_catalog(currency, loads=()):
     cost = [('Energy cost gross','Gross Energy Cost',currency+'/m²·a','low'),
         ('Energy cost net','Net Energy Cost',currency+'/m²·a','low'),('LCC50','LCC50',currency+'/m²','low'),
         ('CAPEX','CAPEX',currency+'/m²','low'),('OPEX','OPEX',currency+'/m²·a','low'),
-        ('LCC50 discounted','Discounted LCC50',currency+'/m²','low'),
         ('Gross cost total','Gross annual energy cost',currency+'/a','low'),
         ('Net cost total','Net annual energy cost',currency+'/a','low'),
         ('CAPEX total','Total CAPEX',currency,'low'),('OPEX total','Annual OPEX',currency+'/a','low'),
-        ('LCC50 total','Total LCC50',currency,'low'),('LCC50 discounted total','Total discounted LCC50',currency,'low')]
+        ('LCC50 total','Total LCC50',currency,'low')]
     peaks = [(s+' peak',s,'W/m²','low') for s in ['Heating','Cooling','Electricity','District Heating','District Cooling']]
     standard = {'heating','spaceheating','cooling','spacecooling','electricity','districtheating','districtcooling'}
     peaks += [('load::'+str(c),str(c),'W/m²','low') for c in loads if _loads_energy_match_key(c) not in standard]
@@ -17688,6 +17716,18 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
     for setting,value in st.session_state.get('_dashboard_saved_setup',{}).items():
         if setting not in st.session_state:
             st.session_state[setting] = value
+    # Migrate saved selections to the single discounted LCC metric without losing setup.
+    lcc_aliases = {'LCC50 discounted': 'LCC50', 'LCC50 discounted total': 'LCC50 total'}
+    for idx in range(3):
+        radar_key = f'dashboard_radar_{idx}'
+        if radar_key in st.session_state:
+            st.session_state[radar_key] = list(dict.fromkeys(
+                lcc_aliases.get(value, value) for value in st.session_state[radar_key]))
+        for axis in ['x', 'y']:
+            axis_key = f'dashboard_scatter_{idx}_{axis}'
+            if axis_key in st.session_state:
+                value = st.session_state[axis_key]
+                st.session_state[axis_key] = lcc_aliases.get(value, value)
     with st.expander('Dashboard setup', expanded=False):
         st.caption('Your dashboard setup is included when you save/export the project.')
         left, right = st.columns([3,1])
