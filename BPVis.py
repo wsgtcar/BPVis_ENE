@@ -16620,6 +16620,16 @@ def _loads_energy_match_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s)
 
 
+def _loads_thermal_service_prefixes(name):
+    """Identify the thermal service without discarding a source-specific suffix."""
+    key = _loads_energy_match_key(name)
+    for prefixes in [('heating', 'spaceheating'), ('cooling', 'spacecooling'),
+                     ('hotwater', 'domestichotwater', 'dhw')]:
+        if key.startswith(prefixes):
+            return prefixes
+    return ()
+
+
 def _loads_find_matching_energy_use(selected_load: str, df_energy: pd.DataFrame) -> Optional[str]:
     """Return the best Energy_Balance column matching a selected load name."""
     try:
@@ -16629,7 +16639,10 @@ def _loads_find_matching_energy_use(selected_load: str, df_energy: pd.DataFrame)
         selected_key = _loads_energy_match_key(selected_load)
         exact = [c for c in candidates if _loads_energy_match_key(c) == selected_key and selected_key]
         if exact:
-            return exact[0]
+            return exact[0] if len(exact) == 1 else None
+        # Thermal source-specific loads must never fall back to a generic energy column.
+        if _loads_thermal_service_prefixes(selected_load):
+            return None
         # Conservative fallback for prefixed/suffixed project-specific naming: only use a unique containment match.
         if len(selected_key) >= 4:
             partial = [
@@ -16642,6 +16655,36 @@ def _loads_find_matching_energy_use(selected_load: str, df_energy: pd.DataFrame)
     except Exception:
         pass
     return None
+
+
+def _loads_energy_for_coverage(selected_load, df_energy, factor_for_use):
+    """Generic thermal loads sum their service inputs; specific loads match one input."""
+    load_key = _loads_energy_match_key(selected_load)
+    prefixes = _loads_thermal_service_prefixes(selected_load)
+    if prefixes and load_key in prefixes:
+        matched = [str(c) for c in df_energy.columns if str(c) != "Month" and
+                   _loads_energy_match_key(str(c)).startswith(prefixes)]
+    else:
+        single = _loads_find_matching_energy_use(selected_load, df_energy)
+        matched = [single] if single else []
+    raw_total = 0.0
+    adjusted_total = 0.0
+    factors = []
+    for use in matched:
+        raw = float(pd.to_numeric(df_energy[use], errors="coerce").fillna(0.0).sum())
+        try:
+            factor = float(factor_for_use(use))
+        except Exception:
+            factor = 1.0
+        if not np.isfinite(factor) or abs(factor) <= 1e-12:
+            factor = 1.0
+        raw_total += raw
+        adjusted_total += raw / factor
+        factors.append(factor)
+    # Preserve the comparison table's scalar factor field as an equivalent factor.
+    equivalent_factor = (raw_total / adjusted_total if abs(adjusted_total) > 1e-12
+                         else (factors[0] if len(factors) == 1 else 1.0))
+    return matched, adjusted_total, equivalent_factor
 
 
 def _loads_find_matching_load(reference_load: str, df_loads: pd.DataFrame) -> Optional[str]:
@@ -16658,7 +16701,10 @@ def _loads_find_matching_load(reference_load: str, df_loads: pd.DataFrame) -> Op
         reference_key = _loads_energy_match_key(reference_load)
         exact = [c for c in candidates if _loads_energy_match_key(c) == reference_key and reference_key]
         if exact:
-            return exact[0]
+            return exact[0] if len(exact) == 1 else None
+        # A total load is required for aggregate efficiency; never substitute one source.
+        if _loads_thermal_service_prefixes(reference_load):
+            return None
         if len(reference_key) >= 4:
             partial = [
                 c for c in candidates
@@ -16759,16 +16805,11 @@ def _loads_build_scenario_comparison_df_uncached(
 
             try:
                 df_sc_energy = get_energy_balance_df(file_bytes, filename, scenario_name=sc_name)
-                matched_energy_use = _loads_find_matching_energy_use(matched_load, df_sc_energy)
-                if matched_energy_use and matched_energy_use in df_sc_energy.columns:
-                    _raw_annual_energy_for_coverage = float(
-                        pd.to_numeric(df_sc_energy[matched_energy_use], errors="coerce").fillna(0.0).sum()
-                    )
-                    efficiency_factor = _loads_scenario_efficiency_factor(sc_name, matched_energy_use)
-                    annual_energy_for_coverage = float(_raw_annual_energy_for_coverage) / float(efficiency_factor)
-                else:
-                    annual_energy_for_coverage = 0.0
-                    efficiency_factor = 1.0
+                matched_uses, annual_energy_for_coverage, efficiency_factor = _loads_energy_for_coverage(
+                    matched_load, df_sc_energy,
+                    lambda use: _loads_scenario_efficiency_factor(sc_name, use),
+                )
+                matched_energy_use = " + ".join(matched_uses) or None
             except Exception:
                 annual_energy_for_coverage = 0.0
                 matched_energy_use = None
@@ -16792,7 +16833,7 @@ def _loads_build_scenario_comparison_df_uncached(
     return pd.DataFrame(rows)
 
 
-_LOADS_SCENARIO_COMPARISON_CACHE_KEY = "_loads_scenario_comparison_cache"
+_LOADS_SCENARIO_COMPARISON_CACHE_KEY = "_loads_scenario_comparison_cache_thermal_totals_v3"
 
 
 def _loads_build_scenario_comparison_df(
@@ -17393,39 +17434,43 @@ def _dashboard_stranding(asset, limit):
 
 
 def _dashboard_hotwater_efficiencies(energy_frames, load_frames, scenarios):
-    """Keep each named HotWater system separate; require an unambiguous matching load."""
+    """One total HotWater efficiency, requiring an explicitly provided total load."""
     result = pd.DataFrame(index=list(scenarios))
+    prefixes = ('hotwater', 'domestichotwater', 'dhw')
     for name, payload in scenarios.items():
         energy = energy_frames[name]
         loads = load_frames[name]
-        for use in [c for c in energy.columns if c != 'Month']:
-            normalized = _loads_energy_match_key(str(use))
-            if not (normalized.startswith('hotwater') or normalized.startswith('domestichotwater')
-                    or normalized.startswith('dhw')):
-                continue
-            key = 'efficiency::' + str(use)
-            if key not in result:
-                result[key] = np.nan
-            candidates = [c for c in _loads_available_load_columns(loads)
-                          if _loads_energy_match_key(str(c)) == normalized]
-            exact = [c for c in candidates if str(c) == str(use)]
-            matched = exact[0] if len(exact) == 1 else (candidates[0] if len(candidates) == 1 else None)
-            if matched is None:
-                continue
-            demand = pd.to_numeric(loads[matched], errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
-            consumption = pd.to_numeric(energy[use], errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
-            factor = _to_float_lcc((payload.get('efficiency', {}) or {}).get(str(use), 1.0), 1.0)
-            if demand.empty or consumption.empty or not np.isfinite(factor) or factor <= 0:
-                continue
-            input_energy = float(consumption.sum()) / factor
-            if input_energy > 1e-12:
-                result.loc[name, key] = float(demand.sum()) / input_energy
+        if not any(_loads_energy_match_key(str(c)).startswith(prefixes)
+                   for c in energy.columns if str(c) != 'Month'):
+            continue
+        key = 'efficiency::HotWater'
+        if key not in result:
+            result[key] = np.nan
+        candidates = [c for c in _loads_available_load_columns(loads)
+                      if _loads_energy_match_key(str(c)) in prefixes]
+        if len(candidates) != 1:
+            continue
+        demand = pd.to_numeric(loads[candidates[0]], errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
+        matched, input_energy, _ = _loads_energy_for_coverage(
+            'HotWater', energy, lambda use: (payload.get('efficiency', {}) or {}).get(use, 1.0))
+        if not demand.empty and matched and np.isfinite(input_energy) and input_energy > 1e-12:
+            result.loc[name, key] = float(demand.sum()) / input_energy
     return result
 
 
 def _dashboard_system_efficiency_keys(data):
     return ['Heating efficiency', 'Cooling efficiency'] + [
         key for key in data.columns if str(key).startswith('efficiency::')]
+
+
+def _dashboard_lcc_component_values(cashflow, area):
+    """Life-cycle maintenance and replacement intensities in both cost bases."""
+    return {
+        f'{cost_type}50 {basis.lower()}': float(
+            cashflow.loc[cashflow['Cost Type'] == cost_type, f'{basis} Cost'].sum()) / area
+        for cost_type in ['Maintenance', 'Replacement']
+        for basis in ['Nominal', 'Discounted']
+    }
 
 
 def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, year, currency, load_mapping,
@@ -17462,6 +17507,7 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
         apply_lcc_filter=False, include_capex=True, include_annual_opex=True)
     for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_discounted_lcc_kpi_label(50)), ('LCC50 nominal', _scenario_lcc_kpi_label(50)), ('CAPEX', 'Capex /m²'), ('OPEX', 'Annual OPEX /m²')]:
         result[new] = lcc_raw.loc[lcc_raw['KPI'] == old].set_index('Scenario')['Value']
+    dashboard_component_cashflows = {}
     efficiency_energy_frames = dict(energies)
     # Dashboard-only copies: never change global LCC assumptions, scenario payloads or cached frames.
     if selected_energy_uses is not None:
@@ -17480,6 +17526,7 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
             cashflow = compute_lcc_cashflow_table_cached(
                 frame, payload, uses, year, lcc_global=assumptions, df_loads=loads_frame)
             cashflow = cashflow.loc[cashflow['End_Use'].map(lambda u: _canon_enduse_name(str(u))).isin(selected_uses)].copy()
+            dashboard_component_cashflows[name] = cashflow
             result.loc[name, 'LCC50 nominal'] = cashflow['Nominal Cost'].sum() / area
             result.loc[name, 'LCC50'] = cashflow['Discounted Cost'].sum() / area
             if broader_scope:
@@ -17522,6 +17569,21 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
                     _canon_enduse_name(str(c)) in selected_uses]].copy()
                 result.loc[name, 'LCA50'] = compute_crrem_like_scenario_emissions_series_cached(
                     energies[name], payload, crrem, year, list(range(year, year + 50))).sum() * 1000 / area
+
+    for name, payload in scenarios.items():
+        cashflow = dashboard_component_cashflows.get(name)
+        if cashflow is None:
+            frame = energies[name]
+            uses = [_canon_enduse_name(str(c)) for c in frame.columns if c != 'Month']
+            assumptions = _scenario_comparison_lcc_global_payload(lcc_global, uses, apply_lcc_filter=False)
+            assumptions['analysis_period'] = 50
+            cashflow = compute_lcc_cashflow_table_cached(
+                frame, payload, uses, year, lcc_global=assumptions,
+                df_loads=get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False))
+        for key, value in _dashboard_lcc_component_values(cashflow, area).items():
+            result.loc[name, key] = value
+        for cost_type in ['Maintenance', 'Replacement']:
+            result.loc[name, f'{cost_type}50'] = result.loc[name, f'{cost_type}50 discounted']
 
     for service in ['Heating', 'Cooling']:
         result[f'{service} peak'] = np.nan
@@ -17656,6 +17718,8 @@ def _dashboard_catalog(currency, loads=()):
     cost = [('Energy cost gross','Gross Energy Cost',currency+'/m²·a','low'),
         ('Energy cost net','Net Energy Cost',currency+'/m²·a','low'),('LCC50','LCC50',currency+'/m²','low'),
         ('CAPEX','CAPEX',currency+'/m²','low'),('OPEX','OPEX',currency+'/m²·a','low'),
+        ('Maintenance50','Maintenance · 50 years',currency+'/m²','low'),
+        ('Replacement50','Replacement · 50 years',currency+'/m²','low'),
         ('Gross cost total','Gross annual energy cost',currency+'/a','low'),
         ('Net cost total','Net annual energy cost',currency+'/a','low'),
         ('CAPEX total','Total CAPEX',currency,'low'),('OPEX total','Annual OPEX',currency+'/a','low'),
@@ -17677,6 +17741,18 @@ def _dashboard_scatter_presets():
         'Lifetime Carbon vs Lifetime Cost': ('LCA50','LCC50'),
         'Custom comparison': None,
     }
+
+
+def _dashboard_radar_bounds(values):
+    """Highest value at the rim; a non-zero minimum halfway out, zero at the centre."""
+    finite = pd.to_numeric(values, errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
+    if finite.empty:
+        return 0.0, 1.0
+    minimum, maximum = float(finite.min()), float(finite.max())
+    if minimum == maximum:
+        # With no spread, non-zero values share the rim; an all-zero axis stays at zero.
+        return (0.0, 1.0) if maximum == 0 else (maximum - max(abs(maximum), 1.0), maximum)
+    return (0.0 if minimum == 0 else 2.0 * minimum - maximum), maximum
 
 
 def _dashboard_figure(all_data, selected, focus, colors, currency, year, categories=None, scatter_panels=None, load_title="Peak Loads"):
@@ -17703,12 +17779,15 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
     titles = []
     group_names = ['Energy & Carbon','Cost & Investment',load_title]
     for name,cat in zip(group_names,categories):
-        titles.append(name + (' · → better ←' if len(cat)>=3 else ' · better ←') if cat else '')
+        titles.append(name if cat else '')
     titles += [name for name,pair in scatter_panels]
     kwargs = dict(rows=2 if n else 1,cols=6,specs=specs,subplot_titles=titles,horizontal_spacing=0.04)
     if n:
         kwargs.update(row_heights=[0.60,0.40],vertical_spacing=0.19)
     fig = make_subplots(**kwargs)
+    # Use all scenarios so hiding a scenario does not rescale the remaining polygons.
+    radar_bounds = {key: _dashboard_radar_bounds(all_data[key])
+                    for category in categories for key, _, _, _ in category}
     legend_seen = set()
     def add(trace, name, row, col):
         trace.name = str(name)
@@ -17731,16 +17810,12 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
                 continue
             radial, hover, labels = [],[],[]
             for key,label,unit,direction in category:
-                vals = pd.to_numeric(all_data[key],errors='coerce').replace([np.inf,-np.inf],np.nan).dropna()
-                lo = min(0.,float(vals.min())) if len(vals) else 0.
-                hi = max(0.,float(vals.max())) if len(vals) else 1.
+                lo, hi = radar_bounds[key]
                 value = d[key]; valid = pd.notna(value) and np.isfinite(value)
-                r = 100*(float(value)-lo)/(hi-lo or 1.) if valid else None
-                if direction=='high' and r is not None:
-                    r = 100-r
+                r = (0.0 if float(value) == 0 else 100*(float(value)-lo)/(hi-lo or 1.)) if valid else None
                 radial.append(r);labels.append(label)
                 text = f'<b>{safe}</b><br>{escape(label)}: {value:,.2f} {unit}' if valid else f'<b>{safe}</b><br>{escape(label)}: unavailable'
-                text += f'<br>Axis bounds: {lo:,.2f} to {hi:,.2f} {unit}<br>Better: '+('higher (axis reversed)' if direction=='high' else 'lower')
+                text += f'<br>Comparison axis bounds: {lo:,.4g} to {hi:,.4g} {unit}<br>Better: '+('higher' if direction=='high' else 'lower')
                 if key.startswith('load-stat::'):
                     text += '<br>'+escape(load_title)
                     text += '<br>Sum of hourly loads (1 h per row)' if unit=='kWh/m²' else '<br>Linear percentile over all available hourly loads, including zero-load hours'
@@ -17755,7 +17830,7 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
             else:
                 add(go.Scatter(x=radial,y=[j+offset for j in range(len(labels))],mode='markers',marker=dict(size=11,color=color),
                     text=hover,hovertemplate='%{text}<extra></extra>'),name,1,col)
-                fig.update_xaxes(range=[-5,105],title_text='Relative position · better ←',showticklabels=False,row=1,col=col)
+                fig.update_xaxes(range=[0,100],title_text='Relative value · higher →',showticklabels=False,row=1,col=col)
                 fig.update_yaxes(tickvals=list(range(len(labels))),ticktext=labels,range=[-.5,len(labels)-.5],row=1,col=col)
         for col,(kind,pair) in zip(starts,scatter_panels):
             if kind in ['System Efficiency','CRREM Stranding']:
@@ -17786,7 +17861,7 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
                 add(go.Scatter(x=[d[x]],y=[d[y]],mode='markers',marker=dict(size=11,color=color),text=[text],hovertemplate='%{text}<extra></extra>'),name,2,col)
                 fig.update_xaxes(title_text=f'{xd[1]} · {xd[2]} · better '+('→' if xd[3]=='high' else '←'),row=2,col=col)
                 fig.update_yaxes(title_text=f'{yd[1]} · {yd[2]} · better '+('↑' if yd[3]=='high' else '↓'),row=2,col=col)
-    fig.update_polars(radialaxis=dict(range=[0,105],showticklabels=False,gridcolor='#e2e8f0',showline=False),
+    fig.update_polars(radialaxis=dict(range=[0,100],showticklabels=False,gridcolor='#e2e8f0',showline=False),
         angularaxis=dict(tickfont=dict(size=12),gridcolor='#e2e8f0',rotation=90,direction='clockwise'),bgcolor='rgba(0,0,0,0)')
     fig.update_xaxes(showgrid=True,gridcolor='#edf0f4',zeroline=False,tickfont=dict(size=10),title_font=dict(size=11))
     fig.update_yaxes(showgrid=True,gridcolor='#edf0f4',zeroline=False,tickfont=dict(size=10),title_font=dict(size=11))
@@ -17844,7 +17919,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         lcc_basis = st.radio(
             'LCC basis for radar and scatter plots', ['Discounted', 'Nominal'],
             horizontal=True, key='dashboard_lcc_basis',
-            help='Applies to all LCC axes, including total and per-m² values. Both bases are always shown in the metric cards.',
+            help='Applies to all LCC axes, including maintenance and replacement costs, total and per-m² values. Both bases are always shown in the metric cards.',
         )
         energy_filter_key = 'dashboard_energy_uses'
         if energy_filter_key not in st.session_state:
@@ -17920,7 +17995,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
                 st.session_state[statekey] = [v for v in st.session_state[statekey] if v in options]
             with col:
                 chosen = st.multiselect(label,options,key=statekey,format_func=lambda k,m=labels:m[k],
-                    help='Choose axes in display order. With fewer than three KPIs, a dot comparison replaces the polygon. Higher-is-better axes are reversed, so nearer the centre remains better.')
+                    help='Choose axes in display order. With fewer than three KPIs, a dot comparison replaces the polygon. Higher values appear farther from the centre. Hover to see whether higher or lower is better for each KPI.')
             lookup = {v[0]:v for v in group}
             categories.append([lookup[k] for k in chosen])
         presets = _dashboard_scatter_presets()
@@ -17981,7 +18056,10 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
     data = data.copy()
     data['LCC50'] = data[f'LCC50 {lcc_basis.lower()}']
     data['LCC50 total'] = data[f'LCC50 {lcc_basis.lower()} total']
+    for cost_type in ['Maintenance', 'Replacement']:
+        data[f'{cost_type}50'] = data[f'{cost_type}50 {lcc_basis.lower()}']
     st.caption(f'LCC in radar and scatter plots: {lcc_basis.lower()} · 50 years.')
+    st.caption('Radar scaling: highest value at the outer edge; lowest value at mid-radius unless it is zero, which sits at the centre. Equal non-zero values share the outer edge. Scales use all scenarios; hover for actual values and whether higher or lower is better.')
     if not any(categories) and not scatter_panels:
         return
     data, categories[2], load_title = _dashboard_load_radar_data(
@@ -18136,7 +18214,7 @@ with tab4:
         if _custom_percentile_key not in st.session_state:
             st.session_state[_custom_percentile_key] = 95.0
 
-        # Annual System Efficiency = annual load / factor-adjusted annual energy use with the same logical name.
+        # Annual System Efficiency = annual load / sum of matching factor-adjusted energy uses.
         # This uses the exact Energy Balance (with factors) convention: adjusted kWh = raw kWh / sidebar efficiency factor.
         # Match is tolerant of the Excel `_load` / `_kWh` suffixes and common project prefixes/suffixes.
         annual_system_efficiency = None
@@ -18148,23 +18226,13 @@ with tab4:
                 uploaded_file.name,
                 scenario_name=active_scenario_loads,
             )
-            matched_energy_use_name = _loads_find_matching_energy_use(selected_load, _df_energy_for_load_kpi)
-            if matched_energy_use_name:
-                _raw_annual_energy_use = float(pd.to_numeric(
-                    _df_energy_for_load_kpi[matched_energy_use_name], errors="coerce"
-                ).fillna(0.0).sum())
-                try:
-                    matched_energy_efficiency_factor = float(
-                        st.session_state.get(f"eff_{matched_energy_use_name}", 1.0)
-                    )
-                except Exception:
-                    matched_energy_efficiency_factor = 1.0
-                if (not np.isfinite(matched_energy_efficiency_factor)) or abs(
-                        matched_energy_efficiency_factor) <= 1e-12:
-                    matched_energy_efficiency_factor = 1.0
-                _annual_energy_use = float(_raw_annual_energy_use) / float(matched_energy_efficiency_factor)
-                if abs(_annual_energy_use) > 1e-12:
-                    annual_system_efficiency = float(total_load_selected) / float(_annual_energy_use)
+            matched_uses, _annual_energy_use, matched_energy_efficiency_factor = _loads_energy_for_coverage(
+                selected_load, _df_energy_for_load_kpi,
+                lambda use: st.session_state.get(f"eff_{use}", 1.0),
+            )
+            matched_energy_use_name = " + ".join(matched_uses) or None
+            if matched_uses and abs(_annual_energy_use) > 1e-12:
+                annual_system_efficiency = float(total_load_selected) / float(_annual_energy_use)
         except Exception:
             annual_system_efficiency = None
             matched_energy_use_name = None
@@ -18293,7 +18361,7 @@ with tab4:
                     annual_system_efficiency) else "n/a",
                 help=(
                     f"Annual {ui_name(selected_load)} load divided by factor-adjusted annual {ui_name(matched_energy_use_name)} energy use "
-                    f"(raw Energy_Balance kWh / efficiency factor {matched_energy_efficiency_factor:g}), consistent with Energy Balance (with factors)."
+                    "(sum of each matched column’s raw kWh divided by its own efficiency factor), consistent with Energy Balance (with factors)."
                     if matched_energy_use_name else
                     "No matching Energy_Balance end use was found for the selected load."
                 ),
