@@ -17613,6 +17613,16 @@ def _dashboard_lcc_component_values(cashflow, area):
     }
 
 
+def _dashboard_equivalent_tariffs(frame, payload, loads):
+    """Current annual source rates, before dashboard-only end-use cost allocation."""
+    uses = [str(c) for c in frame.columns if c != 'Month']
+    rows = _lcc_energy_rows_for_payload(frame, payload, uses)
+    details = _tariff_rate_details_for_rows(rows, payload, loads)
+    return {f'Equivalent tariff::{source}':
+            float(detail['equivalent_tariff']) if detail['consumption_kwh'] > 1e-12 else np.nan
+            for source, detail in details.items()}
+
+
 def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, year, currency, load_mapping,
                           selected_energy_uses=None, filter_scope="LCC only", lcc_period=50):
     """Use committed scenario calculations; never active-scenario widget factors."""
@@ -17639,6 +17649,11 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
     for name in scenarios:
         energies[name] = get_energy_balance_df(file_bytes, filename, scenario_name=name)
         enduses.extend(c for c in energies[name].columns if c != 'Month')
+        tariff_values = _dashboard_equivalent_tariffs(
+            energies[name], scenarios[name],
+            get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False))
+        for tariff_key, tariff_value in tariff_values.items():
+            result.loc[name, tariff_key] = tariff_value
     lcc_global = _get_lcc_global_state_payload(list(dict.fromkeys(enduses)))
     # Full current operational scope; independent of the Scenarios/LCC display filters.
     lcc_raw = _build_scenario_performance_radar_raw_df(
@@ -17877,6 +17892,8 @@ def _dashboard_catalog(currency, loads=()):
         ('Net cost total','Net annual energy cost',currency+'/a','low'),
         ('CAPEX total','Total CAPEX',currency,'low'),('OPEX total','Annual OPEX',currency+'/a','low'),
         ('LCC50 total','Total LCC50',currency,'low')]
+    cost += [(f'Equivalent tariff::{source}', f'{source} equivalent tariff', currency+'/kWh', 'low')
+             for source in ENERGY_SOURCE_ORDER]
     peaks = [(s+' peak',s,'W/m²','low') for s in ['Heating','Cooling','Electricity','District Heating','District Cooling']]
     standard = {'heating','spaceheating','cooling','spacecooling','electricity','districtheating','districtcooling'}
     peaks += [('load::'+str(c),str(c),'W/m²','low') for c in loads if _loads_energy_match_key(c) not in standard]
@@ -17970,11 +17987,14 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
                 value = d[key]; valid = pd.notna(value) and np.isfinite(value)
                 r = (0.0 if float(value) == 0 else 100*(float(value)-lo)/(hi-lo or 1.)) if valid else None
                 radial.append(r);labels.append(label)
-                text = f'<b>{safe}</b><br>{escape(label)}: {value:,.2f} {unit}' if valid else f'<b>{safe}</b><br>{escape(label)}: unavailable'
+                value_format = ',.5f' if key.startswith('Equivalent tariff::') else ',.2f'
+                text = f'<b>{safe}</b><br>{escape(label)}: {value:{value_format}} {unit}' if valid else f'<b>{safe}</b><br>{escape(label)}: unavailable'
                 text += f'<br>Comparison axis bounds: {lo:,.4g} to {hi:,.4g} {unit}<br>Better: '+('higher' if direction=='high' else 'lower')
                 if key.startswith('load-stat::'):
                     text += '<br>'+escape(load_title)
                     text += '<br>Sum of hourly loads (1 h per row)' if unit=='kWh/m²' else '<br>Linear percentile over all available hourly loads, including zero-load hours'
+                if key.startswith('Equivalent tariff::'):
+                    text += '<br>Annual consumption charge + annual peak charge, divided by source consumption.<br>Uses scenario tariff settings and automatic or manual peak; before dashboard-only end-use allocation.'
                 if key in ['LCA50','Lifetime carbon total']:
                     text += '<br>50-year operational emissions; excludes embodied carbon'
                 hover.append(text)
