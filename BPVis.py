@@ -2653,6 +2653,7 @@ def _mixed_use_records_to_df(records) -> pd.DataFrame:
 # =========================
 LCC_INVESTMENT_COLUMNS = [
     "Measure Name",
+    "VDI Component",
     "Assigned End Uses",
     "Investment Year",
     "Investment Cost",
@@ -2831,6 +2832,86 @@ def _lcc_format_assigned_enduses(value, end_uses: Optional[list] = None) -> str:
     return ", ".join(parsed)
 
 
+VDI_LOOKUP_FILENAME = "VDI_2067_2012_A2_A6.xlsx"
+
+
+@st.cache_data(show_spinner=False)
+def _read_vdi_components(path, modified_ns):
+    df = pd.read_excel(path, sheet_name="VDI_Components", header=5,
+                       dtype={"Component Number": str})
+    required = {"Table", "Component Number", "Component", "Life Length (years)",
+                "Maintenance f Inst (%)", "Servicing + Inspection (%)"}
+    if not required.issubset(df.columns):
+        raise ValueError("VDI lookup columns do not match the supplied template.")
+    lookup = {}
+    for _, row in df.iterrows():
+        life = pd.to_numeric(row["Life Length (years)"], errors="coerce")
+        if pd.isna(life):
+            continue  # Group headings and cross-references have no independent defaults.
+        if not np.isfinite(life) or life < 0.5 or life > 200:
+            raise ValueError("VDI life length must be between 0.5 and 200 years.")
+        label = f"{row['Table']} {row['Component Number']} - {row['Component']}"
+        inst = pd.to_numeric(row["Maintenance f Inst (%)"], errors="coerce")
+        servicing = pd.to_numeric(row["Servicing + Inspection (%)"], errors="coerce")
+        maintenance = None if pd.isna(inst) or pd.isna(servicing) else float(inst + servicing)
+        if maintenance is not None and (not np.isfinite(maintenance) or min(inst, servicing) < 0 or maintenance > 100):
+            raise ValueError(f"Invalid VDI maintenance rate: {label}")
+        if label in lookup:
+            raise ValueError(f"Duplicate VDI component label: {label}")
+        lookup[label] = {"life": float(life), "maintenance": maintenance}
+    return lookup
+
+
+def _load_vdi_components():
+    base = Path(__file__).resolve().parent
+    for folder in [base, base / "data", base / "templates"]:
+        path = folder / VDI_LOOKUP_FILENAME
+        if path.is_file():
+            try:
+                return _read_vdi_components(str(path), path.stat().st_mtime_ns), ""
+            except Exception as exc:
+                return {}, f"Cannot load VDI component lookup: {exc}"
+    return {}, f"Place {VDI_LOOKUP_FILENAME} beside the app (or in data/ or templates/) to enable VDI defaults. Manual entry remains available."
+
+
+def _lcc_vdi_apply_editor_delta(seed, delta, lookup):
+    """Apply one editor event. Defaults change only when the component selection changes."""
+    rows = seed.to_dict("records")
+    def apply(row, changes):
+        label = str(changes.get("VDI Component", "") or "")
+        if "VDI Component" in changes and label != str(row.get("VDI Component", "") or "") and label in lookup:
+            item = lookup[label]
+            row["Life Length (years)"] = item["life"]
+            # Leave unspecified source rates blank, requiring an explicit manual assumption.
+            row["Annual Maintenance Cost (%)"] = item["maintenance"]
+        row.update(changes)  # Explicit numeric edits in the same event take precedence.
+    for index, changes in delta.get("edited_rows", {}).items():
+        if 0 <= int(index) < len(rows):
+            apply(rows[int(index)], changes)
+    deleted = set(int(i) for i in delta.get("deleted_rows", []))
+    rows = [row for i, row in enumerate(rows) if i not in deleted]
+    for changes in delta.get("added_rows", []):
+        row = {c: None for c in LCC_INVESTMENT_COLUMNS}
+        apply(row, changes)
+        rows.append(row)
+    return pd.DataFrame(rows, columns=LCC_INVESTMENT_COLUMNS)
+
+
+def _lcc_vdi_editor_changed(widget_key, lookup):
+    st.session_state["lcc_investments_draft_df"] = _lcc_vdi_apply_editor_delta(
+        st.session_state["_lcc_vdi_editor_seed"], st.session_state.get(widget_key, {}), lookup)
+    st.session_state["_lcc_vdi_editor_revision"] = int(st.session_state.get("_lcc_vdi_editor_revision", 0)) + 1
+
+
+def _lcc_replacement_years(investment_year, life, start_year, end_year):
+    """Bucket replacement events into annual cash flows, including subannual service lives."""
+    if not np.isfinite(life) or life <= 0:
+        return []
+    count = max(0, int(np.ceil((end_year + 1 - investment_year) / life - 1e-10)) - 1)
+    return [int(np.floor(investment_year + n * life + 1e-10)) for n in range(1, count + 1)
+            if start_year <= investment_year + n * life < end_year + 1 - 1e-10]
+
+
 def _lcc_investments_records_to_df(records, end_uses: Optional[list] = None) -> pd.DataFrame:
     """Convert saved LCC investment records to a stable dataframe."""
     try:
@@ -2856,6 +2937,7 @@ def _lcc_investments_records_to_df(records, end_uses: Optional[list] = None) -> 
     default_assigned = default_enduses[0] if default_enduses else ((end_uses or [""])[0] if end_uses else "")
 
     df["Measure Name"] = df["Measure Name"].fillna("").astype(str)
+    df["VDI Component"] = df["VDI Component"].fillna("").astype(str)
     df["Assigned End Uses"] = df["Assigned End Uses"].apply(
         lambda x: _lcc_format_assigned_enduses(x if x is not None and str(x).strip() else default_assigned,
                                                end_uses=end_uses)
@@ -2863,11 +2945,12 @@ def _lcc_investments_records_to_df(records, end_uses: Optional[list] = None) -> 
     df["Investment Year"] = df["Investment Year"].apply(lambda x: _to_int_lcc(x, 0))
     df["Investment Cost"] = df["Investment Cost"].apply(lambda x: _to_float_lcc(x, 0.0))
     df["Annual Maintenance Cost (%)"] = df["Annual Maintenance Cost (%)"].apply(lambda x: _to_float_lcc(x, 0.0))
-    df["Life Length (years)"] = df["Life Length (years)"].apply(lambda x: _to_int_lcc(x, 0))
+    df["Life Length (years)"] = df["Life Length (years)"].apply(lambda x: _to_float_lcc(x, 0.0))
 
     # Drop fully empty rows, but keep rows with a name even if costs are temporarily zero while editing.
     keep = (
             df["Measure Name"].astype(str).str.strip().ne("") |
+            df["VDI Component"].astype(str).str.strip().ne("") |
             df["Investment Cost"].astype(float).ne(0.0) |
             df["Annual Maintenance Cost (%)"].astype(float).ne(0.0)
     )
@@ -2884,15 +2967,16 @@ def _lcc_investments_df_to_records(df) -> list:
             assigned = _lcc_format_assigned_enduses(r.get("Assigned End Uses", ""))
             inv_cost = _to_float_lcc(r.get("Investment Cost"), 0.0)
             maint_pct = _to_float_lcc(r.get("Annual Maintenance Cost (%)"), 0.0)
-            if not name and inv_cost == 0.0 and maint_pct == 0.0:
+            if not name and not str(r.get("VDI Component", "")).strip() and inv_cost == 0.0 and maint_pct == 0.0:
                 continue
             records.append({
                 "Measure Name": name,
+                "VDI Component": str(r.get("VDI Component", "")),
                 "Assigned End Uses": assigned,
                 "Investment Year": _to_int_lcc(r.get("Investment Year"), 0),
                 "Investment Cost": inv_cost,
                 "Annual Maintenance Cost (%)": maint_pct,
-                "Life Length (years)": max(0, _to_int_lcc(r.get("Life Length (years)"), 0)),
+                "Life Length (years)": max(0.0, _to_float_lcc(r.get("Life Length (years)"), 0.0)),
             })
     except Exception:
         return []
@@ -3133,6 +3217,7 @@ def _load_lcc_into_widgets(payload: dict, end_uses: list) -> None:
     inv_df = _lcc_investments_records_to_df(lcc.get("investments", []), end_uses=end_uses)
     st.session_state["lcc_investments_df"] = inv_df
     st.session_state["lcc_investments_draft_df"] = inv_df.copy(deep=True)
+    st.session_state["_lcc_vdi_editor_revision"] = int(st.session_state.get("_lcc_vdi_editor_revision", 0)) + 1
 
 
 def _apply_lcc_global_to_all_scenarios(end_uses: list) -> None:
@@ -3660,7 +3745,7 @@ def compute_lcc_cashflow_table(
         inv_year = _to_int_lcc(r.get("Investment Year"), start_year)
         inv_cost = max(0.0, _to_float_lcc(r.get("Investment Cost"), 0.0))
         maint_pct = max(0.0, _to_float_lcc(r.get("Annual Maintenance Cost (%)"), 0.0)) / 100.0
-        life = max(0, _to_int_lcc(r.get("Life Length (years)"), 0))
+        life = max(0.0, _to_float_lcc(r.get("Life Length (years)"), 0.0))
 
         def _append_allocated_cost(year: int, cost_type: str, nominal_total: float) -> None:
             offset_local = int(year - start_year)
@@ -3695,13 +3780,10 @@ def compute_lcc_cashflow_table(
 
         # Replacement cost equals initial investment cost corrected by CAPEX inflation until replacement year.
         if inv_cost > 0.0 and life > 0:
-            repl_year = inv_year + life
-            while repl_year <= years[-1]:
-                if repl_year >= start_year:
-                    offset = int(repl_year - start_year)
-                    nominal = inv_cost * ((1.0 + capex_inflation) ** offset)
-                    _append_allocated_cost(repl_year, "Replacement", nominal)
-                repl_year += life
+            for repl_year in _lcc_replacement_years(inv_year, life, start_year, years[-1]):
+                offset = int(repl_year - start_year)
+                nominal = inv_cost * ((1.0 + capex_inflation) ** offset)
+                _append_allocated_cost(repl_year, "Replacement", nominal)
 
     if not rows:
         return pd.DataFrame(columns=[
@@ -13914,7 +13996,7 @@ with tab_lcc:
             st.caption(
                 "Global LCC parameters apply to all scenarios. Investment measures remain scenario-specific. "
                 "Energy costs use the active scenario tariffs, efficiency factors, energy-source assignment and selected operational end uses. "
-                "Submit once to avoid recalculation on every cell edit."
+                "Changes remain drafts until Update LCC Inputs is clicked."
             )
 
             # Scenario reference options for discounted payback.
@@ -13949,10 +14031,10 @@ with tab_lcc:
             st.write("### LCC inputs")
             st.caption(
                 "Global parameters are shared by all scenarios. Investment measures remain scenario-specific. "
-                "Values in this expander are drafts until `Update LCC Inputs` is clicked, so charts do not recalculate on every edit."
+                "Values in this expander remain drafts until `Update LCC Inputs` is clicked. VDI selections fill the draft immediately."
             )
 
-            with st.form("lcc_analysis_form", clear_on_submit=False):
+            with st.container():
                 st.write("### Global LCC parameters")
                 p1, p2, p3 = st.columns(3)
                 with p1:
@@ -14042,15 +14124,33 @@ with tab_lcc:
                     ),
                 )
 
+                vdi_lookup, vdi_error = _load_vdi_components()
+                if vdi_error:
+                    st.info(vdi_error)
+                st.caption("Select a VDI component to fill service life and f Inst + f W+Insp. You can then edit either value manually. Selecting a different component reapplies its defaults. Blank maintenance means the source gives no rate: enter your assumption, including zero if appropriate. Operation hours are not added. Fractional lifetimes are grouped into annual replacement cash flows.")
+                vdi_seed = st.session_state["lcc_investments_draft_df"].copy(deep=True).reset_index(drop=True)
+                for column in LCC_INVESTMENT_COLUMNS:
+                    if column not in vdi_seed:
+                        vdi_seed[column] = None
+                vdi_seed["VDI Component"] = vdi_seed["VDI Component"].fillna("").astype(str)
+                for column in ["Annual Maintenance Cost (%)", "Life Length (years)", "Investment Cost"]:
+                    vdi_seed[column] = pd.to_numeric(vdi_seed[column], errors="coerce").astype(float)
+                st.session_state["_lcc_vdi_editor_seed"] = vdi_seed[LCC_INVESTMENT_COLUMNS].copy(deep=True)
+                vdi_options = list(dict.fromkeys([""] + list(vdi_lookup) + vdi_seed["VDI Component"].tolist()))
+                vdi_editor_key = f"lcc_investments_editor_{st.session_state.get('_lcc_vdi_editor_revision', 0)}"
                 editor_kwargs_lcc = {
                     "num_rows": "fixed" if IS_VIEWER_MODE else "dynamic",
                     "use_container_width": True,
-                    "key": "lcc_investments_editor",
+                    "key": vdi_editor_key,
+                    "on_change": _lcc_vdi_editor_changed,
+                    "args": (vdi_editor_key, vdi_lookup),
                     "disabled": IS_VIEWER_MODE,
                 }
                 if hasattr(st, "column_config"):
                     editor_kwargs_lcc["column_config"] = {
                         "Measure Name": st.column_config.TextColumn("Measure Name", required=False),
+                        "VDI Component": st.column_config.SelectboxColumn("VDI installation component", options=vdi_options, width="large",
+                            help="Table and VDI component number included. Clear selection for a fully manual assumption."),
                         "Assigned End Uses": st.column_config.TextColumn(
                             "Assigned End Uses",
                             help="Enter one or more End Uses separated by commas, e.g. Heating, Cooling.",
@@ -14079,22 +14179,21 @@ with tab_lcc:
                         ),
                         "Life Length (years)": st.column_config.NumberColumn(
                             "Life Length (years)",
-                            min_value=0,
-                            max_value=200,
-                            step=1,
-                            format="%d",
+                            min_value=0.0,
+                            max_value=200.0,
+                            step=0.5,
+                            format="%.2f",
                         ),
                     }
 
                 edited_lcc_investments = st.data_editor(
-                    _lcc_investments_records_to_df(
-                        st.session_state.get("lcc_investments_draft_df", pd.DataFrame(columns=LCC_INVESTMENT_COLUMNS)),
-                        end_uses=valid_enduses_lcc,
-                    ),
-                    **editor_kwargs_lcc,
-                )
-
-                apply_lcc_inputs = st.form_submit_button("Update LCC Inputs", use_container_width=False)
+                    st.session_state["_lcc_vdi_editor_seed"], **editor_kwargs_lcc)
+                missing_vdi_maintenance = edited_lcc_investments["VDI Component"].fillna("").ne("") & pd.to_numeric(
+                    edited_lcc_investments["Annual Maintenance Cost (%)"], errors="coerce").isna()
+                if missing_vdi_maintenance.any():
+                    st.warning("Enter a maintenance assumption for the selected VDI components with blank maintenance before updating.")
+                apply_lcc_inputs = st.button("Update LCC Inputs", use_container_width=False,
+                                             disabled=bool(missing_vdi_maintenance.any()))
 
             if apply_lcc_inputs:
                 committed_lcc_df = _lcc_investments_records_to_df(edited_lcc_investments, end_uses=valid_enduses_lcc)
@@ -14117,6 +14216,7 @@ with tab_lcc:
                 except Exception:
                     pass
 
+                st.session_state["_lcc_vdi_editor_revision"] = int(st.session_state.get("_lcc_vdi_editor_revision", 0)) + 1
                 st.session_state["_lcc_flash"] = "updated"
                 st.rerun()
 
