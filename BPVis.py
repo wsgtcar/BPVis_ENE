@@ -980,6 +980,73 @@ MASTER_ENERGY_FILTER_SELECTED_KEY = "master_energy_use_filter_selected"
 MASTER_ENERGY_FILTER_AVAILABLE_KEY = "_master_energy_use_filter_available"
 
 
+MASTER_SOURCE_FILTER_ENABLED_KEY = "master_energy_source_filter_enabled"
+MASTER_SOURCE_FILTER_SELECTED_KEY = "master_energy_source_filter_selected"
+
+
+def _master_source_filter_enabled():
+    return bool(st.session_state.get(MASTER_SOURCE_FILTER_ENABLED_KEY, False)) and bool(
+        st.session_state.get(MASTER_SOURCE_FILTER_SELECTED_KEY, []))
+
+
+def _master_source_filter_signature():
+    return (_master_source_filter_enabled(), tuple(st.session_state.get(MASTER_SOURCE_FILTER_SELECTED_KEY, [])))
+
+
+def _energy_source_for_filter(use, scenario_name=None):
+    name = str(scenario_name or st.session_state.get('active_scenario', ''))
+    mapping = ((st.session_state.get('scenarios', {}).get(name, {}) or {}).get('mapping', {}) or {})
+    canon = _canon_enduse_name(str(use))
+    source = mapping.get(canon, 'Electricity')
+    if name == str(st.session_state.get('active_scenario', '')):
+        source = st.session_state.get(f'source_{canon}', source)
+    if canon in set(get_onsite_generation_enduses([canon])):
+        source = 'Electricity'
+    return source if source in ENERGY_SOURCE_ORDER else 'Electricity'
+
+
+def _apply_master_source_filter_to_energy_df(df, scenario_name=None):
+    if not isinstance(df, pd.DataFrame) or not _master_source_filter_enabled():
+        return df
+    selected = set(st.session_state.get(MASTER_SOURCE_FILTER_SELECTED_KEY, []))
+    return df.loc[:, [c for c in df.columns if c == 'Month' or
+                     _energy_source_for_filter(c, scenario_name) in selected]].copy()
+
+
+def _source_filter_match_key(name):
+    text = str(name).strip().lower()
+    text = re.sub(r'(?:_load|_kwh|_kw)$', '', text)
+    text = re.sub(r'^(?:load|energy|end[ _-]*use|system|annual|total)[ _-]+', '', text)
+    text = re.sub(r'[ _-]+(?:load|energy|end[ _-]*use|demand|consumption|system|annual|total|kwh|kw)$', '', text)
+    return re.sub(r'[^a-z0-9]+', '', text)
+
+
+def _apply_master_source_filter_to_loads_df(df, energy_df, scenario_name=None):
+    if not isinstance(df, pd.DataFrame) or not _master_source_filter_enabled():
+        return df
+    selected = set(st.session_state.get(MASTER_SOURCE_FILTER_SELECTED_KEY, []))
+    meta = {'hoy', 'doy', 'day', 'month', 'weekday', 'hour', 'Grid_Injection'}
+    keep = []
+    for col in df.columns:
+        if str(col) in meta:
+            keep.append(col)
+            continue
+        source = next((src for src in ENERGY_SOURCE_ORDER
+                       if _source_filter_match_key(src) == _source_filter_match_key(str(col))), None)
+        if source is not None:
+            included = source in selected
+        else:
+            key = _source_filter_match_key(str(col))
+            uses = [str(u) for u in energy_df.columns if str(u) != 'Month' and
+                    (_source_filter_match_key(str(u)) == key or
+                     (key in {'heating', 'cooling', 'hotwater', 'spaceheating', 'spacecooling', 'dhw', 'domestichotwater'}
+                      and _source_filter_match_key(str(u)).startswith(key)))]
+            included = not uses or any(_energy_source_for_filter(use, scenario_name) in selected for use in uses)
+        if included:
+            keep.append(col)
+    return df.loc[:, keep].copy()
+
+
 def _normalize_master_energy_use_selection(values, valid_end_uses: Optional[list] = None) -> list:
     """Normalize a saved/widget Energy Use selection while preserving order."""
     if values is None:
@@ -1638,7 +1705,8 @@ def get_energy_balance_df(
         override = get_scenario_energy_balance_override(sc_name)
         if override is not None:
             result = override
-    return _apply_master_energy_use_filter_to_energy_df(result) if apply_master_filter else result
+    return _apply_master_source_filter_to_energy_df(
+        _apply_master_energy_use_filter_to_energy_df(result), scenario_name) if apply_master_filter else result
 
 
 def get_global_loads_balance_df(file_bytes: bytes, filename: str = "") -> pd.DataFrame:
@@ -1674,7 +1742,14 @@ def get_loads_balance_df(
         override = get_scenario_loads_balance_override(sc_name)
         if override is not None:
             result = override
-    return _apply_master_energy_use_filter_to_loads_df(result) if apply_master_filter else result
+    if not apply_master_filter:
+        return result
+    if not _master_source_filter_enabled():
+        return _apply_master_energy_use_filter_to_loads_df(result)
+    energy_df = get_energy_balance_df(file_bytes, filename, scenario_name=scenario_name,
+                                      use_scenario_override=use_scenario_override, apply_master_filter=False)
+    return _apply_master_source_filter_to_loads_df(
+        _apply_master_energy_use_filter_to_loads_df(result), energy_df, scenario_name)
 
 
 def _energy_balance_to_excel_df(df_no_suffix: pd.DataFrame) -> pd.DataFrame:
@@ -1976,7 +2051,7 @@ def _tariff_kwh_widget_key(source: str) -> str:
 
 
 def _default_tariff_demand_config() -> Dict[str, dict]:
-    return {src: {"enabled": False, "per_kw": 0.0} for src in ENERGY_SOURCE_ORDER}
+    return {src: {"enabled": False, "per_kw": 0.0, "manual_peak_enabled": False, "manual_peak_kw": 0.0} for src in ENERGY_SOURCE_ORDER}
 
 
 def _normalize_tariff_demand_config(config) -> Dict[str, dict]:
@@ -1989,9 +2064,21 @@ def _normalize_tariff_demand_config(config) -> Dict[str, dict]:
             per_kw = float(str(rec.get("per_kw", 0.0)).replace(",", "."))
         except Exception:
             per_kw = 0.0
+        try:
+            manual_peak = float(str(rec.get("manual_peak_kw", 0.0)).replace(",", "."))
+        except Exception:
+            manual_peak = float("nan")
+        manual_enabled = rec.get("manual_peak_enabled", False)
+        if isinstance(manual_enabled, str):
+            manual_enabled = manual_enabled.strip().lower() in {"1", "true", "yes", "y", "on"}
+        if pd.isna(manual_enabled):
+            manual_enabled = False
+        valid_peak = np.isfinite(manual_peak) and manual_peak >= 0.0
         out[src] = {
             "enabled": bool(rec.get("enabled", False)),
             "per_kw": max(0.0, float(per_kw)),
+            "manual_peak_enabled": bool(manual_enabled) and valid_peak,
+            "manual_peak_kw": manual_peak if valid_peak else 0.0,
         }
     return out
 
@@ -2021,8 +2108,10 @@ def parse_tariff_demand_df(df: Optional[pd.DataFrame]) -> Dict[str, dict]:
             per_kw = float(str(row.get("Tariff_per_kW", 0.0)).replace(",", ".")) if has_per_kw else 0.0
         except Exception:
             per_kw = 0.0
-        out[src] = {"enabled": bool(enabled), "per_kw": max(0.0, float(per_kw))}
-    return out
+        out[src] = {"enabled": bool(enabled), "per_kw": max(0.0, float(per_kw)),
+                    "manual_peak_enabled": row.get("Manual_Peak_Enabled", False),
+                    "manual_peak_kw": row.get("Manual_Peak_kW", 0.0)}
+    return _normalize_tariff_demand_config(out)
 
 
 def _capture_tariff_demand_from_widgets() -> Dict[str, dict]:
@@ -2032,6 +2121,8 @@ def _capture_tariff_demand_from_widgets() -> Dict[str, dict]:
         out[src] = {
             "enabled": bool(st.session_state.get(f"tariff_demand_enabled_{suffix}", False)),
             "per_kw": max(0.0, float(st.session_state.get(f"tariff_per_kw_{suffix}", 0.0) or 0.0)),
+            "manual_peak_enabled": bool(st.session_state.get(f"tariff_manual_peak_enabled_{suffix}", False)),
+            "manual_peak_kw": float(st.session_state.get(f"tariff_manual_peak_kw_{suffix}", 0.0) or 0.0),
         }
     return out
 
@@ -2076,6 +2167,23 @@ def _tariff_peak_for_source(df_loads: pd.DataFrame, source: str) -> Tuple[Option
         return max(0.0, float(vals.max())), col
     except Exception:
         return None, col
+
+
+def _tariff_active_energy_rows(df_energy: pd.DataFrame) -> pd.DataFrame:
+    """Use the same signed energy basis for the sidebar preview and Energy Cost tab."""
+    rows = df_energy.melt(id_vars="Month", var_name="End_Use", value_name="kWh").copy()
+    factors = rows["End_Use"].map(
+        lambda use: float(st.session_state.get(f"eff_{use}", 1.0) or 1.0)
+    ).replace(0.0, 1.0)
+    rows["kWh"] = pd.to_numeric(rows["kWh"], errors="coerce").fillna(0.0) / factors
+    rows["Energy_Source"] = rows["End_Use"].map(
+        lambda use: str(st.session_state.get(f"source_{use}", "Electricity")))
+    rows.loc[~rows["Energy_Source"].isin(ENERGY_SOURCE_ORDER), "Energy_Source"] = "Electricity"
+    onsite = rows["End_Use"].isin(set(get_onsite_generation_enduses(rows["End_Use"].unique())))
+    rows.loc[onsite, "kWh"] = -rows.loc[onsite, "kWh"].abs() * float(st.session_state.get("pv_scale", 1.0))
+    rows.loc[onsite, "Energy_Source"] = "Electricity"
+    rows.loc[~onsite, "kWh"] = rows.loc[~onsite, "kWh"].clip(lower=0.0)
+    return rows
 
 
 def _tariff_rate_details_for_rows(
@@ -2123,7 +2231,11 @@ def _tariff_rate_details_for_rows(
             consumption_kwh = 0.0
             generation_kwh = 0.0
 
-        peak_kw, load_col = _tariff_peak_for_source(df_loads, src) if enabled else (None, None)
+        manual_peak_used = enabled and bool(cfg.get("manual_peak_enabled", False))
+        if manual_peak_used:
+            peak_kw, load_col = float(cfg["manual_peak_kw"]), None
+        else:
+            peak_kw, load_col = _tariff_peak_for_source(df_loads, src) if enabled else (None, None)
         demand_cost = float(peak_kw) * demand_rate if enabled and peak_kw is not None else 0.0
         consumption_cost = consumption_kwh * base_rate
         generation_credit = generation_kwh * base_rate
@@ -2138,7 +2250,11 @@ def _tariff_rate_details_for_rows(
             "generation_kwh": generation_kwh,
             "peak_kw": peak_kw,
             "load_column": load_col,
+            "manual_peak_used": manual_peak_used,
             "demand_cost": demand_cost,
+            "consumption_cost": consumption_cost,
+            "generation_credit": generation_credit,
+            "gross_annual_cost": consumption_cost + demand_cost,
             "equivalent_tariff": equivalent_rate,
             "annual_cost": total_cost,
             "load_found": (peak_kw is not None),
@@ -3469,7 +3585,8 @@ def compute_lcc_cashflow_table(
     lcc_global controls analysis period, discount rate, inflation and operational filter and is shared by all scenarios.
     """
     payload = payload or {}
-    lcc = _normalize_lcc_payload(payload.get("lcc", {}), end_uses)
+    allocation_enduses = list(dict.fromkeys(list(end_uses) + list((payload.get('mapping', {}) or {}).keys()))) if _master_source_filter_enabled() else end_uses
+    lcc = _normalize_lcc_payload(payload.get("lcc", {}), allocation_enduses)
     global_payload = lcc_global if isinstance(lcc_global, dict) else payload.get("lcc_global", payload.get("lcc", {}))
     lcc_assumptions = _normalize_lcc_global_payload(global_payload, end_uses)
 
@@ -3521,10 +3638,10 @@ def compute_lcc_cashflow_table(
 
     # Investments, annual maintenance and replacement.
     # Measures can be assigned to several end uses; CAPEX/O&M/replacement costs are allocated equally.
-    inv_df = _lcc_investments_records_to_df(lcc.get("investments", []), end_uses=end_uses)
+    inv_df = _lcc_investments_records_to_df(lcc.get("investments", []), end_uses=allocation_enduses)
     for _, r in inv_df.iterrows():
         measure = str(r.get("Measure Name", "")).strip() or "Unnamed measure"
-        assigned_list_all = _lcc_parse_assigned_enduses(r.get("Assigned End Uses", ""), end_uses=end_uses)
+        assigned_list_all = _lcc_parse_assigned_enduses(r.get("Assigned End Uses", ""), end_uses=allocation_enduses)
         if not assigned_list_all:
             assigned_list_all = _lcc_default_selected_enduses(end_uses)[:1]
 
@@ -3532,7 +3649,7 @@ def compute_lcc_cashflow_table(
         # Keep the original cost allocation denominator so a multi-use measure contributes only the
         # fraction attributable to currently included Energy Uses rather than reallocating its full cost.
         allocation = 1.0 / max(1, len(assigned_list_all))
-        if _master_energy_filter_enabled():
+        if _master_energy_filter_enabled() or _master_source_filter_enabled():
             calculation_enduses = {str(c) for c in df_energy.columns if str(c) != "Month"}
             assigned_list = [u for u in assigned_list_all if str(u) in calculation_enduses]
             if not assigned_list:
@@ -3636,7 +3753,7 @@ def compute_lcc_cashflow_table_cached(
 ) -> pd.DataFrame:
     return _compute_lcc_cashflow_table_cached_impl(
         df_energy, payload, end_uses, int(project_year), lcc_global, df_loads,
-        _onsite_generation_cache_signature(df_energy)
+        (_onsite_generation_cache_signature(df_energy), _master_source_filter_signature(), _master_energy_filter_enabled())
     )
 
 
@@ -6031,6 +6148,8 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         if bool(_td.get("enabled", False)):
             _peak_txt = f"; peak {_td.get('peak_kw', 0.0):,.2f} kW" if _td.get(
                 "peak_kw") is not None else "; matching peak load not found"
+            if _td.get("manual_peak_used", False):
+                _peak_txt += " (manual override)"
             _report_tariff_input_rows.append((
                 f"Tariff - {src}",
                 f"{currency_r} {float(_td.get('tariff_per_kwh', 0.0)):,.5f}/kWh + {currency_r} {float(_td.get('tariff_per_kw', 0.0)):,.5f}/kW·a; equivalent {currency_r} {float(_td.get('equivalent_tariff', 0.0)):,.5f}/kWh{_peak_txt}",
@@ -6699,6 +6818,8 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
         _rec = _tariff_demand_loaded.get(_src, {})
         st.session_state[f"tariff_demand_enabled_{_suffix}"] = bool(_rec.get("enabled", False))
         _set_num(f"tariff_per_kw_{_suffix}", float(_rec.get("per_kw", 0.0)), "{:.5f}")
+        st.session_state[f"tariff_manual_peak_enabled_{_suffix}"] = bool(_rec.get("manual_peak_enabled", False))
+        _set_num(f"tariff_manual_peak_kw_{_suffix}", float(_rec.get("manual_peak_kw", 0.0)), "{:.3f}")
 
     for use in end_uses:
         st.session_state[f"source_{use}"] = str(m.get(use, "Electricity"))
@@ -6799,6 +6920,8 @@ def build_tariffs_df(
         "Tariff_per_kWh": [cost_elec, cost_green, cost_gas, cost_dh, cost_dc, cost_biomass],
         "Demand_Charge_Enabled": [1 if demand_cfg.get(src, {}).get("enabled", False) else 0 for src in sources],
         "Tariff_per_kW": [float(demand_cfg.get(src, {}).get("per_kw", 0.0)) for src in sources],
+        "Manual_Peak_Enabled": [int(demand_cfg[src]["manual_peak_enabled"]) for src in sources],
+        "Manual_Peak_kW": [float(demand_cfg[src]["manual_peak_kw"]) for src in sources],
     })
 
 
@@ -8651,7 +8774,7 @@ def create_benchmark_bar_chart(values_dict: Dict[str, float], thresholds_dict: D
 
 
 DASHBOARD_SETUP_SHEET = 'Dashboard_Setup'
-DASHBOARD_SETUP_KEYS = {'dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis','dashboard_energy_uses','dashboard_energy_filter_scope'} | {
+DASHBOARD_SETUP_KEYS = {'dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis','dashboard_energy_uses','dashboard_energy_filter_scope','dashboard_lcc_period','dashboard_sync_lcc_uses'} | {
     f'dashboard_radar_{i}' for i in range(3)} | {
     f'dashboard_scatter_{i}{suffix}' for i in range(3) for suffix in ['', '_x', '_y']}
 
@@ -8681,6 +8804,14 @@ def _dashboard_restore_setup(frame):
                 value = json.loads(str(row['Value']))
                 if isinstance(value,dict) and 'value' in value:
                     value = value['value']
+                if key == 'dashboard_lcc_period':
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value) and 1 <= value <= 100:
+                        values[key] = int(value)
+                    continue
+                if key == 'dashboard_sync_lcc_uses':
+                    if isinstance(value, bool):
+                        values[key] = value
+                    continue
                 if key == 'dashboard_load_percentile':
                     if isinstance(value,(int,float)) and not isinstance(value,bool) and np.isfinite(value) and 0 <= value <= 100:
                         values[key] = float(value)
@@ -9777,6 +9908,9 @@ if uploaded_file:
         [],
     )
 
+    saved_source_filter_enabled = parse_project_setting_bool(cfg_saved["project"], "Energy_Source_Filter_Enabled", False)
+    saved_source_filter_selected = parse_project_setting_list(cfg_saved["project"], "Energy_Source_Filter_Selected", list(ENERGY_SOURCE_ORDER))
+
     saved_factors = parse_factors_df(cfg_saved["factors"])
     saved_tariffs = parse_tariffs_df(cfg_saved["tariffs"])
     saved_tariff_demand = parse_tariff_demand_df(cfg_saved["tariffs"])
@@ -9806,6 +9940,8 @@ if uploaded_file:
         "year": saved_year,
         "scenario_comparison_period": saved_scenario_comparison_period,
         "scenario_comparison_apply_lcc_filter": saved_scenario_comparison_apply_lcc_filter,
+        "energy_source_filter_enabled": saved_source_filter_enabled,
+        "energy_source_filter_selected": saved_source_filter_selected,
         "energy_use_filter_enabled": saved_master_energy_filter_enabled,
         "energy_use_filter_selected": saved_master_energy_filter_selected,
         "factors": saved_factors,
@@ -9996,6 +10132,8 @@ if uploaded_file:
             preloaded.get("energy_use_filter_selected", [])
         )
         st.session_state.pop(MASTER_ENERGY_FILTER_AVAILABLE_KEY, None)
+        st.session_state[MASTER_SOURCE_FILTER_ENABLED_KEY] = bool(preloaded.get("energy_source_filter_enabled", False))
+        st.session_state[MASTER_SOURCE_FILTER_SELECTED_KEY] = [src for src in preloaded.get("energy_source_filter_selected", ENERGY_SOURCE_ORDER) if src in ENERGY_SOURCE_ORDER]
 
         if preloaded.get("year") is not None:
             try:
@@ -10135,6 +10273,10 @@ if uploaded_file:
             default_building_use) if default_building_use in building_use_options else 0
         building_use = st.selectbox("Building Use", building_use_options, index=building_use_index,
                                     key="building_use", disabled=IS_VIEWER_MODE, help=_viewer_widget_help())
+
+for _source_filter_key in [MASTER_SOURCE_FILTER_ENABLED_KEY, MASTER_SOURCE_FILTER_SELECTED_KEY]:
+    if _source_filter_key in st.session_state:
+        st.session_state[_source_filter_key] = st.session_state[_source_filter_key]
 
 # Preserve the project-wide Energy Use Filter widget state across scenario-switch reruns.
 # Scenario Manager can trigger st.rerun() before these widgets are rendered; re-saving the
@@ -10640,6 +10782,19 @@ with tab1:
                 st.warning(
                     "Select at least one Energy Use. Until then, the filter is treated as inactive to keep calculations valid.")
 
+        with st.sidebar.expander("Energy Source Filter", expanded=False):
+            st.caption("Include energy sources across all scenarios, using each scenario's source mapping. Works together with the Energy Use Filter.")
+            if MASTER_SOURCE_FILTER_SELECTED_KEY not in st.session_state:
+                st.session_state[MASTER_SOURCE_FILTER_SELECTED_KEY] = list(ENERGY_SOURCE_ORDER)
+            st.checkbox("Apply Energy Source Filter", key=MASTER_SOURCE_FILTER_ENABLED_KEY)
+            source_selection = st.multiselect(
+                "Energy Sources included in calculations", ENERGY_SOURCE_ORDER,
+                key=MASTER_SOURCE_FILTER_SELECTED_KEY,
+                help="Filters energy uses by their scenario source mapping. Raw data and source assignments are preserved. Shared thermal load profiles are retained when at least one matching source remains.",
+            )
+            if st.session_state.get(MASTER_SOURCE_FILTER_ENABLED_KEY) and not source_selection:
+                st.warning("Select at least one source. An empty selection leaves the source filter inactive.")
+
         # ---- Sidebar: emission factors (used in Tab 2, but defined once)
         with st.sidebar.expander("Emission Factors"):
             st.caption("Assign Emission Factors per source")
@@ -10765,16 +10920,7 @@ with tab1:
                 _tariff_preview_energy = get_energy_balance_df(
                     file_bytes, uploaded_file.name, scenario_name=str(st.session_state.get("active_scenario", ""))
                 )
-                _tariff_preview_rows = _tariff_preview_energy.melt(id_vars="Month", var_name="End_Use",
-                                                                   value_name="kWh")
-                _tariff_preview_rows["kWh"] = pd.to_numeric(_tariff_preview_rows["kWh"], errors="coerce").fillna(0.0)
-                _tariff_preview_rows["Efficiency_Factor"] = _tariff_preview_rows["End_Use"].map(
-                    lambda _u: float(st.session_state.get(f"eff_{_u}", 1.0) or 1.0)
-                ).replace(0.0, 1.0)
-                _tariff_preview_rows["kWh"] = _tariff_preview_rows["kWh"] / _tariff_preview_rows["Efficiency_Factor"]
-                _tariff_preview_rows["Energy_Source"] = _tariff_preview_rows["End_Use"].map(
-                    lambda _u: str(st.session_state.get(f"source_{_u}", "Electricity"))
-                )
+                _tariff_preview_rows = _tariff_active_energy_rows(_tariff_preview_energy)
                 _tariff_preview_loads = get_loads_balance_df(
                     file_bytes, uploaded_file.name, scenario_name=str(st.session_state.get("active_scenario", "")),
                     apply_master_filter=False,
@@ -10830,10 +10976,27 @@ with tab1:
                     help=_viewer_widget_help("Enable 'Use kWh + peak kW tariff' to edit this demand-charge component."),
                 )
 
+                _manual_enabled_key = f"tariff_manual_peak_enabled_{_suffix}"
+                _manual_kw_key = f"tariff_manual_peak_kw_{_suffix}"
+                if _manual_enabled_key not in st.session_state:
+                    st.session_state[_manual_enabled_key] = bool(def_td[_src]["manual_peak_enabled"])
+                _manual_enabled = st.checkbox(
+                    "Use manual peak load", key=_manual_enabled_key,
+                    disabled=(IS_VIEWER_MODE or not _demand_enabled),
+                    help="Override the detected annual source peak for tariff calculations only. Saved separately for each scenario.",
+                )
+                _manual_kw = numeric_input(
+                    "Manual peak load (kW)", float(def_td[_src]["manual_peak_kw"]),
+                    key=_manual_kw_key, min_value=0.0, fmt="{:.3f}",
+                    disabled=(IS_VIEWER_MODE or not _demand_enabled or not _manual_enabled),
+                    help="Used instead of the Loads_Balance peak while the manual override is enabled. Does not change the load profiles.",
+                )
+
                 _preview_payload = {
                     "tariffs": {_src: float(_kwh_value)},
                     TARIFF_DEMAND_CONFIG_KEY: {
-                        _src: {"enabled": bool(_demand_enabled), "per_kw": float(_per_kw_value)}
+                        _src: {"enabled": bool(_demand_enabled), "per_kw": float(_per_kw_value),
+                               "manual_peak_enabled": bool(_manual_enabled), "manual_peak_kw": float(_manual_kw)}
                     },
                 }
                 _preview_details = _tariff_rate_details_for_rows(
@@ -10844,17 +11007,23 @@ with tab1:
                     if bool(_preview_details.get("load_found", False)):
                         _peak = float(_preview_details.get("peak_kw", 0.0) or 0.0)
                         _load_name = str(_preview_details.get("load_column", ""))
+                        _peak_origin = "manual override" if _preview_details.get("manual_peak_used") else f"from '{_load_name}'"
                         st.caption(
-                            f"Equivalent tariff: {currency_symbol} {_eq:,.5f}/kWh · Peak: {_peak:,.2f} kW from '{_load_name}'"
+                            f"Equivalent tariff: {currency_symbol} {_eq:,.5f}/kWh · Peak: {_peak:,.2f} kW ({_peak_origin})"
+                        )
+                        st.caption(
+                            f"Annual energy charge: {currency_symbol} {_preview_details['consumption_cost']:,.2f} + "
+                            f"annual peak charge: {currency_symbol} {_preview_details['demand_cost']:,.2f} = "
+                            f"{currency_symbol} {_preview_details['gross_annual_cost']:,.2f} (before generation credits)."
                         )
                         if float(_preview_details.get("consumption_kwh", 0.0) or 0.0) <= 1e-12 and _peak > 0.0:
                             st.warning(
-                                f"'{_src}' has a matching peak load but no positive annual consumption to allocate the demand charge to."
+                                f"'{_src}' has a tariff peak load but no positive annual consumption to allocate the demand charge to."
                             )
                     else:
                         st.caption(f"Equivalent tariff: {currency_symbol} {_eq:,.5f}/kWh")
                         st.warning(
-                            f"No Loads_Balance load matching '{_src}' was found. The peak-demand component is not applied until a matching load exists."
+                            f"No Loads_Balance load matching '{_src}' was found. The peak-demand component is not applied until a matching load exists or a manual peak is enabled."
                         )
                 else:
                     st.caption(f"Equivalent tariff: {currency_symbol} {_eq:,.5f}/kWh")
@@ -10873,7 +11042,7 @@ with tab1:
                     use_container_width=True,
                     disabled=IS_VIEWER_MODE,
                     help=_viewer_widget_help(
-                        "Copies all per-kWh tariffs, demand-charge checkboxes and per-kW tariffs from the active scenario to every existing scenario."
+                        "Copies all per-kWh tariffs, demand-charge settings and manual peak overrides from the active scenario to every existing scenario."
                     ),
             ):
                 _scenarios_tariff_copy = st.session_state.get("scenarios", {})
@@ -11139,6 +11308,8 @@ with tab1:
                             {"Key": "Scenario_Comparison_Analysis_Period", "Value": int(_sc_cmp_period_save)},
                             {"Key": "Scenario_Comparison_Apply_LCC_Filter",
                              "Value": 1 if bool(_sc_cmp_apply_lcc_filter_save) else 0},
+                            {"Key": "Energy_Source_Filter_Enabled", "Value": int(bool(st.session_state.get(MASTER_SOURCE_FILTER_ENABLED_KEY, False)))},
+                            {"Key": "Energy_Source_Filter_Selected", "Value": json.dumps(st.session_state.get(MASTER_SOURCE_FILTER_SELECTED_KEY, list(ENERGY_SOURCE_ORDER)))},
                             {"Key": "Energy_Use_Filter_Enabled", "Value": 1 if _master_energy_filter_enabled() else 0},
                             {"Key": "Energy_Use_Filter_Selected", "Value": json.dumps(
                                 _master_energy_filter_selected(_master_energy_filter_available_end_uses(end_uses)),
@@ -12364,6 +12535,114 @@ The QA is intended as traceability and model-quality control. It does not replac
         st.write("### ← Please upload data on sidebar")
 
 # =========================
+def _validated_crrem_setup(target, use_type, mixed_df, use_options, ef_settings):
+    """Validate the whole submission before changing any committed scenario."""
+    if target not in ['1.5°C', '2°C'] or use_type not in use_options:
+        raise ValueError('Choose a valid CRREM target and use type.')
+    mixed = mixed_df.copy(deep=True).dropna(how='all')
+    if use_type == 'Mixed Use':
+        shares = pd.to_numeric(mixed['Area Share %'], errors='coerce')
+        valid_uses = set(use_options) - {'Mixed Use'}
+        if mixed.empty or not mixed['Use Type'].isin(valid_uses).all():
+            raise ValueError('Choose a valid use type for every mixed-use row.')
+        if shares.isna().any() or not np.isfinite(shares).all() or (shares < 0).any() or (shares > 100).any():
+            raise ValueError('Area shares must be numbers between 0 and 100%.')
+        if abs(float(shares.sum()) - 100.0) > 0.01:
+            raise ValueError(f'Area shares sum to {shares.sum():.2f}%. Set the total to 100% before updating.')
+        mixed['Area Share %'] = shares
+    return {'crrem_target': target, 'crrem_use_type': use_type,
+            'crrem_mixed_use': _mixed_use_df_to_records(mixed),
+            'crrem_ef': _coerce_crrem_ef_payload(ef_settings)}
+
+
+def _commit_crrem_setup(setup, propagate=False):
+    scenarios = deepcopy(st.session_state.get('scenarios', {}))
+    active = st.session_state.get('active_scenario')
+    for name in (list(scenarios) if propagate else [active]):
+        if name in scenarios:
+            scenarios[name].update(deepcopy(setup))
+    st.session_state['scenarios'] = scenarios
+    st.session_state['crrem_target_select'] = setup['crrem_target']
+    st.session_state['crrem_use_type'] = setup['crrem_use_type']
+    st.session_state['crrem_mixed_use_df'] = _mixed_use_records_to_df(setup['crrem_mixed_use'])
+    # These canonical rate keys are not the form widget keys.
+    settings = setup['crrem_ef']
+    for src in ENERGY_SOURCE_ORDER:
+        sk = _source_state_key(src)
+        st.session_state[f'crrem_use_custom_decarb_{sk}'] = settings['use_custom_decarb_by_source'][src]
+        st.session_state[f'crrem_decarb_rate_{sk}'] = settings['custom_decarb_rates_pct'][src]
+        st.session_state[f'crrem_decarb_rate_{sk}_txt'] = f"{settings['custom_decarb_rates_pct'][src]:.3f}"
+
+
+def _render_crrem_setup(use_options):
+    active = str(st.session_state.get('active_scenario', ''))
+    committed = {
+        'crrem_target': st.session_state.get('crrem_target_select', '1.5°C'),
+        'crrem_use_type': st.session_state.get('crrem_use_type', 'Office'),
+        'crrem_mixed_use': _mixed_use_df_to_records(st.session_state.get('crrem_mixed_use_df')),
+        'crrem_ef': _crrem_ef_payload_from_session(),
+    }
+    token = (active, json.dumps(committed, sort_keys=True, default=str))
+    if st.session_state.get('_crrem_setup_seed_token') != token:
+        st.session_state['_crrem_setup_seed_token'] = token
+        st.session_state['_crrem_setup_revision'] = int(st.session_state.get('_crrem_setup_revision', 0)) + 1
+        st.session_state['_crrem_setup_mixed_seed'] = _mixed_use_records_to_df(committed['crrem_mixed_use'])
+    revision = st.session_state['_crrem_setup_revision']
+    prefix = f'crrem_setup_{revision}'
+    container = st.expander('CRREM setup', expanded=False)
+    with container:
+        if st.session_state.get('_crrem_setup_flash'):
+            st.success(st.session_state.pop('_crrem_setup_flash'))
+        st.caption('Edit settings, then click Update CRREM Setup. Each scenario keeps its own setup unless you explicitly propagate it.')
+        with st.form(f'{prefix}_form', clear_on_submit=False):
+            target = st.selectbox('Target (temperature pathway)', ['1.5°C', '2°C'],
+                index=0 if committed['crrem_target'].startswith('1.5') else 1,
+                key=f'{prefix}_target', disabled=IS_VIEWER_MODE)
+            current_use = committed['crrem_use_type']
+            use = st.selectbox('CRREM Use Type', use_options,
+                index=use_options.index(current_use) if current_use in use_options else 0,
+                key=f'{prefix}_use', disabled=IS_VIEWER_MODE)
+            st.caption('Mixed-use area shares below are applied only when CRREM Use Type is Mixed Use. The table remains visible so you can change the use type and shares in one submission.')
+            mixed = st.data_editor(st.session_state['_crrem_setup_mixed_seed'],
+                num_rows='dynamic', use_container_width=True, key=f'{prefix}_mixed',
+                column_config={
+                    'Use Type': st.column_config.SelectboxColumn('Use Type', options=[u for u in use_options if u != 'Mixed Use'], required=True),
+                    'Area Share %': st.column_config.NumberColumn('Area Share %', min_value=0.0, max_value=100.0, step=0.1, format='%.2f', required=True),
+                })
+            st.markdown('**Emission factor decarbonization**')
+            st.caption('Unchecked sources follow CRREM grid decarbonization. Custom rates are annual percentage reductions.')
+            ef = deepcopy(committed['crrem_ef'])
+            cols = st.columns(3)
+            for i, src in enumerate(ENERGY_SOURCE_ORDER):
+                with cols[i % 3]:
+                    ef['use_custom_decarb_by_source'][src] = st.checkbox(
+                        f'{src}: use custom rate', value=ef['use_custom_decarb_by_source'][src],
+                        key=f'{prefix}_custom_{i}', disabled=IS_VIEWER_MODE)
+                    ef['custom_decarb_rates_pct'][src] = st.number_input(
+                        f'{src} decarbonization (%/a)', min_value=-100.0, max_value=100.0,
+                        value=float(ef['custom_decarb_rates_pct'][src]), step=0.1, format='%.3f',
+                        key=f'{prefix}_rate_{i}', disabled=IS_VIEWER_MODE)
+            ef['use_custom_decarb_rates'] = any(ef['use_custom_decarb_by_source'].values())
+            update = st.form_submit_button('Update CRREM Setup')
+            propagate = st.form_submit_button('Propagate CRREM Setup to all scenarios', disabled=IS_VIEWER_MODE,
+                help='Applies this submitted target, use type, mixed-use shares and emission-factor settings to all scenarios once. Scenario measures and other inputs remain independent.')
+        if update or propagate:
+            try:
+                setup = _validated_crrem_setup(target, use, mixed, use_options, ef)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                _commit_crrem_setup(setup, propagate=propagate)
+                st.session_state['_crrem_setup_flash'] = ('CRREM setup applied to all scenarios. Each can still be edited separately.'
+                    if propagate else 'CRREM setup updated.')
+                st.rerun()
+        toggle_key = 'crrem_show_baseline_lines_control'
+        st.session_state[toggle_key] = bool(st.session_state.get(CRREM_SHOW_BASELINE_STATE_KEY, True))
+        st.checkbox('Show CRREM baseline / pathway lines', key=toggle_key,
+            on_change=_sync_crrem_baseline_toggle, args=(toggle_key,))
+    return container
+
+
 # Tab 6 — CRREM-Analysis
 # =========================
 with tab6:
@@ -12377,152 +12656,19 @@ with tab6:
                 "CRREM dataset not found. Place 'CRREM_EU_Data_Extract_v2_07_1p5_2C.xlsx' (preferred) or 'CRREM_DE_Data_Extract_v2_07_1p5_2C.xlsx' in the app root, 'templates/' or 'data/' folder."
             )
         else:
-            # --- Controls
-            _crrem_target_options = ["1.5°C", "2°C"]
-            if st.session_state.get("crrem_target_select") not in _crrem_target_options:
-                st.session_state["crrem_target_select"] = "1.5°C"
-            target_label = st.selectbox(
-                "Target (temperature pathway)",
-                _crrem_target_options,
-                index=_crrem_target_options.index(st.session_state.get("crrem_target_select", "1.5°C")),
-                key="crrem_target_select",
-                disabled=IS_VIEWER_MODE,
-                help=_viewer_widget_help(),
-            )
-            target_id = "1.5C" if target_label.startswith("1.5") else "2C"
-
-            _crrem_toggle_key = "crrem_show_baseline_lines_control"
-            st.session_state[_crrem_toggle_key] = bool(st.session_state.get(CRREM_SHOW_BASELINE_STATE_KEY, True))
-            st.checkbox(
-                "Show CRREM baseline / pathway lines",
-                key=_crrem_toggle_key,
-                on_change=_sync_crrem_baseline_toggle,
-                args=(_crrem_toggle_key,),
-                help="Show or hide the CRREM reference pathway in CRREM and scenario comparison diagrams.",
-            )
-
-            pt_df = crrem["property_types"].copy()
-            use_options = pt_df["app_use"].dropna().astype(str).tolist()
-            # keep Mixed Use last (if present)
-            if "Mixed Use" in use_options:
-                use_options = [u for u in use_options if u != "Mixed Use"] + ["Mixed Use"]
-            # Default CRREM use: Office if not available / invalid (backwards compatible)
-            if "crrem_use_type" not in st.session_state or st.session_state.get("crrem_use_type") not in use_options:
-                st.session_state["crrem_use_type"] = "Office" if "Office" in use_options else (
-                    use_options[0] if use_options else "Office")
-
-            crrem_use = st.selectbox(
-                "CRREM Use Type",
-                use_options,
-                index=use_options.index(st.session_state["crrem_use_type"]) if st.session_state[
-                                                                                   "crrem_use_type"] in use_options else 0,
-                key="crrem_use_type",
-                disabled=IS_VIEWER_MODE,
-                help=_viewer_widget_help(),
-            )
-
-            with st.expander("Emission factor decarbonization settings", expanded=False):
-                st.caption(
-                    "Each energy source can either follow the CRREM grid decarbonization ratio or use a custom "
-                    "annual reduction rate. Custom rates are percentage reductions compared with the previous year. "
-                    "Example: 3 means the emission factor is multiplied by 0.97 each year. "
-                    "Changes in this section are applied only after clicking `Update emission factor decarbonization settings`."
-                )
-
-                # Keep all CRREM EF settings in a form so changing individual rates/checkboxes does not
-                # rerun/recalculate the full page until the user explicitly submits the form.
-                with st.form("crrem_ef_decarbonization_settings_form", clear_on_submit=False):
-                    _rate_cols = st.columns(3)
-                    for _i, _src in enumerate(ENERGY_SOURCE_ORDER):
-                        _sk = _source_state_key(_src)
-                        with _rate_cols[_i % 3]:
-                            st.markdown(f"**{_src}**")
-                            st.checkbox(
-                                "Use custom rate",
-                                key=f"crrem_use_custom_decarb_{_sk}",
-                                help=_viewer_widget_help(
-                                    f"If checked, {_src} uses the annual reduction rate below. "
-                                    "If unchecked, it follows the CRREM grid decarbonization ratio."
-                                ),
-                                disabled=IS_VIEWER_MODE,
-                            )
-                            numeric_input(
-                                f"{_src} decarbonization (%/a)",
-                                float(st.session_state.get(f"crrem_decarb_rate_{_sk}", 0.0) or 0.0),
-                                key=f"crrem_decarb_rate_{_sk}",
-                                min_value=-100.0,
-                                max_value=100.0,
-                                fmt="{:.3f}",
-                                help=_viewer_widget_help(
-                                    "Used only when 'Use custom rate' is checked for this energy source."),
-                                disabled=IS_VIEWER_MODE,
-                            )
-
-                    _crrem_ef_submit = st.form_submit_button(
-                        "Update emission factor decarbonization settings",
-                        use_container_width=False,
-                        disabled=IS_VIEWER_MODE,
-                        help=_viewer_widget_help(),
-                    )
-
-                if _crrem_ef_submit:
-                    # Persist immediately into the active scenario payload so Save Project / report generation
-                    # use the submitted settings even if the user never visits the Energy Balance tab again.
-                    try:
-                        _sc = st.session_state.get("scenarios", {})
-                        _act = st.session_state.get("active_scenario")
-                        if isinstance(_sc, dict) and _act in _sc:
-                            _sc[_act]["crrem_ef"] = _crrem_ef_payload_from_session()
-                            st.session_state["scenarios"] = _sc
-                        st.success("Emission factor decarbonization settings updated.")
-                    except Exception:
-                        st.warning(
-                            "Emission factor decarbonization settings were updated for the current session, but could not be written to the scenario payload.")
-
+            pt_df = crrem['property_types'].copy()
+            use_options = pt_df['app_use'].dropna().astype(str).tolist()
+            if 'Mixed Use' in use_options:
+                use_options = [u for u in use_options if u != 'Mixed Use'] + ['Mixed Use']
+            crrem_setup_container = _render_crrem_setup(use_options)
+            target_label = str(st.session_state.get('crrem_target_select', '1.5°C'))
+            target_id = '1.5C' if target_label.startswith('1.5') else '2C'
+            crrem_use = str(st.session_state.get('crrem_use_type', 'Office'))
             mixed_components = None
-            if crrem_use == "Mixed Use":
-                st.caption("Define area shares per use-type (must sum to 100%).")
-                if "crrem_mixed_use_df" not in st.session_state:
-                    st.session_state["crrem_mixed_use_df"] = pd.DataFrame({
-                        "Use Type": ["Office", "Retail, High Street"],
-                        "Area Share %": [50.0, 50.0],
-                    })
-                editor_kwargs = {
-                    "num_rows": "dynamic",
-                    "use_container_width": True,
-                    "key": "crrem_mixed_use_editor",
-                }
-                if hasattr(st, "column_config"):
-                    editor_kwargs["column_config"] = {
-                        "Use Type": st.column_config.SelectboxColumn(
-                            "Use Type",
-                            options=[u for u in use_options if u != "Mixed Use"],
-                            required=True,
-                        ),
-                        "Area Share %": st.column_config.NumberColumn(
-                            "Area Share %",
-                            min_value=0.0,
-                            max_value=100.0,
-                            step=1.0,
-                            format="%.1f",
-                        ),
-                    }
-
-                mixed_df = st.data_editor(
-                    st.session_state["crrem_mixed_use_df"],
-                    **editor_kwargs,
-                )
-                st.session_state["crrem_mixed_use_df"] = mixed_df
-
-                total_share = float(mixed_df["Area Share %"].fillna(0.0).sum()) if not mixed_df.empty else 0.0
-                if abs(total_share - 100.0) > 0.5:
-                    st.warning(f"Mixed use shares sum to {total_share:.1f}%. Adjust to 100% for CRREM blending.")
-                # build components list (exclude empty/zero)
-                mixed_components = [
-                    (str(r["Use Type"]), float(r["Area Share %"]))
-                    for _, r in mixed_df.iterrows()
-                    if str(r.get("Use Type", "")).strip() and float(r.get("Area Share %", 0.0) or 0.0) > 0.0
-                ]
+            if crrem_use == 'Mixed Use':
+                mixed_df = _mixed_use_records_to_df(_mixed_use_df_to_records(st.session_state.get('crrem_mixed_use_df')))
+                mixed_components = [(str(row['Use Type']), float(row['Area Share %']))
+                                    for _, row in mixed_df.iterrows() if float(row.get('Area Share %', 0) or 0) > 0]
 
             # --- Project and scenario inputs
             project_area_val = float(st.session_state.get("project_area", 0.0) or 0.0)
@@ -13082,7 +13228,8 @@ with tab6:
                         _add_param(f"Assign Energy Sources → {u}", {"kind": "src", "end_use": u, "dtype": "source"})
 
                     # Measures editor (scenario-specific storage)
-                    with st.expander("Measures (scenario-specific)", expanded=False):
+                    with crrem_setup_container:
+                        st.markdown("### Decarbonization measures (scenario-specific)")
                         st.write(
                             "Each row is one measure. From the selected year onwards, the parameter takes the new value. "
                             "Multiple measures for the same parameter in different years are allowed."
@@ -16344,16 +16491,7 @@ with tab3:
     if uploaded_file:
         # Ensure we have the same melted data + mapping used in other tabs
         df_cost_base = get_energy_balance_df(file_bytes, uploaded_file.name).copy()
-        df_melted_cost = df_cost_base.melt(id_vars="Month", var_name="End_Use", value_name="kWh")
-        # ---- Apply per-End_Use efficiency factors (align with 'Energy Balance with Factors')
-        eff_map_cost = {use: st.session_state.get(f"eff_{use}", 1.0) for use in df_melted_cost["End_Use"].unique()}
-        df_melted_cost["Efficiency_Factor"] = df_melted_cost["End_Use"].map(eff_map_cost).fillna(1.0)
-        df_melted_cost["kWh"] = df_melted_cost["kWh"] / df_melted_cost["Efficiency_Factor"]
-
-        # Reuse the user's End_Use -> Energy_Source mapping from the sidebar
-        end_uses_here = df_melted_cost["End_Use"].unique()
-        mapping_dict_cost = {use: st.session_state.get(f"source_{use}", "Electricity") for use in end_uses_here}
-        df_melted_cost["Energy_Source"] = df_melted_cost["End_Use"].map(mapping_dict_cost)
+        df_melted_cost = _tariff_active_energy_rows(df_cost_base)
 
         # Build the tariff payload from the active scenario inputs. When a source uses a peak-demand
         # component, its annual demand charge is converted to an equivalent consumption tariff so
@@ -16888,6 +17026,8 @@ def _loads_build_scenario_comparison_df(
         str(_loads_energy_match_key(reference_load)),
         bool(_master_energy_filter_enabled()),
         master_selected,
+        _master_source_filter_signature(),
+        tuple((name, tuple(sorted(((st.session_state.get('scenarios', {}).get(name, {}) or {}).get('mapping', {}) or {}).items()))) for name in names),
         override_signature,
         efficiency_signature,
     )
@@ -17474,7 +17614,7 @@ def _dashboard_lcc_component_values(cashflow, area):
 
 
 def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, year, currency, load_mapping,
-                          selected_energy_uses=None, filter_scope="LCC only"):
+                          selected_energy_uses=None, filter_scope="LCC only", lcc_period=50):
     """Use committed scenario calculations; never active-scenario widget factors."""
     data = comparison.copy().set_index('Scenario')
     data.index = data.index.astype(str)
@@ -17518,7 +17658,7 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
             frame = energies[name]
             uses = [_canon_enduse_name(str(c)) for c in frame.columns if c != 'Month']
             assumptions = dict(lcc_global)
-            assumptions['analysis_period'] = 50
+            assumptions['analysis_period'] = max(1, min(100, int(lcc_period)))
             # Calculate the full allocation first, then retain only selected end-use shares.
             # This also handles an empty selection without the LCC engine's default fallback.
             assumptions['selected_operational_end_uses'] = uses
@@ -17576,10 +17716,12 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
             frame = energies[name]
             uses = [_canon_enduse_name(str(c)) for c in frame.columns if c != 'Month']
             assumptions = _scenario_comparison_lcc_global_payload(lcc_global, uses, apply_lcc_filter=False)
-            assumptions['analysis_period'] = 50
+            assumptions['analysis_period'] = max(1, min(100, int(lcc_period)))
             cashflow = compute_lcc_cashflow_table_cached(
                 frame, payload, uses, year, lcc_global=assumptions,
                 df_loads=get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False))
+        result.loc[name, 'LCC50 nominal'] = cashflow['Nominal Cost'].sum() / area
+        result.loc[name, 'LCC50'] = cashflow['Discounted Cost'].sum() / area
         for key, value in _dashboard_lcc_component_values(cashflow, area).items():
             result.loc[name, key] = value
         for cost_type in ['Maintenance', 'Replacement']:
@@ -17603,6 +17745,8 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
     # Do not infer them from thermal peaks or add non-coincident component peaks.
     for source in ['Electricity', 'District Heating', 'District Cooling']:
         result[f'{source} peak'] = np.nan
+        if _master_source_filter_enabled() and source not in st.session_state.get(MASTER_SOURCE_FILTER_SELECTED_KEY, []):
+            continue
         for name in scenarios:
             df_source_loads = get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False)
             peak, matched = _tariff_peak_for_source(df_source_loads, source)
@@ -17611,6 +17755,9 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
             else:
                 notes.append(f'{name}: {source} peak unavailable; no valid source load column.')
     raw_loads = {name: get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False) for name in scenarios}
+    raw_loads = {name: _apply_master_source_filter_to_loads_df(
+        frame, get_energy_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False), name)
+        for name, frame in raw_loads.items()}
     hotwater_efficiencies = _dashboard_hotwater_efficiencies(efficiency_energy_frames, raw_loads, scenarios)
     result = result.join(hotwater_efficiencies)
     for name, frame in raw_loads.items():
@@ -17692,6 +17839,8 @@ def _dashboard_load_radar_data(data, category, file_bytes, filename, names, area
         for name in names:
             frame = get_loads_balance_df(file_bytes,filename,scenario_name=name,
                 apply_master_filter=key in ['Heating peak','Cooling peak'])
+            frame = _apply_master_source_filter_to_loads_df(frame, get_energy_balance_df(
+                file_bytes, filename, scenario_name=name, apply_master_filter=False), name)
             if key.startswith('load::'):
                 matched = key[len('load::'):]
             elif key in ['Heating peak','Cooling peak']:
@@ -17702,6 +17851,10 @@ def _dashboard_load_radar_data(data, category, file_bytes, filename, names, area
             if matched in frame.columns:
                 result.loc[name,stat_key] = _dashboard_load_statistic_value(frame[matched],area,statistic,percentile)
     return result, updated, label
+
+
+def _dashboard_lcc_period():
+    return max(1, min(100, _to_int_lcc(st.session_state.get('dashboard_lcc_period', 50), 50)))
 
 
 def _dashboard_catalog(currency, loads=()):
@@ -17727,6 +17880,9 @@ def _dashboard_catalog(currency, loads=()):
     peaks = [(s+' peak',s,'W/m²','low') for s in ['Heating','Cooling','Electricity','District Heating','District Cooling']]
     standard = {'heating','spaceheating','cooling','spacecooling','electricity','districtheating','districtcooling'}
     peaks += [('load::'+str(c),str(c),'W/m²','low') for c in loads if _loads_energy_match_key(c) not in standard]
+    period = _dashboard_lcc_period()
+    cost = [(key, label.replace('LCC50', f'LCC{period}').replace('50 years', f'{period} years'), unit, direction)
+            for key, label, unit, direction in cost]
     return [energy,cost,peaks]
 
 
@@ -17895,7 +18051,6 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         frame = get_energy_balance_df(file_bytes, filename, scenario_name=name)
         dashboard_energy_options.extend(_canon_enduse_name(str(c)) for c in frame.columns if c != 'Month')
     dashboard_energy_options = list(dict.fromkeys(dashboard_energy_options))
-    catalog = _dashboard_catalog(currency, loads)
     # Reinstate hidden custom-axis widget values from durable setup state.
     for setting,value in st.session_state.get('_dashboard_saved_setup',{}).items():
         if setting not in st.session_state:
@@ -17914,6 +18069,13 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
                 st.session_state[axis_key] = lcc_aliases.get(value, value)
     with st.expander('Dashboard setup', expanded=False):
         st.caption('Your dashboard setup is included when you save/export the project.')
+        st.session_state['dashboard_lcc_period'] = _dashboard_lcc_period()
+        dashboard_period = st.number_input(
+            'Dashboard LCC analysis period (years)', min_value=1, max_value=100, step=1,
+            key='dashboard_lcc_period',
+            help='Affects only dashboard life-cycle costs, maintenance and replacement. LCC Analysis, Scenarios and the 50-year emissions KPI keep their own periods.',
+        )
+        catalog = _dashboard_catalog(currency, loads)
         if st.session_state.get('dashboard_lcc_basis') not in ['Discounted', 'Nominal']:
             st.session_state['dashboard_lcc_basis'] = 'Discounted'
         lcc_basis = st.radio(
@@ -17921,13 +18083,22 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
             horizontal=True, key='dashboard_lcc_basis',
             help='Applies to all LCC axes, including maintenance and replacement costs, total and per-m² values. Both bases are always shown in the metric cards.',
         )
+        dashboard_sync_lcc = st.checkbox(
+            'Synchronize dashboard LCC energy uses with LCC Analysis',
+            key='dashboard_sync_lcc_uses',
+            help='One-way sync from the committed Operational End Uses included in LCC energy cost selection. Click Update LCC Inputs there to apply edits. Other tabs are never changed by this checkbox.',
+        )
         energy_filter_key = 'dashboard_energy_uses'
         if energy_filter_key not in st.session_state:
             st.session_state[energy_filter_key] = _lcc_default_selected_enduses(dashboard_energy_options)
         else:
             st.session_state[energy_filter_key] = [u for u in st.session_state[energy_filter_key] if u in dashboard_energy_options]
+        if dashboard_sync_lcc:
+            committed_lcc = st.session_state.get(LCC_GLOBAL_STATE_KEY, {}) or {}
+            synced_uses = committed_lcc.get('selected_operational_end_uses', _lcc_default_selected_enduses(dashboard_energy_options))
+            st.session_state[energy_filter_key] = [u for u in dashboard_energy_options if u in synced_uses]
         dashboard_selected_uses = st.multiselect(
-            'Dashboard energy uses', dashboard_energy_options, key=energy_filter_key, format_func=ui_name,
+            'Dashboard energy uses', dashboard_energy_options, key=energy_filter_key, format_func=ui_name, disabled=dashboard_sync_lcc,
             help='Includes only selected energy uses and their allocated investment, maintenance and replacement costs in dashboard LCC. An empty selection gives zero LCC. Shared costs keep their original allocation.',
         )
         filter_scopes = ['LCC only', 'LCC and other energy KPIs']
@@ -18031,7 +18202,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         mapping[service] = options[0] if len(options) == 1 else None
     with st.spinner('Preparing project dashboard…'):
         data, notes = _dashboard_build_data(file_bytes,filename,scenarios,comparison,area,year,currency,mapping,
-                                            selected_energy_uses=dashboard_selected_uses, filter_scope=dashboard_filter_scope)
+                                            selected_energy_uses=dashboard_selected_uses, filter_scope=dashboard_filter_scope, lcc_period=dashboard_period)
     # No visual focus: metrics still describe the sidebar scenario, even if filtered out.
     metric_scenario = focus if focus is not None else (active if active in names else names[0])
     st.subheader(str(metric_scenario).replace('*', r'\*').replace('_', r'\_'))
@@ -18039,15 +18210,15 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
     metric_definitions = [
         ('EUI net', 'Net EUI', 'kWh/m²·a'),
         ('Carbon net', 'Net emissions', 'kgCO₂e/m²·a'),
-        ('LCC50 nominal', 'Nominal LCC · 50 years', currency+'/m²'),
-        ('LCC50 discounted', 'Discounted LCC · 50 years', currency+'/m²'),
+        ('LCC50 nominal', f'Nominal LCC · {dashboard_period} years', currency+'/m²'),
+        ('LCC50 discounted', f'Discounted LCC · {dashboard_period} years', currency+'/m²'),
         ('Coverage', 'Renewables coverage', '%'),
     ]
     for col,(key,label,unit) in zip(columns,metric_definitions):
         value = data.loc[metric_scenario,key]
         if key.startswith('LCC50'):
             basis = 'Nominal' if key == 'LCC50 nominal' else 'Discounted'
-            detail = f'{basis} 50-year life-cycle cost per m², using the global LCC assumptions.'
+            detail = f'{basis} {dashboard_period}-year life-cycle cost per m², using the global LCC assumptions.'
         else:
             detail = 'Scenario-based annual result; coverage = on-site generation / gross consumption.'
         col.metric(label, f'{value:,.1f} {unit}' if pd.notna(value) and np.isfinite(value) else 'N/A',
@@ -18058,7 +18229,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
     data['LCC50 total'] = data[f'LCC50 {lcc_basis.lower()} total']
     for cost_type in ['Maintenance', 'Replacement']:
         data[f'{cost_type}50'] = data[f'{cost_type}50 {lcc_basis.lower()}']
-    st.caption(f'LCC in radar and scatter plots: {lcc_basis.lower()} · 50 years.')
+    st.caption(f'LCC in radar and scatter plots: {lcc_basis.lower()} · {dashboard_period} years.')
     st.caption('Radar scaling: highest value at the outer edge; lowest value at mid-radius unless it is zero, which sits at the centre. Equal non-zero values share the outer edge. Scales use all scenarios; hover for actual values and whether higher or lower is better.')
     if not any(categories) and not scatter_panels:
         return
