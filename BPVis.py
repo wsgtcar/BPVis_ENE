@@ -2532,6 +2532,47 @@ def build_scenarios_sheet(scenarios: Dict[str, dict], active_name: Optional[str]
     return pd.DataFrame(rows)
 
 
+def _crrem_supply_plan(records):
+    """Complete partial-supply snapshots, grouped by end use and effective year."""
+    groups = {}
+    for rec in records or []:
+        parameter = str(rec.get("Parameter", ""))
+        if not parameter.startswith("Supply mix → "):
+            continue
+        use = _canon_enduse_name(parameter.split("→", 1)[1].strip())
+        try:
+            year_raw = float(str(rec.get("Year", "")).replace(",", "."))
+            share = float(str(rec.get("Demand Share (%)", "")).replace(",", "."))
+            efficiency = float(str(rec.get("Share Efficiency Factor", "")).replace(",", "."))
+            source = next(src for src in ENERGY_SOURCE_ORDER if src.lower() == str(rec.get("New Value", "")).strip().lower())
+            if not use or not all(np.isfinite(v) for v in [year_raw, share, efficiency]) or year_raw != int(year_raw) or not 0 <= share <= 100 or efficiency <= 0:
+                raise ValueError()
+        except (ValueError, TypeError, StopIteration):
+            raise ValueError(f"{parameter}: enter a whole year, valid energy source, demand share from 0 to 100%, and a positive share efficiency factor.")
+        groups.setdefault((use, int(year_raw)), []).append((share / 100.0, source, efficiency))
+    for (use, year), mix in groups.items():
+        if sum(part[0] for part in mix) > 1.0 + 1e-9:
+            raise ValueError(f"Supply mix for {use} in {year} exceeds 100%.")
+    return groups
+
+
+def _crrem_split_supply(use, raw_kwh, base_efficiency, base_source, plan, year, inclusive=True, sidebar_efficiency=None):
+    """Supply shares use sidebar-adjusted demand; ordinary CRREM efficiency affects only the residual."""
+    years = [y for eu, y in plan if eu == use and (y <= year if inclusive else y < year)]
+    mix = plan[(use, max(years))] if years else []
+    raw = max(float(raw_kwh), 0.0)
+    source = base_source if base_source in ENERGY_SOURCE_ORDER else "Electricity"
+    eff = float(base_efficiency or 1.0)
+    adjusted_kwh = raw / eff
+    sidebar_eff = float((sidebar_efficiency if sidebar_efficiency is not None else base_efficiency) or 1.0)
+    share_basis_kwh = raw / sidebar_eff
+    parts = [(src, share_basis_kwh * share / factor) for share, src, factor in mix if share > 0]
+    remainder = max(0.0, 1.0 - sum(share for share, _, _ in mix))
+    if remainder > 0:
+        parts.append((source, adjusted_kwh * remainder))
+    return parts
+
+
 def _measures_df_to_records(df) -> list:
     """Convert a CRREM measures dataframe to JSON-serializable records."""
     if df is None:
@@ -2543,7 +2584,7 @@ def _measures_df_to_records(df) -> list:
         if isinstance(df, pd.DataFrame):
             if df.empty:
                 return []
-            cols = ["Parameter", "Year", "New Value"]
+            cols = ["Parameter", "Year", "New Value", "Demand Share (%)", "Share Efficiency Factor"]
             for c in cols:
                 if c not in df.columns:
                     df[c] = ""
@@ -2553,6 +2594,8 @@ def _measures_df_to_records(df) -> list:
                     "Parameter": "" if pd.isna(r["Parameter"]) else str(r["Parameter"]),
                     "Year": None if pd.isna(r["Year"]) or str(r["Year"]).strip() == "" else int(float(r["Year"])),
                     "New Value": "" if pd.isna(r["New Value"]) else str(r["New Value"]),
+                    "Demand Share (%)": None if pd.isna(r["Demand Share (%)"]) or str(r["Demand Share (%)"]).strip() == "" else float(r["Demand Share (%)"]),
+                    "Share Efficiency Factor": None if pd.isna(r["Share Efficiency Factor"]) or str(r["Share Efficiency Factor"]).strip() == "" else float(r["Share Efficiency Factor"]),
                 }
                 out.append(rec)
             return out
@@ -2565,20 +2608,22 @@ def _measures_records_to_df(records) -> pd.DataFrame:
     """Convert saved records to a measures dataframe with stable columns."""
     try:
         if records is None:
-            return pd.DataFrame(columns=["Parameter", "Year", "New Value"])
+            return pd.DataFrame(columns=["Parameter", "Year", "New Value", "Demand Share (%)", "Share Efficiency Factor"])
         if isinstance(records, pd.DataFrame):
             df = records.copy()
         else:
             df = pd.DataFrame(list(records))
         if df.empty:
-            return pd.DataFrame(columns=["Parameter", "Year", "New Value"])
-        for c in ["Parameter", "Year", "New Value"]:
+            return pd.DataFrame(columns=["Parameter", "Year", "New Value", "Demand Share (%)", "Share Efficiency Factor"])
+        for c in ["Parameter", "Year", "New Value", "Demand Share (%)", "Share Efficiency Factor"]:
             if c not in df.columns:
                 df[c] = ""
-        df = df[["Parameter", "Year", "New Value"]].copy()
+        df = df[["Parameter", "Year", "New Value", "Demand Share (%)", "Share Efficiency Factor"]].copy()
+        for c in ["Demand Share (%)", "Share Efficiency Factor"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype(float)
         return df
     except Exception:
-        return pd.DataFrame(columns=["Parameter", "Year", "New Value"])
+        return pd.DataFrame(columns=["Parameter", "Year", "New Value", "Demand Share (%)", "Share Efficiency Factor"])
 
 
 def _mixed_use_df_to_records(df) -> list:
@@ -3601,6 +3646,7 @@ def _lcc_energy_rows_for_payload_year(
     onsite_enduses = set(get_onsite_generation_enduses(annual_by_enduse.index.tolist()))
     pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
 
+    supply_plan = _crrem_supply_plan(_measures_df_to_records(payload.get("crrem_measures", [])))
     rows_all = []
     for eu, raw_kwh in annual_by_enduse.items():
         eu = str(eu)
@@ -3616,10 +3662,9 @@ def _lcc_energy_rows_for_payload_year(
                 kwh_adj = -abs(float(kwh_adj)) * float(pv_scale)
             src = "Electricity"
         else:
-            kwh_adj = max(float(kwh_adj), 0.0)
-            src = str(src_y.get(eu, "Electricity"))
-            if src not in ENERGY_SOURCE_ORDER:
-                src = "Electricity"
+            for src, part_kwh in _crrem_split_supply(eu, raw_kwh, effv, str(src_y.get(eu, "Electricity")), supply_plan, int(year), sidebar_efficiency=eff_base.get(eu, 1.0)):
+                rows_all.append({"End_Use": eu, "Energy_Source": src, "kWh": part_kwh})
+            continue
 
         rows_all.append({"End_Use": eu, "Energy_Source": src, "kWh": float(kwh_adj)})
 
@@ -3654,6 +3699,25 @@ def _lcc_energy_rows_for_payload_year(
     if selected:
         rows_df = rows_df.loc[rows_df["End_Use"].isin(set(selected))].copy()
     return rows_df[["End_Use", "Energy_Source", "kWh", "Tariff", "Annual Cost"]]
+
+
+def _crrem_pie_breakdown(annual_rows: pd.DataFrame, emission_factors: dict) -> pd.DataFrame:
+    """Allocate source-level PV offsets/credits proportionally to consuming end uses."""
+    rows = annual_rows.copy()
+    out = rows.loc[rows["kWh"] > 0].copy()
+    out["End energy demand"] = out["kWh"] / 1000.0
+    out["Energy cost"] = 0.0
+    out["Emissions"] = 0.0
+    for source, group in out.groupby("Energy_Source"):
+        source_rows = rows.loc[rows["Energy_Source"] == source]
+        gross = float(group["kWh"].sum())
+        weights = group["kWh"] / gross
+        # Match CRREM's annual net electricity convention (no emission export credit).
+        net = max(float(source_rows["kWh"].sum()), 0.0)
+        out.loc[group.index, "Emissions"] = weights * net * float(emission_factors.get(source, 0.0)) / 1000.0
+        # Preserve the existing tariff calculation, including demand charges and PV credits.
+        out.loc[group.index, "Energy cost"] = weights * float(source_rows["Annual Cost"].sum())
+    return out
 
 
 def compute_lcc_cashflow_table(
@@ -6929,6 +6993,7 @@ def load_scenario_into_widgets(payload: dict, end_uses: list) -> None:
     st.session_state["crrem_measures_df"] = _measures_records_to_df(payload.get("crrem_measures", []))
     # Keep the measures editor in sync after loading a project/scenario (so the table shows saved measures)
     st.session_state["crrem_measures_draft_df"] = st.session_state["crrem_measures_df"].copy(deep=True)
+    st.session_state["_crrem_measures_revision"] = int(st.session_state.get("_crrem_measures_revision", 0)) + 1
 
     # CRREM target/use settings (scenario-specific; backwards compatible defaults).
     try:
@@ -9666,7 +9731,9 @@ def compute_crrem_like_scenario_emissions_series(
     src_measures = sorted(src_measures, key=lambda t: t[0])
     pv_measures = sorted(pv_measures, key=lambda t: t[0])
 
+    supply_plan = _crrem_supply_plan(measures_records)
     has_emission_relevant_measures = any([
+        bool(supply_plan),
         any(ef_measures.values()),
         bool(eff_measures),
         bool(src_measures),
@@ -9772,10 +9839,9 @@ def compute_crrem_like_scenario_emissions_series(
                     kwh_adj = -abs(float(kwh_adj)) * float(pv_scale_eff)
                 src = "Electricity"
             else:
-                kwh_adj = max(float(kwh_adj), 0.0)
-                src = str(src_y.get(eu, "Electricity"))
-                if src not in ENERGY_SOURCE_ORDER:
-                    src = "Electricity"
+                for part_src, part_kwh in _crrem_split_supply(eu, kwh, effv, str(src_y.get(eu, "Electricity")), supply_plan, int(y), sidebar_efficiency=eff_base.get(eu, 1.0)):
+                    kwh_by_source_y[part_src] = float(kwh_by_source_y.get(part_src, 0.0)) + part_kwh
+                continue
 
             kwh_by_source_y[src] = float(kwh_by_source_y.get(src, 0.0)) + float(kwh_adj)
 
@@ -9834,7 +9900,8 @@ def compute_crrem_like_scenario_eui_series(
     - baseline efficiency factors are applied first;
     - efficiency-factor measures become active from their specified year onward;
     - on-site generation is excluded from end-energy demand;
-    - source, tariff and emission-factor measures do not change end-energy demand.
+    - partial supply mixes apply their own efficiency factors to each assigned share;
+    - source-only, tariff and emission-factor measures do not change end-energy demand.
     """
     years_i = [int(y) for y in (years or [])]
     if not years_i:
@@ -9902,6 +9969,7 @@ def compute_crrem_like_scenario_eui_series(
                 eff_measures.append((int(y), str(eu), float(val)))
     eff_measures = sorted(eff_measures, key=lambda t: t[0])
 
+    supply_plan = _crrem_supply_plan(measures_records)
     out = {}
     for y in years_i:
         eff_y = dict(eff_base)
@@ -9916,7 +9984,7 @@ def compute_crrem_like_scenario_eui_series(
             effv = float(eff_y.get(eu, 1.0) or 1.0)
             if effv == 0:
                 effv = 1.0
-            consumption_kwh_y += max(float(kwh) / effv, 0.0)
+            consumption_kwh_y += sum(value for _, value in _crrem_split_supply(eu, kwh, effv, "Electricity", supply_plan, int(y), sidebar_efficiency=eff_base.get(eu, 1.0)))
         out[int(y)] = float(consumption_kwh_y) / float(project_area)
     return pd.Series(out, dtype=float)
 
@@ -13308,9 +13376,10 @@ with tab6:
                     # Assign Energy Sources (categorical)
                     for u in end_uses_no_pv:
                         _add_param(f"Assign Energy Sources → {u}", {"kind": "src", "end_use": u, "dtype": "source"})
+                        _add_param(f"Supply mix → {u}", {"kind": "supply", "end_use": u, "dtype": "source"})
 
-                    # Measures editor (scenario-specific storage)
-                    with crrem_setup_container:
+                    # Measures editor stays in the path-analysis expander, before the timeline.
+                    with st.container():
                         st.markdown("### Decarbonization measures (scenario-specific)")
                         st.write(
                             "Each row is one measure. From the selected year onwards, the parameter takes the new value. "
@@ -13350,11 +13419,14 @@ with tab6:
                                 ignore_index=True,
                             )
                             st.session_state["crrem_measures_draft_df"] = df_tmp
+                            st.session_state["_crrem_measures_revision"] = int(st.session_state.get("_crrem_measures_revision", 0)) + 1
 
+                        st.caption("For a partial change, select Supply mix → end use. New Value is the destination source. Enter Demand Share (%) and Share Efficiency Factor in the same row. Shares refer to imported end-use energy divided by the sidebar efficiency factor, before CRREM measures. The share efficiency factor is an additional divisor: 1 preserves demand; 3 divides only the assigned share by 3. Separate CRREM Efficiency Factors measures affect only the remaining share; they do not change the basis of an assigned supply-mix share. All supply-mix rows for one use/year form a complete mix (maximum 100%); a later year replaces that mix. Share columns are ignored for other measure types.")
+                        st.session_state["crrem_measures_draft_df"] = _measures_records_to_df(st.session_state["crrem_measures_draft_df"])
                         editor_kwargs = {
                             "num_rows": "dynamic",
                             "use_container_width": True,
-                            "key": "crrem_measures_editor",
+                            "key": f"crrem_measures_editor_{st.session_state.get('_crrem_measures_revision', 0)}",
                         }
                         if hasattr(st, "column_config"):
                             editor_kwargs["column_config"] = {
@@ -13369,6 +13441,8 @@ with tab6:
                                     required=True,
                                 ),
                                 "New Value": st.column_config.TextColumn("New Value", required=True),
+                                "Demand Share (%)": st.column_config.NumberColumn("Demand Share (%)", min_value=0.0, max_value=100.0, step=1.0, help="Supply mix only: share of imported end-use energy divided by the sidebar efficiency factor, before CRREM measures."),
+                                "Share Efficiency Factor": st.column_config.NumberColumn("Share Efficiency Factor", min_value=0.0001, step=0.1, help="Supply mix only: additional divisor applied to this share. 1 changes only the source; 3 divides its adjusted energy by 3."),
                             }
 
                         with st.form("crrem_measures_form", clear_on_submit=False):
@@ -13377,8 +13451,7 @@ with tab6:
                                 **editor_kwargs
                             )
 
-                            # Persist edits into DRAFT on every rerun (do not apply to calculations yet).
-                            st.session_state["crrem_measures_draft_df"] = edited_measures
+                            # Keep the editor seed stable until submission; commit only after validation.
 
                             apply_measures = st.form_submit_button("Update Measures", use_container_width=False)
 
@@ -13411,6 +13484,7 @@ with tab6:
                                         df = df.iloc[[j for j in range(len(df)) if j not in set(sel)]].reset_index(
                                             drop=True)
                                     st.session_state["crrem_measures_draft_df"] = df
+                                    st.session_state["_crrem_measures_revision"] = int(st.session_state.get("_crrem_measures_revision", 0)) + 1
                                 # Clear selection (safe to mutate in callback)
                                 st.session_state["crrem_measures_delete_idx"] = []
 
@@ -13429,6 +13503,13 @@ with tab6:
                             )
 
                         if apply_measures:
+                            try:
+                                _crrem_supply_plan(edited_measures.to_dict("records"))
+                            except ValueError as exc:
+                                st.error(str(exc))
+                                apply_measures = False
+                        if apply_measures:
+                            st.session_state["_crrem_measures_revision"] = int(st.session_state.get("_crrem_measures_revision", 0)) + 1
                             committed = edited_measures.copy(deep=True)
                             st.session_state["crrem_measures_df"] = committed
                             st.session_state["crrem_measures_draft_df"] = committed.copy(deep=True)
@@ -13452,6 +13533,7 @@ with tab6:
                     # --- Compute trajectories WITH measures (step changes)
                     measures_df = st.session_state.get("crrem_measures_df")
                     measures_records = _measures_df_to_records(measures_df)
+                    supply_plan = _crrem_supply_plan(measures_records)
 
                     # Parse and validate measures
                     ef_measures = {s: [] for s in ENERGY_SOURCE_ORDER}  # by energy source
@@ -13519,12 +13601,14 @@ with tab6:
                             if sv is None:
                                 parse_errors.append(f"Row {i}: '{p}' expects one of: {', '.join(ENERGY_SOURCE_ORDER)}.")
                                 continue
-                            src_measures.append((int(y), str(spec["end_use"]), str(sv)))
+                            if kind == "src":
+                                src_measures.append((int(y), str(spec["end_use"]), str(sv)))
 
                     if parse_errors:
                         st.warning("Some measures were ignored due to invalid inputs:\n- " + "\n- ".join(parse_errors))
 
                     has_any_measures = any([
+                        bool(supply_plan),
                         any(v for v in ef_measures.values()),
                         any(v for v in tariff_measures.values()),
                         len(eff_measures) > 0,
@@ -13587,7 +13671,7 @@ with tab6:
                         eui_pre = {}
 
                         # Years where the measures curve should have a vertical step (only for parameters that affect these charts)
-                        step_years = set()
+                        step_years = {ym for _, ym in supply_plan}
                         step_years.update([int(ym) for ym, _, _ in eff_measures])
                         step_years.update([int(ym) for ym, _, _ in src_measures])
                         for _src, _lst in ef_measures.items():
@@ -13649,10 +13733,10 @@ with tab6:
                                         kwh_adj = -abs(kwh_adj) * float(pv_scale_eff)
                                     src = "Electricity"
                                 else:
-                                    consumption_kwh_y += kwh_adj
-                                    src = str(src_y.get(eu, "Electricity"))
-                                    if src not in ENERGY_SOURCE_ORDER:
-                                        src = "Electricity"
+                                    for part_src, part_kwh in _crrem_split_supply(eu, kwh, effv, str(src_y.get(eu, "Electricity")), supply_plan, int(y), include_year_measures, sidebar_efficiency=eff_base.get(eu, 1.0)):
+                                        consumption_kwh_y += part_kwh
+                                        kwh_by_source_y[part_src] = float(kwh_by_source_y.get(part_src, 0.0)) + part_kwh
+                                    continue
 
                                 kwh_by_source_y[src] = float(kwh_by_source_y.get(src, 0.0)) + float(kwh_adj)
 
@@ -13687,7 +13771,8 @@ with tab6:
                                         y="Parameter",
                                         color="Category",
                                         hover_data={"New Value": True, "Year": True, "Category": True,
-                                                    "Parameter": True},
+                                                    "Parameter": True, "Demand Share (%)": True,
+                                                    "Share Efficiency Factor": True},
                                     )
                                     fig_tl.update_layout(height=420, xaxis_title="Year", yaxis_title="",
                                                          legend_title="",
@@ -13810,6 +13895,96 @@ with tab6:
                             st_plotly_chart(fige, use_container_width=True, key="crrem_eui_measures_chart")
 
                         with st.expander("Additional CRREM diagrams — With measures", expanded=False):
+                            st.write("#### Annual breakdown with measures")
+                            pie_year = st.selectbox(
+                                "Year for the breakdown charts", options=[int(y) for y in years_avail],
+                                key="crrem_measures_pie_year",
+                            )
+                            pie_payload = {
+                                "efficiency": eff_base, "mapping": src_base, "tariffs": base_tariffs,
+                                "pv": {"scale": pv_scale_eff}, "crrem_measures": measures_records,
+                                TARIFF_DEMAND_CONFIG_KEY: _capture_tariff_demand_from_widgets(),
+                            }
+                            pie_rows = _lcc_energy_rows_for_payload_year(
+                                df_crrem, pie_payload, [], int(pie_year), int(project_year_val),
+                                df_loads=get_loads_balance_df(file_bytes, uploaded_file.name),
+                            )
+                            pie_data = _crrem_pie_breakdown(
+                                pie_rows, {src: _ef_at_year(src, int(pie_year)) for src in ENERGY_SOURCE_ORDER},
+                            )
+                            pie_data["End energy demand"] = pie_data["kWh"] / float(project_area_val)
+                            pie_data["Energy cost"] = pie_data["Energy cost"] / float(project_area_val)
+                            pie_data["Emissions"] = pie_data["Emissions"] * 1000.0 / float(project_area_val)
+                            # Keep transferred shares visible instead of merging them back into one end-use slice.
+                            pie_split_uses = {use for use, year in supply_plan if int(year) <= int(pie_year)}
+                            pie_data["Energy_Use_Label"] = pie_data.apply(
+                                lambda row: f"{row['End_Use']} → {row['Energy_Source']}"
+                                if row["End_Use"] in pie_split_uses else str(row["End_Use"]), axis=1,
+                            ) if not pie_data.empty else pd.Series(dtype=str)
+                            pie_use_colors = dict(color_map)
+                            pie_remaining_sources = dict(src_base)
+                            for measure_year, measure_use, measure_source in src_measures:
+                                if int(measure_year) <= int(pie_year):
+                                    pie_remaining_sources[measure_use] = measure_source
+                            for _, pie_row in pie_data.iterrows():
+                                if pie_row["End_Use"] in pie_split_uses:
+                                    original_color = color_map.get(pie_row["End_Use"], "#808080")
+                                    transferred = pie_row["Energy_Source"] != pie_remaining_sources.get(
+                                        pie_row["End_Use"], "Electricity")
+                                    pie_use_colors[pie_row["Energy_Use_Label"]] = (
+                                        _plotly_rgba_from_color(original_color, 0.70) if transferred else original_color
+                                    )
+                            st.caption(
+                                "Annual values per m² of project area after measures active in the selected year. End energy demand excludes "
+                                "generation. Supply-mix portions are labelled by end use and source. PV emission offsets and cost credits are allocated proportionally across "
+                                "electricity uses. Costs include configured demand charges and tariff measures, without "
+                                "LCC inflation or discounting."
+                            )
+                            for pie_metric, pie_unit in [
+                                ("End energy demand", "kWh/m²·a"),
+                                ("Energy cost", f"{st.session_state.get('currency_symbol', '€')}/m²·a"),
+                                ("Emissions", "kgCO₂e/m²·a"),
+                            ]:
+                                pie_columns = st.columns(2)
+                                for pie_col, pie_group, pie_label, pie_colors in [
+                                    (pie_columns[0], "Energy_Use_Label", "energy use", pie_use_colors),
+                                    (pie_columns[1], "Energy_Source", "energy source", color_map_sources),
+                                ]:
+                                    with pie_col:
+                                        st.write(f"##### {pie_metric} by {pie_label} — {pie_year}")
+                                        pie_values = pie_data.groupby(pie_group, as_index=False)[pie_metric].sum()
+                                        negative_total = float(pie_values.loc[pie_values[pie_metric] < 0, pie_metric].sum())
+                                        pie_values = pie_values.loc[pie_values[pie_metric] > 0]
+                                        if pie_values.empty:
+                                            st.info(f"No positive {pie_metric.lower()} to display for this year.")
+                                        else:
+                                            pie_fig = px.pie(
+                                                pie_values, names=pie_group, values=pie_metric, color=pie_group,
+                                                color_discrete_map=pie_colors, hole=0.5,
+                                            )
+                                            pie_fig.update_traces(
+                                                texttemplate="%{value:,.1f}<br>%{percent}",
+                                                textfont_size=18, textfont_color="white",
+                                                insidetextfont=dict(color="white"), outsidetextfont=dict(color="white"),
+                                                textposition="inside", automargin=False,
+                                                domain=dict(x=[0.0, 1.0], y=[0.0, 1.0]),
+                                                hovertemplate="%{label}<br>%{value:,.2f} " + pie_unit + "<br>%{percent}<extra></extra>",
+                                            )
+                                            pie_fig.update_layout(
+                                                height=800, legend_title_text="",
+                                                # Fixed plot area: legends cannot shrink individual donuts.
+                                                margin=dict(l=20, r=20, t=30, b=200, autoexpand=False),
+                                                legend=dict(orientation="h", x=0.0, xanchor="left",
+                                                            y=-0.06, yanchor="top", font=dict(size=12)),
+                                                annotations=[dict(text=f"{pie_values[pie_metric].sum():,.1f}<br>{pie_unit}",
+                                                                  x=0.5, y=0.5, xref="paper", yref="paper",
+                                                                  showarrow=False, font=dict(size=50, color="black"))],
+                                            )
+                                            st_plotly_chart(pie_fig, use_container_width=True,
+                                                            key=f"crrem_measures_pie_{pie_metric}_{pie_group}")
+                                        if negative_total < 0:
+                                            st.caption(f"Net credits excluded from positive pie slices: {negative_total:,.2f} {pie_unit}.")
+
                             st.caption(
                                 "Totals and cumulative charts are computed from the with-measures trajectories shown above.")
                             _render_crrem_totals_and_cumulative(
