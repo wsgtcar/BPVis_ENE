@@ -8921,7 +8921,7 @@ def create_benchmark_bar_chart(values_dict: Dict[str, float], thresholds_dict: D
 
 
 DASHBOARD_SETUP_SHEET = 'Dashboard_Setup'
-DASHBOARD_SETUP_KEYS = {'dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis','dashboard_energy_uses','dashboard_energy_filter_scope','dashboard_lcc_period','dashboard_sync_lcc_uses'} | {
+DASHBOARD_SETUP_KEYS = {'dashboard_top_kpis','dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis','dashboard_energy_uses','dashboard_energy_filter_scope','dashboard_lcc_period','dashboard_sync_lcc_uses'} | {
     f'dashboard_radar_{i}' for i in range(3)} | {
     f'dashboard_scatter_{i}{suffix}' for i in range(3) for suffix in ['', '_x', '_y']}
 
@@ -8963,7 +8963,7 @@ def _dashboard_restore_setup(frame):
                     if isinstance(value,(int,float)) and not isinstance(value,bool) and np.isfinite(value) and 0 <= value <= 100:
                         values[key] = float(value)
                     continue
-                is_list = key in {'dashboard_scenarios_v3', 'dashboard_energy_uses'} or key.startswith('dashboard_radar_')
+                is_list = key in {'dashboard_top_kpis', 'dashboard_scenarios_v3', 'dashboard_energy_uses'} or key.startswith('dashboard_radar_')
                 if (is_list and isinstance(value,list) and all(isinstance(v,str) for v in value)) or (
                     not is_list and (isinstance(value,str) or (key=='dashboard_focus_v3' and value is None))):
                     values[key] = value
@@ -18204,7 +18204,7 @@ def _dashboard_radar_bounds(values):
 
 
 def _dashboard_figure(all_data, selected, focus, colors, currency, year, categories=None, scatter_panels=None, load_title="Peak Loads"):
-    """Reflow optional panels; preserve independent scales and all existing focus behaviour."""
+    """Fixed three-column, two-row dashboard; hidden panels retain their positions."""
     from plotly.subplots import make_subplots
     from html import escape
     catalog = _dashboard_catalog(currency, [k[6:] for k in all_data.columns if str(k).startswith('load::')])
@@ -18213,26 +18213,18 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
         categories = [g[:5] for g in catalog]
     if scatter_panels is None:
         scatter_panels = [('System Efficiency',None),('On-site Renewables',('Generation','Coverage')),('CRREM Stranding',None)]
-    n = len(scatter_panels)
-    specs = [[]]
-    for category in categories:
-        specs[0].extend([{'type':'polar' if len(category)>=3 else 'xy','colspan':2},None])
-    # Each lower panel gets an equal share of the complete row.
-    starts = list(range(1,7,6//n)) if n else []
-    if n:
-        lower = [None]*6
-        for col in starts:
-            lower[col-1] = {'type':'xy','colspan':6//n}
-        specs.append(lower)
-    titles = []
+    scatter_panels = (list(scatter_panels) + [None] * 3)[:3]
+    specs = [[{'type': 'polar' if len(category) >= 3 else 'xy'} for category in categories],
+             [{'type': 'xy'} for _ in range(3)]]
     group_names = ['Energy & Carbon','Cost & Investment',load_title]
-    for name,cat in zip(group_names,categories):
-        titles.append(name if cat else '')
-    titles += [name for name,pair in scatter_panels]
-    kwargs = dict(rows=2 if n else 1,cols=6,specs=specs,subplot_titles=titles,horizontal_spacing=0.04)
-    if n:
-        kwargs.update(row_heights=[0.60,0.40],vertical_spacing=0.19)
-    fig = make_subplots(**kwargs)
+    titles = [name if category else '' for name, category in zip(group_names, categories)]
+    titles += [panel[0] if panel else '' for panel in scatter_panels]
+    fig = make_subplots(rows=2, cols=3, specs=specs, subplot_titles=titles,
+                        horizontal_spacing=0.08, row_heights=[0.60,0.40], vertical_spacing=0.19)
+    for col, panel in enumerate(scatter_panels, 1):
+        if panel is None:
+            fig.update_xaxes(visible=False, row=2, col=col)
+            fig.update_yaxes(visible=False, row=2, col=col)
     # Use all scenarios so hiding a scenario does not rescale the remaining polygons.
     radar_bounds = {key: _dashboard_radar_bounds(all_data[key])
                     for category in categories for key, _, _, _ in category}
@@ -18243,7 +18235,8 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
         trace.legendrank = selected.index(name)
         trace.showlegend = name not in legend_seen
         legend_seen.add(name)
-        trace.opacity = 1.0 if focus is None or name==focus else 0.20
+        trace.opacity = 1.0 if focus is None or name==focus else 0.25
+        trace.meta = {'dashboard_panel': (row - 1) * 3 + col - 1}
         fig.add_trace(trace,row=row,col=col)
     order = [s for s in selected if s!=focus]+([focus] if focus in selected else [])
     for name in order:
@@ -18251,7 +18244,7 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
         safe = escape(str(name)); color = colors[name]
         offset = (selected.index(name)-(len(selected)-1)/2)*min(.075,.55/max(len(selected),1))
         for idx,category in enumerate(categories):
-            col = idx*2+1
+            col = idx+1
             if not category:
                 fig.update_xaxes(visible=False,row=1,col=col)
                 fig.update_yaxes(visible=False,row=1,col=col)
@@ -18283,7 +18276,10 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
                     text=hover,hovertemplate='%{text}<extra></extra>'),name,1,col)
                 fig.update_xaxes(range=[0,100],title_text='Relative value · higher →',showticklabels=False,row=1,col=col)
                 fig.update_yaxes(tickvals=list(range(len(labels))),ticktext=labels,range=[-.5,len(labels)-.5],row=1,col=col)
-        for col,(kind,pair) in zip(starts,scatter_panels):
+        for col,panel in enumerate(scatter_panels, 1):
+            if panel is None:
+                continue
+            kind,pair = panel
             if kind in ['System Efficiency','CRREM Stranding']:
                 crrem = kind=='CRREM Stranding'
                 keys = ['Carbon stranding','EUI stranding'] if crrem else _dashboard_system_efficiency_keys(all_data)
@@ -18317,11 +18313,61 @@ def _dashboard_figure(all_data, selected, focus, colors, currency, year, categor
     fig.update_xaxes(showgrid=True,gridcolor='#edf0f4',zeroline=False,tickfont=dict(size=10),title_font=dict(size=11))
     fig.update_yaxes(showgrid=True,gridcolor='#edf0f4',zeroline=False,tickfont=dict(size=10),title_font=dict(size=11))
     fig.update_annotations(font=dict(size=12,color='#475569'),yshift=44)
-    fig.update_layout(height=1043 if n else 660,margin=dict(l=75,r=65,t=178.2,b=85.8),font=dict(family='Arial',size=12),
+    fig.update_layout(height=1043,margin=dict(l=75,r=65,t=178.2,b=85.8),font=dict(family='Arial',size=12),
         paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',
         legend=dict(orientation='h',y=1.19,yanchor='bottom',x=0,font=dict(size=12),groupclick='togglegroup'),
         hoverlabel=dict(font_size=12),uirevision=str([[c[0] for c in cat] for cat in categories])+str(scatter_panels))
     return fig
+
+
+def _dashboard_individual_figure(overview, panel_index, title):
+    """Build an independently expandable chart from one overview cell."""
+    import copy
+    panel = go.Figure()
+    for original in overview.data:
+        if (original.meta or {}).get('dashboard_panel') != panel_index:
+            continue
+        trace = copy.deepcopy(original)
+        trace.showlegend = True
+        if trace.type == 'scatterpolar':
+            layout_key = trace.subplot or 'polar'
+            axis = overview.layout[layout_key].to_plotly_json()
+            axis.pop('domain', None)
+            panel.update_layout(polar=axis)
+            trace.subplot = 'polar'
+        else:
+            for coordinate in ['x', 'y']:
+                ref = getattr(trace, coordinate + 'axis') or coordinate
+                axis = overview.layout[coordinate + 'axis' + ref[1:]].to_plotly_json()
+                axis.pop('domain', None)
+                axis['anchor'] = 'y' if coordinate == 'x' else 'x'
+                panel.update_layout(**{coordinate + 'axis': axis})
+                setattr(trace, coordinate + 'axis', coordinate)
+        panel.add_trace(trace)
+    # A system comparison has several traces per scenario; show one legend entry each.
+    seen = set()
+    for trace in panel.data:
+        trace.showlegend = trace.name not in seen
+        seen.add(trace.name)
+    panel.update_layout(height=800, title=dict(text=title, x=0.5),
+                        margin=dict(l=85, r=85, t=100, b=100),
+                        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                        font=overview.layout.font.to_plotly_json(),
+                        legend=dict(orientation='h', y=-0.15, x=0, groupclick='togglegroup'))
+    return panel
+
+
+def _dashboard_card_catalog(catalog, data, currency, period):
+    items = {item[0]: item for group in catalog for item in group}
+    for basis in ['nominal', 'discounted']:
+        for suffix, unit in [('', currency+'/m²'), (' total', currency)]:
+            key = f'LCC50 {basis}{suffix}'
+            items[key] = (key, f'{basis.title()} LCC · {period} years' + (' · total' if suffix else ''), unit, 'low')
+    for key in _dashboard_system_efficiency_keys(data):
+        items[key] = (key, key.removeprefix('efficiency::'), 'kWh thermal/kWh input', 'high')
+    for key in ['Carbon stranding', 'EUI stranding']:
+        items[key] = (key, key + ' year', 'Year', 'high')
+    return {key: item for key, item in items.items() if key in data.columns}
 
 
 def _render_project_dashboard(file_bytes, filename, comparison, area, year, currency):
@@ -18371,12 +18417,13 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
             help='Affects only dashboard life-cycle costs, maintenance and replacement. LCC Analysis, Scenarios and the 50-year emissions KPI keep their own periods.',
         )
         catalog = _dashboard_catalog(currency, loads)
+        top_kpi_controls = st.container()
         if st.session_state.get('dashboard_lcc_basis') not in ['Discounted', 'Nominal']:
             st.session_state['dashboard_lcc_basis'] = 'Discounted'
         lcc_basis = st.radio(
             'LCC basis for radar and scatter plots', ['Discounted', 'Nominal'],
             horizontal=True, key='dashboard_lcc_basis',
-            help='Applies to all LCC axes, including maintenance and replacement costs, total and per-m² values. Both bases are always shown in the metric cards.',
+            help='Applies to all LCC axes, including maintenance and replacement costs, total and per-m² values. Top KPI cards can select nominal and discounted LCC separately.',
         )
         dashboard_sync_lcc = st.checkbox(
             'Synchronize dashboard LCC energy uses with LCC Analysis',
@@ -18402,7 +18449,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         dashboard_filter_scope = st.radio(
             'Apply dashboard energy-use filter to', filter_scopes, horizontal=True,
             key='dashboard_energy_filter_scope',
-            help='LCC only affects the two LCC cards and all LCC plot values. The broader option also filters EUI, emissions, energy costs, generation, coverage, CAPEX, OPEX and CRREM trajectories. Load and efficiency metrics retain their measured profiles. Other tabs are unaffected.',
+            help='LCC only affects selected LCC cards and all LCC plot values. The broader option also filters EUI, emissions, energy costs, generation, coverage, CAPEX, OPEX and CRREM trajectories. Load and efficiency metrics retain their measured profiles. Other tabs are unaffected.',
         )
         st.caption('These filters affect only Project Dashboard. Available energy uses follow the project master filter.')
         left, right = st.columns([3,1])
@@ -18473,7 +18520,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
             if st.session_state.get(statekey) not in options:
                 st.session_state[statekey] = default
             with col:
-                kind = st.selectbox(f'Lower chart {idx+1}',options,key=statekey,help='None removes this panel. Remaining charts expand to use the full row.')
+                kind = st.selectbox(f'Lower chart {idx+1}',options,key=statekey,help='None leaves this position blank. Use temporary visibility below to hide a chart without changing its selection.')
                 pair = presets.get(kind)
                 if kind=='Custom comparison':
                     axes=[]
@@ -18484,8 +18531,16 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
                         axes.append(st.selectbox(axis.upper()+' metric',list(definitions),key=axiskey,
                             format_func=lambda k: definitions[k][1]+' · '+definitions[k][2]))
                     pair = tuple(axes)
-            if kind!='None':
-                scatter_panels.append((kind,pair))
+            scatter_panels.append((kind,pair) if kind!='None' else None)
+        st.markdown('**Temporary diagram visibility**')
+        st.caption('Hide diagrams for this session without changing their saved settings. Empty positions stay blank.')
+        visibility = []
+        for row, labels in enumerate([['Energy & Carbon', 'Cost & Investment', 'Peak Loads'],
+                                      [f'Lower chart {i+1}' for i in range(3)]]):
+            for col, label in zip(st.columns(3), labels):
+                idx = len(visibility)
+                with col:
+                    visibility.append(st.checkbox('Show ' + label, value=True, key=f'_dashboard_visible_{idx}'))
         st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
     if not selected:
         st.info('Select at least one scenario to display the dashboard.')
@@ -18501,39 +18556,62 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
     # No visual focus: metrics still describe the sidebar scenario, even if filtered out.
     metric_scenario = focus if focus is not None else (active if active in names else names[0])
     st.subheader(str(metric_scenario).replace('*', r'\*').replace('_', r'\_'))
-    columns = st.columns(5)
-    metric_definitions = [
-        ('EUI net', 'Net EUI', 'kWh/m²·a'),
-        ('Carbon net', 'Net emissions', 'kgCO₂e/m²·a'),
-        ('LCC50 nominal', f'Nominal LCC · {dashboard_period} years', currency+'/m²'),
-        ('LCC50 discounted', f'Discounted LCC · {dashboard_period} years', currency+'/m²'),
-        ('Coverage', 'Renewables coverage', '%'),
-    ]
-    for col,(key,label,unit) in zip(columns,metric_definitions):
-        value = data.loc[metric_scenario,key]
-        if key.startswith('LCC50'):
-            basis = 'Nominal' if key == 'LCC50 nominal' else 'Discounted'
-            detail = f'{basis} {dashboard_period}-year life-cycle cost per m², using the global LCC assumptions.'
-        else:
-            detail = 'Scenario-based annual result; coverage = on-site generation / gross consumption.'
-        col.metric(label, f'{value:,.1f} {unit}' if pd.notna(value) and np.isfinite(value) else 'N/A',
-                   help=f'{metric_scenario} · {detail}')
-    # Route every LCC plot axis through the selected basis; cards retain both original values.
+    # Generic LCC metrics follow the plot basis; explicit nominal/discounted cards keep their own basis.
     data = data.copy()
     data['LCC50'] = data[f'LCC50 {lcc_basis.lower()}']
     data['LCC50 total'] = data[f'LCC50 {lcc_basis.lower()} total']
     for cost_type in ['Maintenance', 'Replacement']:
         data[f'{cost_type}50'] = data[f'{cost_type}50 {lcc_basis.lower()}']
-    st.caption(f'LCC in radar and scatter plots: {lcc_basis.lower()} · {dashboard_period} years.')
-    st.caption('Radar scaling: highest value at the outer edge; lowest value at mid-radius unless it is zero, which sits at the centre. Equal non-zero values share the outer edge. Scales use all scenarios; hover for actual values and whether higher or lower is better.')
-    if not any(categories) and not scatter_panels:
-        return
     data, categories[2], load_title = _dashboard_load_radar_data(
         data,categories[2],file_bytes,filename,names,area,mapping,load_statistic,load_percentile)
-    fig = _dashboard_figure(data,selected,focus,colors,currency,year,categories,scatter_panels,load_title)
-    st.plotly_chart(fig,use_container_width=True,key='project_dashboard_v3',config={'displaylogo':False,'toImageButtonOptions':{'format':'svg','filename':'BPVis_Project_Dashboard','width':1600,'height':900}})
-    displayed = {item[0] for category in categories for item in category}
-    for kind,pair in scatter_panels:
+    card_options = _dashboard_card_catalog(catalog + [categories[2]], data, currency, dashboard_period)
+    defaults = ['EUI net', 'Carbon net', 'Energy cost net', 'LCC50 discounted', 'Coverage']
+    if 'dashboard_top_kpis' not in st.session_state:
+        st.session_state['dashboard_top_kpis'] = defaults
+    st.session_state['dashboard_top_kpis'] = [key for key in st.session_state['dashboard_top_kpis'] if key in card_options][:5]
+    with top_kpi_controls:
+        top_kpis = st.multiselect('Top dashboard KPIs (up to 5)', list(card_options),
+                                 key='dashboard_top_kpis', max_selections=5,
+                                 format_func=lambda key: card_options[key][1] + ' · ' + card_options[key][2])
+    st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
+    for col, key in zip(st.columns(5), top_kpis):
+        _, label, unit, _ = card_options[key]
+        value = data.loc[metric_scenario, key]
+        if key in ['Carbon stranding', 'EUI stranding']:
+            status = str(data.loc[metric_scenario, key + ' status'])
+            formatted = 'Not stranded' if status.startswith('Not stranded') else (str(int(value)) if pd.notna(value) else 'N/A')
+            detail = status
+        else:
+            precision = 5 if key.startswith('Equivalent tariff::') else 1
+            formatted = f'{value:,.{precision}f} {unit}' if pd.notna(value) and np.isfinite(value) else 'N/A'
+            detail = label
+        col.metric(label, formatted, help=f'{metric_scenario} · {detail}')
+    st.caption(f'LCC in radar and scatter plots: {lcc_basis.lower()} · {dashboard_period} years.')
+    st.caption('Radar scaling: highest value at the outer edge; lowest value at mid-radius unless it is zero, which sits at the centre. Equal non-zero values share the outer edge. Scales use all scenarios; hover for actual values and whether higher or lower is better.')
+    if not any(categories) and not any(scatter_panels):
+        return
+    visible_categories = [category if visibility[i] else [] for i, category in enumerate(categories)]
+    visible_scatter = [panel if visibility[i+3] else None for i, panel in enumerate(scatter_panels)]
+    fig = _dashboard_figure(data,selected,focus,colors,currency,year,visible_categories,visible_scatter,load_title)
+    panel_names = ['Energy & Carbon', 'Cost & Investment', load_title] + [
+        panel[0] if panel else '' for panel in visible_scatter]
+    choices = {'All diagrams': None}
+    for idx, label in enumerate(panel_names):
+        configured = bool(visible_categories[idx]) if idx < 3 else bool(visible_scatter[idx-3])
+        if configured:
+            choices[f'{idx+1} · {label}'] = idx
+    if st.session_state.get('_dashboard_chart_view') not in choices:
+        st.session_state['_dashboard_chart_view'] = 'All diagrams'
+    view = st.selectbox('Chart view', list(choices), key='_dashboard_chart_view',
+                        help='Select all diagrams or one diagram, then use the chart fullscreen button to expand that view.')
+    if choices[view] is not None:
+        fig = _dashboard_individual_figure(fig, choices[view], panel_names[choices[view]])
+    st.plotly_chart(fig,use_container_width=True,key='project_dashboard_v3_' + str(choices[view]),config={'displaylogo':False,'toImageButtonOptions':{'format':'svg','filename':'BPVis_Project_Dashboard','width':1600,'height':1043 if choices[view] is None else 800}})
+    displayed = {item[0] for category in visible_categories for item in category}
+    for panel in visible_scatter:
+        if panel is None:
+            continue
+        kind,pair = panel
         displayed.update(pair or (_dashboard_system_efficiency_keys(data) if kind=='System Efficiency' else ['Carbon stranding','EUI stranding']))
     unavailable = data.loc[selected,sorted(displayed)].isna().sum().sum()
     if unavailable:
