@@ -4709,6 +4709,21 @@ def _is_scenario_discounted_lcc_kpi(kpi: str) -> bool:
     return str(kpi).startswith("Discounted LCC ") and str(kpi).endswith(" years /m²")
 
 
+def _scenario_opex_kpi_label(period_years: int, basis: str) -> str:
+    return f"{basis} OPEX {int(period_years)} years /m²"
+
+
+def _is_scenario_period_opex_kpi(kpi: str) -> bool:
+    return str(kpi).startswith(("Nominal OPEX ", "Discounted OPEX ")) and str(kpi).endswith(" years /m²")
+
+
+def _scenario_period_opex_values(cashflow, area):
+    """Total operating costs, excluding investments; preserve the LCC engine's timing and scope."""
+    operating = cashflow['Cost Type'].isin(['Energy', 'Maintenance', 'Replacement'])
+    return {basis: float(cashflow.loc[operating, f'{basis} Cost'].sum()) / area
+            for basis in ['Nominal', 'Discounted']}
+
+
 def _scenario_lc_emissions_kpi_label(period_years: int) -> str:
     return f"Total Emissions {int(period_years)} years /m²"
 
@@ -4752,10 +4767,13 @@ def _scenario_radar_kpi_order(period_years: Optional[int] = None, radar_raw_df: 
     ]
     if isinstance(radar_raw_df, pd.DataFrame) and "KPI" in radar_raw_df.columns:
         _kpis_present_set = set(radar_raw_df["KPI"].astype(str))
-        if "Annual OPEX /m²" in _kpis_present_set:
-            order.insert(2, "Annual OPEX /m²")
+        if "Starting-year OPEX /m²" in _kpis_present_set:
+            order.insert(2, "Starting-year OPEX /m²")
         if "Capex /m²" in _kpis_present_set:
-            order.insert(3 if "Annual OPEX /m²" in _kpis_present_set else 2, "Capex /m²")
+            order.insert(3 if "Starting-year OPEX /m²" in _kpis_present_set else 2, "Capex /m²")
+        opex_labels = [str(k) for k in radar_raw_df["KPI"].dropna().unique()
+                       if _is_scenario_period_opex_kpi(k)]
+        order[order.index(lcc_label):order.index(lcc_label)] = opex_labels
     return order
 
 
@@ -4769,8 +4787,10 @@ def _scenario_kpi_short_label(kpi: str) -> str:
         return "End Energy<br>/m²"
     if k == "Annual Energy Cost /m²":
         return "Annual Energy<br>Cost /m²"
-    if k == "Annual OPEX /m²":
-        return "Annual OPEX<br>/m²"
+    if k == "Starting-year OPEX /m²":
+        return "Starting-year OPEX<br>/m²"
+    if _is_scenario_period_opex_kpi(k):
+        return k.replace(" OPEX ", " OPEX<br>")
     if k == "Capex /m²":
         return "Capex<br>/m²"
     if _is_scenario_discounted_lcc_kpi(k):
@@ -4802,11 +4822,11 @@ def _scenario_kpi_axis_title(kpi: str, currency_label: str = "Cost") -> str:
         return "kWh/m²·a"
     if k == "Annual Energy Cost /m²":
         return f"{currency_label}/m²·a" if currency_label and currency_label != "Cost" else "Cost/m²·a"
-    if k == "Annual OPEX /m²":
+    if k == "Starting-year OPEX /m²":
         return f"{currency_label}/m²·a" if currency_label and currency_label != "Cost" else "Cost/m²·a"
     if k == "Capex /m²":
         return f"{currency_label}/m²" if currency_label and currency_label != "Cost" else "Cost/m²"
-    if _is_scenario_lcc_kpi(k) or _is_scenario_discounted_lcc_kpi(k):
+    if _is_scenario_lcc_kpi(k) or _is_scenario_discounted_lcc_kpi(k) or _is_scenario_period_opex_kpi(k):
         return f"{currency_label}/m²" if currency_label and currency_label != "Cost" else "Cost/m²"
     if k == "Annual Emissions /m²":
         return "kgCO₂e/m²·a"
@@ -4902,6 +4922,7 @@ def _build_scenario_performance_radar_raw_df(
         # 2 + 3) Annual energy cost /m² and nominal / discounted scenario-period LCC /m².
         annual_energy_cost_m2 = np.nan
         annual_opex_m2 = np.nan
+        period_opex_m2 = {"Nominal": np.nan, "Discounted": np.nan}
         lcc_50_nominal_m2 = np.nan
         lcc_discounted_m2 = np.nan
         try:
@@ -4930,6 +4951,7 @@ def _build_scenario_performance_radar_raw_df(
                         energy_cf_50.loc[energy_cf_50["Year"].astype(int) == int(project_year), "Nominal Cost"].sum()
                     ) / area
                 if include_annual_opex:
+                    period_opex_m2 = _scenario_period_opex_values(cf_sc_50, area)
                     _opex_year_mask = cf_sc_50["Year"].astype(int) == int(project_year)
                     _opex_type = cf_sc_50["Cost Type"].astype(str)
                     _annual_energy_cost = float(
@@ -4978,8 +5000,12 @@ def _build_scenario_performance_radar_raw_df(
             rows.append(
                 {"Scenario": sc_name_str, "KPI": "Capex /m²", "Value": capex_m2, "Unit": f"{currency_symbol_in}/m²"})
         if include_annual_opex:
-            rows.append({"Scenario": sc_name_str, "KPI": "Annual OPEX /m²", "Value": annual_opex_m2,
+            rows.append({"Scenario": sc_name_str, "KPI": "Starting-year OPEX /m²", "Value": annual_opex_m2,
                          "Unit": f"{currency_symbol_in}/m²·a"})
+            for basis, value in period_opex_m2.items():
+                rows.append({"Scenario": sc_name_str,
+                             "KPI": _scenario_opex_kpi_label(scenario_analysis_period, basis),
+                             "Value": value, "Unit": f"{currency_symbol_in}/m²"})
 
     out = pd.DataFrame(rows)
     if out.empty:
@@ -15311,6 +15337,8 @@ with tab7:
                 "end_energy",
                 "annual_energy_cost",
                 "annual_opex",
+                "nominal_opex",
+                "discounted_opex",
                 "capex",
                 "lcc",
                 "discounted_lcc",
@@ -15320,7 +15348,9 @@ with tab7:
             _comparison_kpi_labels = {
                 "end_energy": "End Energy /m²",
                 "annual_energy_cost": "Annual Energy Cost /m²",
-                "annual_opex": "Annual OPEX /m²",
+                "annual_opex": "Starting-year OPEX /m²",
+                "nominal_opex": _scenario_opex_kpi_label(scenario_comparison_period, "Nominal"),
+                "discounted_opex": _scenario_opex_kpi_label(scenario_comparison_period, "Discounted"),
                 "capex": "Capex /m²",
                 "lcc": _scenario_lcc_kpi_label(scenario_comparison_period),
                 "discounted_lcc": _scenario_discounted_lcc_kpi_label(scenario_comparison_period),
@@ -15355,7 +15385,7 @@ with tab7:
                     default=_comparison_kpi_ids,
                     format_func=lambda _k: _comparison_kpi_labels.get(_k, str(_k)),
                     key=_comparison_kpi_filter_key,
-                    help="Select which KPIs are shown in the two radar diagrams, Benchmark-style KPI bar by Scenario, and KPI improvement vs reference.",
+                    help="Select KPIs for the radar and bar comparisons. Starting-year OPEX includes energy and maintenance in the project start year. Nominal and discounted OPEX are period totals of energy, maintenance and replacement costs, excluding investments; discounted totals are present values.",
                 )
             _comparison_kpi_selected_labels = {
                 _comparison_kpi_labels[_k]
