@@ -1,4 +1,6 @@
 import io
+import uuid
+import base64
 from pathlib import Path
 import hashlib
 import pandas as pd
@@ -9,6 +11,159 @@ import json
 import re
 from copy import deepcopy
 from datetime import date, datetime
+
+
+# Project lifecycle: uploaded source identity is separate from the saved working revision.
+def _reset_project_session():
+    """Discard only this session's project state; authentication and uploader survive."""
+    keep = {AUTH_SESSION_KEY, AUTH_EMAIL_KEY, AUTH_EXPIRY_KEY, AUTH_MODE_KEY,
+            AUTH_DATA_SOURCE_KEY, "_bpvis_project_upload"}
+    for key in list(st.session_state):
+        if key not in keep:
+            del st.session_state[key]
+
+
+def _preserve_project_widget_values():
+    # Explicit value-widget allowlist: no buttons, uploaders or data-editor deltas.
+    keys = ('_dashboard_chart_view',
+     'active_scenario_selector',
+     'building_use',
+     'crrem_measures_delete_idx',
+     'crrem_measures_pie_year',
+     'crrem_show_baseline_overlay',
+     'crrem_use_standard_electricity_ef',
+     'currency_symbol',
+     'dashboard_energy_filter_scope',
+     'dashboard_lcc_basis',
+     'dashboard_lcc_period',
+     'dashboard_load_percentile',
+     'dashboard_load_statistic',
+     'dashboard_sync_lcc_uses',
+     'dashboard_top_kpis',
+     'lcc_cumulative_line_mode',
+     'lcc_cumulative_show_savings',
+     'loads_scenario_comparison_enabled',
+     'mi_new_envelope_name',
+     'mi_new_envelope_scope',
+     'mi_new_envelope_type',
+     'mi_new_room_scope',
+     'mi_new_room_type_name',
+     'mi_new_system_name',
+     'mi_new_system_scope',
+     'mi_new_system_type',
+     'project_country',
+     'project_name',
+     'project_year',
+     'pv_sc_enabled',
+     'scenario_cumulative_lcc_line_mode',
+     'scenario_lcc_cost_type_absolute_unit',
+     'scenario_lcc_cost_type_label_mode',
+     'scenario_life_cycle_data_show',
+     'scenario_radar_data_show',
+     'scenario_rename_to',
+     'scenario_static_raw_data_show',
+     'thr_heatmap',
+     'scenario_comparison_scenario_filter',
+     'scenario_radar_reference_scenario',
+     'scenario_radar_reference_scenario_select',
+     'scenario_delta_reference_scenario',
+     'scenario_delta_reference_scenario_select',
+     'loads_ghost_scenario')
+    prefixes = ("eff_", "source_", "cost_", "co2_", "tariff_", "dashboard_",
+                "_dashboard_visible_", "lcc_draft_", "cp_", "crrem_setup_")
+    for key in list(st.session_state):
+        if (key in keys or str(key).startswith(prefixes)):
+            value = st.session_state[key]
+            if isinstance(value, (str, int, float, bool, list, tuple)) or value is None:
+                st.session_state[key] = value
+
+
+def _scenario_ui_id(name):
+    """Opaque UI identity survives order/name changes; never use a list position."""
+    identities = st.session_state.setdefault("_scenario_ui_ids", {})
+    if name not in identities:
+        identities[name] = uuid.uuid4().hex
+    return identities[name]
+
+
+def _stash_scenario_drafts(name):
+    bank = st.session_state.setdefault("_scenario_draft_bank", {})
+    bank[name] = {key: deepcopy(st.session_state[key]) for key in
+                 ("lcc_investments_draft_df", "crrem_measures_draft_df")
+                 if key in st.session_state}
+
+
+def _restore_scenario_drafts(name):
+    for key, value in st.session_state.get("_scenario_draft_bank", {}).get(name, {}).items():
+        st.session_state[key] = deepcopy(value)
+
+
+def _rename_scenario_references(old, new):
+    """Migrate scenario references only, without rewriting unrelated project strings."""
+    for key in ("_scenario_ui_ids", "_scenario_draft_bank"):
+        bank = st.session_state.get(key, {})
+        if old in bank:
+            bank[new] = bank.pop(old)
+    selection_keys = ("dashboard_scenarios_v3", "dashboard_focus_v3",
+        "scenario_comparison_scenario_filter", "scenario_radar_reference_scenario",
+        "scenario_radar_reference_scenario_select", "scenario_delta_reference_scenario",
+        "scenario_delta_reference_scenario_select", "loads_ghost_scenario",
+        _lcc_global_draft_key("payback_reference_scenario"))
+    for key in selection_keys:
+        value = st.session_state.get(key)
+        if isinstance(value, list):
+            st.session_state[key] = [new if x == old else x for x in value]
+        elif isinstance(value, str) and value == old:
+            st.session_state[key] = new
+    global_payload = st.session_state.get(LCC_GLOBAL_STATE_KEY, {})
+    if global_payload.get("payback_reference_scenario") == old:
+        global_payload["payback_reference_scenario"] = new
+    for payload in st.session_state.get("scenarios", {}).values():
+        for field in ("lcc_global", "lcc"):
+            if payload.get(field, {}).get("payback_reference_scenario") == old:
+                payload[field]["payback_reference_scenario"] = new
+    dashboard_sync = st.session_state.get("_dashboard_sidebar_sync_v3")
+    if isinstance(dashboard_sync, tuple) and len(dashboard_sync) == 2 and dashboard_sync[1] == old:
+        st.session_state["_dashboard_sidebar_sync_v3"] = (dashboard_sync[0], new)
+    token = st.session_state.get("_crrem_setup_seed_token")
+    if isinstance(token, tuple) and token and token[0] == old:
+        st.session_state["_crrem_setup_seed_token"] = (new,) + token[1:]
+
+
+def _adopt_saved_workbook(data, filename):
+    """Keep canonical inputs/drafts; refresh the saved configuration once per save."""
+    config = read_config_from_excel(data)  # Validate before changing the working revision.
+    token = filename + "|saved:" + hashlib.sha256(data).hexdigest()
+    st.session_state["_bpvis_working_bytes"] = data
+    st.session_state["_bpvis_working_token"] = token
+    st.session_state["_bpvis_config_cached"] = config
+    st.session_state["_bpvis_config_workbook_token"] = token
+    # Already bound by scenario name: never rebind numbered sheets after saving/reordering.
+    for key in ("_bpvis_current_workbook_token", "_loaded_workbook_token",
+                _RAW_TOKEN_KEY, _RAW_NUMBERED_SHEETS_BOUND_TOKEN_KEY):
+        st.session_state[key] = token
+    st.session_state["_bpvis_current_workbook_bytes_id"] = id(data)
+    st.session_state["_bpvis_current_workbook_filename"] = filename
+    return token
+
+
+def _download_saved_workbook(data, filename):
+    # A Blob avoids data-URL size limits. The visible link is a browser-blocking fallback.
+    import streamlit.components.v1 as components
+    encoded = base64.b64encode(data).decode("ascii")
+    safe_name = json.dumps(filename).replace("<", "\\u003c")
+    components.html("""<a id="save" style="font:14px sans-serif">Download saved project</a>
+    <script>
+    const bytes = Uint8Array.from(atob('%s'), c => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], {type:
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+    const link = document.getElementById('save'); link.href = url;
+    link.download = %s; link.click();
+    window.addEventListener('unload', () => URL.revokeObjectURL(url));
+    </script>""" % (encoded, safe_name), height=28)
+
+
+_preserve_project_widget_values()
 
 # --- CRREM chart colors (synced across CRREM diagrams)
 CRREM_COLOR_LIMIT = "#c02419"  # light red
@@ -907,7 +1062,7 @@ if IS_VIEWER_MODE:
         st.stop()
 else:
     st.sidebar.write("### Upload Data")
-    uploaded_file = st.sidebar.file_uploader("Upload Excel File", type="xlsx")
+    uploaded_file = st.sidebar.file_uploader("Upload Excel File", type="xlsx", key="_bpvis_project_upload")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Project Information")
@@ -6893,6 +7048,10 @@ def default_scenario_payload(end_uses: list, preloaded_cfg: Optional[dict]) -> d
 
 def capture_scenario_from_widgets(end_uses: list) -> dict:
     """Capture current sidebar/widget values into a scenario payload."""
+    for key in list(st.session_state):
+        if str(key).endswith("_txt") and str(key).startswith(("co2_", "cost_", "eff_", "tariff_", "pv_scale")):
+            base = str(key)[:-4]
+            st.session_state[base] = _parse_float_locale(st.session_state[key], st.session_state.get(base, 0.0))
     payload = {
         "factors": {
             "Electricity": float(st.session_state.get("co2_Emissions_Electricity", 0.300)),
@@ -10017,6 +10176,14 @@ if uploaded_file:
         wb_token = f"{uploaded_file.name}|upload:{_upload_file_id}"
     else:
         wb_token = f"{uploaded_file.name}|{hashlib.md5(file_bytes).hexdigest()}"
+    source_token = wb_token
+    if st.session_state.get("_bpvis_uploaded_source_token") != source_token:
+        _reset_project_session()
+        st.session_state["_bpvis_uploaded_source_token"] = source_token
+        st.session_state["project_name"] = "Building Performance Dashboard"
+    # UploadedFile still contains the original upload after Save; use the saved revision.
+    file_bytes = st.session_state.get("_bpvis_working_bytes", file_bytes)
+    wb_token = st.session_state.get("_bpvis_working_token", source_token)
     st.session_state["_bpvis_current_workbook_token"] = wb_token
     st.session_state["_bpvis_current_workbook_filename"] = uploaded_file.name
     st.session_state["_bpvis_current_workbook_bytes_id"] = id(file_bytes)
@@ -10632,6 +10799,7 @@ with tab1:
                 """Persist current sidebar/widget values to the canonical active scenario payload."""
                 try:
                     if _scenario_name in scenarios:
+                        _stash_scenario_drafts(_scenario_name)
                         _eu = _end_uses_for_scenario(_scenario_name, end_uses)
                         scenarios[_scenario_name] = capture_scenario_from_widgets(_eu)
                         st.session_state["scenarios"] = scenarios
@@ -10650,6 +10818,7 @@ with tab1:
                     if _scenario_name in scenarios:
                         _eu = _end_uses_for_scenario(_scenario_name, end_uses)
                         load_scenario_into_widgets(scenarios[_scenario_name], _eu)
+                        _restore_scenario_drafts(_scenario_name)
                         st.session_state["active_scenario"] = _scenario_name
                         st.session_state["_prev_active_scenario"] = _scenario_name
                         # Do not write to the selectbox key in this run because the
@@ -10809,7 +10978,8 @@ with tab1:
                         st.session_state["active_scenario"] = current_active
                         st.session_state["_prev_active_scenario"] = current_active
                         st.session_state["_active_scenario_selector_sync_to"] = current_active
-                        st.rerun()
+                        st.session_state["_bpvis_manager_refresh"] = True
+                        # Render forms before refreshing the selector; avoid widget cleanup.
 
             rename_to = st.text_input("Rename to", value="", key="scenario_rename_to", disabled=IS_VIEWER_MODE,
                                       help=_viewer_widget_help())
@@ -10818,7 +10988,10 @@ with tab1:
                 rename_to_clean = str(rename_to).strip()
                 if rename_to_clean and rename_to_clean not in scenarios and current_active in scenarios:
                     _save_current_scenario_payload(current_active)
-                    scenarios[rename_to_clean] = scenarios.pop(current_active)
+                    scenarios = {rename_to_clean if name == current_active else name: payload
+                                 for name, payload in scenarios.items()}
+                    st.session_state["scenarios"] = scenarios
+                    _rename_scenario_references(current_active, rename_to_clean)
                     try:
                         overrides = _scenario_energy_overrides()
                         drafts = _scenario_energy_drafts()
@@ -10861,8 +11034,12 @@ with tab1:
                     except Exception:
                         pass
                     st.session_state["scenarios"] = scenarios
-                    _activate_scenario(rename_to_clean)
-                    st.rerun()
+                    st.session_state["active_scenario"] = rename_to_clean
+                    st.session_state["_prev_active_scenario"] = rename_to_clean
+                    st.session_state["_active_scenario_selector_sync_to"] = rename_to_clean
+                    current_active = active_selected = rename_to_clean
+                    st.session_state["_bpvis_manager_refresh"] = True
+                    # Keep rendering the same forms before refreshing the selector.
                 elif rename_to_clean in scenarios:
                     st.warning("A scenario with this name already exists.")
 
@@ -10886,6 +11063,8 @@ with tab1:
                     except Exception:
                         pass
 
+                    for _bank_key in ("_scenario_ui_ids", "_scenario_draft_bank"):
+                        st.session_state.get(_bank_key, {}).pop(current_active, None)
                     scenarios.pop(current_active, None)
                     try:
                         cmap_sc = st.session_state.get("color_map_scenarios", {})
@@ -11333,7 +11512,7 @@ with tab1:
                 pass
 
             # Key prefix stable per workbook (prevents stale color-picker state after uploading a new file)
-            _tok = st.session_state.get("_loaded_workbook_token", "default")
+            _tok = st.session_state.get("_bpvis_uploaded_source_token", "default")
             try:
                 _tok_short = hashlib.md5(str(_tok).encode("utf-8")).hexdigest()[:8]
             except Exception:
@@ -11558,14 +11737,11 @@ with tab1:
                     scenario_order=scenario_order_export,
                 )
 
-                st.success("Project settings saved to workbook.")
-                st.download_button(
-                    label="Download Updated Workbook",
-                    data=updated_bytes,
-                    file_name=uploaded_file.name.replace(".xlsx", "_with_project.xlsx"),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+                wb_token = _adopt_saved_workbook(updated_bytes, uploaded_file.name)
+                file_bytes = updated_bytes
+                preloaded["file_bytes"] = updated_bytes
+                st.success("Project saved. Download started.")
+                _download_saved_workbook(updated_bytes, uploaded_file.name)
 
             # ---- Generate Report button (active scenario only)
             if (not IS_VIEWER_MODE) and st.button("Generate Report", use_container_width=True,
@@ -11962,7 +12138,7 @@ with tab_model_qa:
         mi_keep_other = mi_full.loc[~mask_active].drop(columns=["_orig_index"]).copy()
 
         _editor_key_token = hashlib.md5(
-            str(st.session_state.get(_RAW_TOKEN_KEY, "model_inputs_structured")).encode("utf-8")).hexdigest()[:8]
+            str(st.session_state.get("_bpvis_uploaded_source_token", "model_inputs_structured")).encode("utf-8")).hexdigest()[:8]
         edited_rows = []
         deleted_orig_indices = set()
         deleted_item_keys = set()
@@ -18461,7 +18637,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         # Sync only on project/sidebar changes so manual dashboard focus survives reruns.
         focus_key = 'dashboard_focus_v3'
         active = st.session_state.get('active_scenario')
-        project_token = (filename, hashlib.sha256(file_bytes).hexdigest())
+        project_token = st.session_state.get("_bpvis_uploaded_source_token") or _workbook_token(file_bytes, filename)
         sync_token = (project_token, active)
         restoring_focus = st.session_state.pop('_dashboard_restore_focus',False)
         if st.session_state.get('_dashboard_sidebar_sync_v3') != sync_token:
@@ -18686,6 +18862,7 @@ with tab4:
                 "Ghost scenario",
                 ["None"] + scenario_names_loads,
                 index=0,
+                key="loads_ghost_scenario",
                 help="Optional scenario used only as a gray/dashed comparison overlay in Loads Analysis diagrams."
             )
 
@@ -19843,7 +20020,7 @@ with tab4:
 with tab8:
     if (not IS_VIEWER_MODE) and uploaded_file:
         # Reuse the workbook bytes/token captured during preload; avoid another full-file copy/hash.
-        wb_hash = str(wb_token).split("|")[-1][:10]
+        wb_hash = hashlib.sha256(str(st.session_state.get("_bpvis_uploaded_source_token", wb_token)).encode()).hexdigest()[:16]
 
         st.write("## Raw Data")
         st.caption(
@@ -19876,7 +20053,7 @@ with tab8:
                 ),
             )
             use_scenario_energy_scope = raw_energy_scope == "Active scenario only"
-            scope_suffix = "global" if not use_scenario_energy_scope else f"scenario_{_safe_state_key(active_raw_scenario)}"
+            scope_suffix = "global" if not use_scenario_energy_scope else f"scenario_{_scenario_ui_id(active_raw_scenario)}"
 
             energy_editor_key = f"raw_energy_editor_{wb_hash}_{scope_suffix}"
             energy_flash_key = f"_raw_energy_flash_{wb_hash}_{scope_suffix}"
@@ -20148,7 +20325,7 @@ with tab8:
                 ),
             )
             use_scenario_loads_scope = raw_loads_scope == "Active scenario only"
-            loads_scope_suffix = "global" if not use_scenario_loads_scope else f"scenario_{_safe_state_key(active_raw_scenario)}"
+            loads_scope_suffix = "global" if not use_scenario_loads_scope else f"scenario_{_scenario_ui_id(active_raw_scenario)}"
 
             loads_editor_key = f"raw_loads_editor_{wb_hash}_{loads_scope_suffix}"
             loads_flash_key = f"_raw_loads_flash_{wb_hash}_{loads_scope_suffix}"
@@ -20409,3 +20586,7 @@ with tab8:
 
     elif not IS_VIEWER_MODE:
         st.write("### ← Please upload data on side bar")
+
+# Refresh manager options only after the input widgets have been rendered.
+if st.session_state.pop("_bpvis_manager_refresh", False):
+    st.rerun()
