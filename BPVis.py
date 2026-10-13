@@ -3587,7 +3587,7 @@ def _lcc_energy_rows_for_payload(df_energy: pd.DataFrame, payload: dict, selecte
     mapping = payload.get("mapping", {}) or {}
     tariffs = payload.get("tariffs", {}) or {}
     pv_cfg = payload.get("pv", {}) or {}
-    pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
+    pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0) if bool(pv_cfg.get("enabled", False)) else 1.0
 
     df["Efficiency_Factor"] = df["End_Use"].map(lambda u: _to_float_lcc(eff.get(u, 1.0), 1.0)).replace(0.0, 1.0)
     df["kWh"] = pd.to_numeric(df["kWh"], errors="coerce").fillna(0.0) / df["Efficiency_Factor"]
@@ -3799,7 +3799,7 @@ def _lcc_energy_rows_for_payload_year(
             pv_annual_override_y = float(val)
 
     onsite_enduses = set(get_onsite_generation_enduses(annual_by_enduse.index.tolist()))
-    pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0)
+    pv_scale = _to_float_lcc(pv_cfg.get("scale", 1.0), 1.0) if bool(pv_cfg.get("enabled", False)) else 1.0
 
     supply_plan = _crrem_supply_plan(_measures_df_to_records(payload.get("crrem_measures", [])))
     rows_all = []
@@ -9080,7 +9080,7 @@ def create_benchmark_bar_chart(values_dict: Dict[str, float], thresholds_dict: D
 
 
 DASHBOARD_SETUP_SHEET = 'Dashboard_Setup'
-DASHBOARD_SETUP_KEYS = {'dashboard_top_kpis','dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis','dashboard_energy_uses','dashboard_energy_filter_scope','dashboard_lcc_period','dashboard_sync_lcc_uses'} | {
+DASHBOARD_SETUP_KEYS = {'dashboard_annual_cost_basis','dashboard_top_kpis','dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis','dashboard_energy_uses','dashboard_energy_filter_scope','dashboard_lcc_period','dashboard_sync_lcc_uses'} | {
     f'dashboard_radar_{i}' for i in range(3)} | {
     f'dashboard_scatter_{i}{suffix}' for i in range(3) for suffix in ['', '_x', '_y']}
 
@@ -14399,7 +14399,7 @@ with tab_lcc:
                     )
                 with p2:
                     numeric_input(
-                        "Interest Rate / Discount Rate (%)",
+                        "Discount rate (%)",
                         float(st.session_state.get(_lcc_global_draft_key("interest_rate_pct"), 4.0)),
                         key=_lcc_global_draft_key("interest_rate_pct"),
                         min_value=-100.0,
@@ -18064,6 +18064,27 @@ def _dashboard_lcc_component_values(cashflow, area):
     }
 
 
+def _dashboard_period_cost_values(cashflow, area, period, discount_rate_pct=0.0):
+    """Period totals and comparable annual components, using year-zero cash-flow timing."""
+    period = max(1, min(100, int(period)))
+    rate = float(discount_rate_pct) / 100.0
+    weights = np.power(1.0 + rate, -np.arange(period, dtype=float)) if rate > -1 else np.full(period, np.nan)
+    annuity_denominator = float(weights.sum())
+    values = {}
+    for basis in ['Nominal', 'Discounted']:
+        costs = cashflow[f'{basis} Cost']
+        investment = costs.loc[cashflow['Cost Type'] == 'Investment'].sum()
+        denominator = period if basis == 'Nominal' else annuity_denominator
+        values[f'CAPEX {basis.lower()}'] = float(investment) / area
+        for cost_type in ['Energy', 'Maintenance', 'Replacement']:
+            total = float(costs.loc[cashflow['Cost Type'] == cost_type].sum()) / area
+            values[f'{cost_type} period {basis.lower()}'] = total
+            values[f'{cost_type} annual {basis.lower()}'] = total / denominator
+        values[f'OPEX {basis.lower()}'] = sum(values[f'{kind} annual {basis.lower()}']
+                                               for kind in ['Energy', 'Maintenance', 'Replacement'])
+    return values
+
+
 def _dashboard_equivalent_tariffs(frame, payload, loads):
     """Current annual source rates, before dashboard-only end-use cost allocation."""
     uses = [str(c) for c in frame.columns if c != 'Month']
@@ -18110,8 +18131,8 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
     lcc_raw = _build_scenario_performance_radar_raw_df(
         file_bytes, filename, scenarios, list(scenarios), comparison, area, year, currency,
         lcc_global, crrem_dataset=crrem, scenario_analysis_period=50,
-        apply_lcc_filter=False, include_capex=True, include_annual_opex=True)
-    for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_discounted_lcc_kpi_label(50)), ('LCC50 nominal', _scenario_lcc_kpi_label(50)), ('CAPEX', 'Capex /m²'), ('OPEX', 'Annual OPEX /m²')]:
+        apply_lcc_filter=False, include_capex=False, include_annual_opex=False)
+    for new, old in [('LCA50', _scenario_lc_emissions_kpi_label(50)), ('LCC50', _scenario_discounted_lcc_kpi_label(50)), ('LCC50 nominal', _scenario_lcc_kpi_label(50))]:
         result[new] = lcc_raw.loc[lcc_raw['KPI'] == old].set_index('Scenario')['Value']
     dashboard_component_cashflows = {}
     efficiency_energy_frames = dict(energies)
@@ -18157,18 +18178,6 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
                 result.loc[name, 'Energy cost gross'] = rows.loc[consumption, 'Annual Cost'].sum() / area
                 gross = result.loc[name, 'EUI gross']
                 result.loc[name, 'Coverage'] = 100 * result.loc[name, 'Generation'] / gross if gross > 0 else np.nan
-                # Keep initial CAPEX consistent with its existing un-escalated definition.
-                investments = _lcc_investments_records_to_df((payload.get('lcc', {}) or {}).get('investments', []), end_uses=uses)
-                capex = 0.0
-                for _, investment in investments.iterrows():
-                    assigned = _lcc_parse_assigned_enduses(investment.get('Assigned End Uses', ''), end_uses=uses)
-                    if not assigned:
-                        assigned = _lcc_default_selected_enduses(uses)[:1]
-                    share = sum(u in selected_uses for u in assigned) / max(1, len(assigned))
-                    capex += _to_float_lcc(investment.get('Investment Cost'), 0.0) * share
-                result.loc[name, 'CAPEX'] = capex / area
-                result.loc[name, 'OPEX'] = cashflow.loc[
-                    (cashflow['Year'] == year) & cashflow['Cost Type'].isin(['Energy', 'Maintenance']), 'Nominal Cost'].sum() / area
                 # Filter columns rather than zeroing them, so excluded generation cannot be
                 # reintroduced by future CRREM production measures.
                 energies[name] = frame.loc[:, [c for c in frame.columns if c == 'Month' or
@@ -18188,6 +18197,15 @@ def _dashboard_build_data(file_bytes, filename, scenarios, comparison, area, yea
                 df_loads=get_loads_balance_df(file_bytes, filename, scenario_name=name, apply_master_filter=False))
         result.loc[name, 'LCC50 nominal'] = cashflow['Nominal Cost'].sum() / area
         result.loc[name, 'LCC50'] = cashflow['Discounted Cost'].sum() / area
+        for label, calendar_year in [('First-year scoped energy', year), ('Last-year scoped energy', year + max(1, min(100, int(lcc_period))) - 1)]:
+            result.loc[name, label] = cashflow.loc[(cashflow['Cost Type'] == 'Energy') &
+                (cashflow['Year'] == calendar_year), 'Nominal Cost'].sum() / area
+        for key, value in _dashboard_period_cost_values(cashflow, area, lcc_period, lcc_global.get('interest_rate_pct', 0.0)).items():
+            result.loc[name, key] = value
+        for cost_type in ['Energy', 'Maintenance', 'Replacement']:
+            result.loc[name, f'{cost_type} annual'] = result.loc[name, f'{cost_type} annual nominal']
+        for metric in ['CAPEX', 'OPEX']:
+            result.loc[name, metric] = result.loc[name, f'{metric} discounted']
         for key, value in _dashboard_lcc_component_values(cashflow, area).items():
             result.loc[name, key] = value
         for cost_type in ['Maintenance', 'Replacement']:
@@ -18334,15 +18352,20 @@ def _dashboard_catalog(currency, loads=()):
         ('Gross energy total','Gross annual energy','kWh/a','low'),('Net energy total','Net annual energy','kWh/a','low'),
         ('Gross carbon total','Gross annual emissions','kgCO₂e/a','low'),('Net carbon total','Net annual emissions','kgCO₂e/a','low'),
         ('Lifetime carbon total','Total emissions · 50 years','kgCO₂e','low'),('Generation total','Annual on-site generation','kWh/a','high')]
-    cost = [('Energy cost gross','Gross Energy Cost',currency+'/m²·a','low'),
-        ('Energy cost net','Net Energy Cost',currency+'/m²·a','low'),('LCC50','LCC50',currency+'/m²','low'),
+    cost = [('Energy cost gross','Current-year Gross Energy Cost',currency+'/m²·a','low'),
+        ('Energy cost net','Current-year Net Energy Cost',currency+'/m²·a','low'),('LCC50','LCC50',currency+'/m²','low'),
         ('CAPEX','CAPEX',currency+'/m²','low'),('OPEX','OPEX',currency+'/m²·a','low'),
         ('Maintenance50','Maintenance · 50 years',currency+'/m²','low'),
         ('Replacement50','Replacement · 50 years',currency+'/m²','low'),
-        ('Gross cost total','Gross annual energy cost',currency+'/a','low'),
-        ('Net cost total','Net annual energy cost',currency+'/a','low'),
+        ('Gross cost total','Current-year gross energy cost',currency+'/a','low'),
+        ('Net cost total','Current-year net energy cost',currency+'/a','low'),
         ('CAPEX total','Total CAPEX',currency,'low'),('OPEX total','Annual OPEX',currency+'/a','low'),
         ('LCC50 total','Total LCC50',currency,'low')]
+    annual_label = 'Equivalent annual' if st.session_state.get('dashboard_annual_cost_basis') == 'Equivalent annual' else 'Average annual'
+    cost += [(f'{kind} annual', f'{annual_label} {kind.lower()}', currency+'/m²·a', 'low')
+             for kind in ['Energy', 'Maintenance', 'Replacement']]
+    cost = [(key, f'{annual_label} OPEX' if key == 'OPEX' else label, unit, direction)
+            for key, label, unit, direction in cost]
     cost += [(f'Equivalent tariff::{source}', f'{source} equivalent tariff', currency+'/kWh', 'low')
              for source in ENERGY_SOURCE_ORDER]
     peaks = [(s+' peak',s,'W/m²','low') for s in ['Heating','Cooling','Electricity','District Heating','District Cooling']]
@@ -18590,17 +18613,22 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         dashboard_period = st.number_input(
             'Dashboard LCC analysis period (years)', min_value=1, max_value=100, step=1,
             key='dashboard_lcc_period',
-            help='Affects only dashboard life-cycle costs, maintenance and replacement. LCC Analysis, Scenarios and the 50-year emissions KPI keep their own periods.',
+            help='Affects only dashboard LCC, CAPEX, average annual OPEX, maintenance and replacement. LCC Analysis, Scenarios and the 50-year emissions KPI keep their own periods.',
         )
-        catalog = _dashboard_catalog(currency, loads)
         top_kpi_controls = st.container()
         if st.session_state.get('dashboard_lcc_basis') not in ['Discounted', 'Nominal']:
             st.session_state['dashboard_lcc_basis'] = 'Discounted'
         lcc_basis = st.radio(
-            'LCC basis for radar and scatter plots', ['Discounted', 'Nominal'],
+            'Period-total cost basis (LCC, CAPEX, maintenance and replacement)', ['Discounted', 'Nominal'],
             horizontal=True, key='dashboard_lcc_basis',
-            help='Applies to all LCC axes, including maintenance and replacement costs, total and per-m² values. Top KPI cards can select nominal and discounted LCC separately.',
+            help='Applies to period totals. Annual operating metrics use the separate annual-cost basis below. Top KPI cards can select nominal and discounted LCC separately.',
         )
+        if st.session_state.get('dashboard_annual_cost_basis') not in ['Nominal average', 'Equivalent annual']:
+            st.session_state['dashboard_annual_cost_basis'] = 'Nominal average'
+        annual_basis = st.radio('Annual operating-cost basis', ['Nominal average', 'Equivalent annual'],
+            key='dashboard_annual_cost_basis', horizontal=True,
+            help='Nominal average divides period costs by years. Equivalent annual divides present-value costs by the sum of annual discount factors. Energy, maintenance, replacement and OPEX share the same period and energy-use filter.')
+        catalog = _dashboard_catalog(currency, loads)
         dashboard_sync_lcc = st.checkbox(
             'Synchronize dashboard LCC energy uses with LCC Analysis',
             key='dashboard_sync_lcc_uses',
@@ -18625,7 +18653,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         dashboard_filter_scope = st.radio(
             'Apply dashboard energy-use filter to', filter_scopes, horizontal=True,
             key='dashboard_energy_filter_scope',
-            help='LCC only affects selected LCC cards and all LCC plot values. The broader option also filters EUI, emissions, energy costs, generation, coverage, CAPEX, OPEX and CRREM trajectories. Load and efficiency metrics retain their measured profiles. Other tabs are unaffected.',
+            help='LCC only filters dashboard life-cycle costs, including CAPEX, average annual OPEX, maintenance and replacement. The broader option also filters EUI, emissions, annual energy costs, generation, coverage and CRREM trajectories. Load and efficiency metrics retain their measured profiles. Other tabs are unaffected.',
         )
         st.caption('These filters affect only Project Dashboard. Available energy uses follow the project master filter.')
         left, right = st.columns([3,1])
@@ -18736,6 +18764,13 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
     data = data.copy()
     data['LCC50'] = data[f'LCC50 {lcc_basis.lower()}']
     data['LCC50 total'] = data[f'LCC50 {lcc_basis.lower()} total']
+    data['CAPEX'] = data[f'CAPEX {lcc_basis.lower()}']
+    data['CAPEX total'] = data['CAPEX'] * area
+    annual_suffix = 'nominal' if annual_basis == 'Nominal average' else 'discounted'
+    for cost_type in ['Energy', 'Maintenance', 'Replacement']:
+        data[f'{cost_type} annual'] = data[f'{cost_type} annual {annual_suffix}']
+    data['OPEX'] = data[f'OPEX {annual_suffix}']
+    data['OPEX total'] = data['OPEX'] * area
     for cost_type in ['Maintenance', 'Replacement']:
         data[f'{cost_type}50'] = data[f'{cost_type}50 {lcc_basis.lower()}']
     data, categories[2], load_title = _dashboard_load_radar_data(
@@ -18762,7 +18797,22 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
             formatted = f'{value:,.{precision}f} {unit}' if pd.notna(value) and np.isfinite(value) else 'N/A'
             detail = label
         col.metric(label, formatted, help=f'{metric_scenario} · {detail}')
-    st.caption(f'LCC in radar and scatter plots: {lcc_basis.lower()} · {dashboard_period} years.')
+    st.caption(f'Period totals: {lcc_basis.lower()} · {dashboard_period} years. Annual operating costs: {annual_basis.lower()}. OPEX = annual energy + maintenance + replacement on the same scope. Current-year energy costs are separate snapshot metrics.')
+    with st.expander('Cost calculation breakdown', expanded=False):
+        st.caption('All period and annual components below use the dashboard LCC energy-use selection and include active CRREM cost measures. Current-year energy cards may use a broader scope and do not include future measures.')
+        st.write('Included energy uses: ' + (', '.join(map(str, dashboard_selected_uses)) or 'None'))
+        audit = data.loc[selected, ['Energy annual', 'Maintenance annual', 'Replacement annual', 'OPEX']].copy()
+        audit.columns = [f'{annual_basis} energy /m²·a', f'{annual_basis} maintenance /m²·a',
+                         f'{annual_basis} replacement /m²·a', 'OPEX /m²·a']
+        for title, key in [('Energy', 'Energy period'), ('Maintenance', 'Maintenance period'),
+                           ('Replacement', 'Replacement period'), ('Investment', 'CAPEX')]:
+            audit[f'{title} · {lcc_basis.lower()} period total /m²'] = data.loc[selected, f'{key} {lcc_basis.lower()}']
+        audit['LCC period total /m²'] = data.loc[selected, 'LCC50']
+        for label in ['First-year scoped energy', 'Last-year scoped energy']:
+            audit[label + ' /m²·a'] = data.loc[selected, label]
+        audit['CRREM measure rows'] = [len(scenarios[name].get('crrem_measures', []) or []) for name in selected]
+        st.dataframe(audit, use_container_width=True)
+        st.caption('For identical scope and assumptions: higher energy cost in every year with identical investment, maintenance and replacement cash flows must produce higher OPEX and LCC. A higher current-year cost alone does not establish this.')
     st.caption('Radar scaling: highest value at the outer edge; lowest value at mid-radius unless it is zero, which sits at the centre. Equal non-zero values share the outer edge. Scales use all scenarios; hover for actual values and whether higher or lower is better.')
     if not any(categories) and not any(scatter_panels):
         return
