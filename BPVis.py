@@ -100,10 +100,19 @@ def _restore_scenario_drafts(name):
 
 def _rename_scenario_references(old, new):
     """Migrate scenario references only, without rewriting unrelated project strings."""
-    for key in ("_scenario_ui_ids", "_scenario_draft_bank"):
+    for key in ("_scenario_ui_ids", "_scenario_draft_bank", "dashboard_scenario_descriptions"):
         bank = st.session_state.get(key, {})
         if old in bank:
             bank[new] = bank.pop(old)
+    saved_descriptions = st.session_state.get('_dashboard_saved_setup', {}).get('dashboard_scenario_descriptions', {})
+    if old in saved_descriptions:
+        saved_descriptions[new] = saved_descriptions.pop(old)
+    for registry in [st.session_state.get('dashboard_custom_kpis', {}),
+                     st.session_state.get('_dashboard_saved_setup', {}).get('dashboard_custom_kpis', {})]:
+        for item in registry.values():
+            entries = item.get('values', {})
+            if old in entries:
+                entries[new] = entries.pop(old)
     selection_keys = ("dashboard_scenarios_v3", "dashboard_focus_v3",
         "scenario_comparison_scenario_filter", "scenario_radar_reference_scenario",
         "scenario_radar_reference_scenario_select", "scenario_delta_reference_scenario",
@@ -9106,7 +9115,7 @@ def create_benchmark_bar_chart(values_dict: Dict[str, float], thresholds_dict: D
 
 
 DASHBOARD_SETUP_SHEET = 'Dashboard_Setup'
-DASHBOARD_SETUP_KEYS = {'dashboard_annual_cost_basis','dashboard_top_kpis','dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis','dashboard_energy_uses','dashboard_energy_filter_scope','dashboard_lcc_period','dashboard_sync_lcc_uses'} | {
+DASHBOARD_SETUP_KEYS = {'dashboard_table_scenario_width','dashboard_table_description_width','dashboard_custom_kpis','dashboard_scenario_descriptions','dashboard_table_show_values', 'dashboard_table_kpis', 'dashboard_table_objectives','dashboard_annual_cost_basis','dashboard_top_kpis','dashboard_scenarios_v3','dashboard_focus_v3','dashboard_load_statistic','dashboard_load_percentile','dashboard_lcc_basis','dashboard_energy_uses','dashboard_energy_filter_scope','dashboard_lcc_period','dashboard_sync_lcc_uses'} | {
     f'dashboard_radar_{i}' for i in range(3)} | {
     f'dashboard_scatter_{i}{suffix}' for i in range(3) for suffix in ['', '_x', '_y']}
 
@@ -9136,11 +9145,19 @@ def _dashboard_restore_setup(frame):
                 value = json.loads(str(row['Value']))
                 if isinstance(value,dict) and 'value' in value:
                     value = value['value']
+                if key == 'dashboard_table_scenario_width':
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value) and 5 <= value <= 30:
+                        values[key] = int(value)
+                    continue
+                if key == 'dashboard_table_description_width':
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value) and 10 <= value <= 50:
+                        values[key] = int(value)
+                    continue
                 if key == 'dashboard_lcc_period':
                     if isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(value) and 1 <= value <= 100:
                         values[key] = int(value)
                     continue
-                if key == 'dashboard_sync_lcc_uses':
+                if key in {'dashboard_sync_lcc_uses', 'dashboard_table_show_values'}:
                     if isinstance(value, bool):
                         values[key] = value
                     continue
@@ -9148,7 +9165,25 @@ def _dashboard_restore_setup(frame):
                     if isinstance(value,(int,float)) and not isinstance(value,bool) and np.isfinite(value) and 0 <= value <= 100:
                         values[key] = float(value)
                     continue
-                is_list = key in {'dashboard_top_kpis', 'dashboard_scenarios_v3', 'dashboard_energy_uses'} or key.startswith('dashboard_radar_')
+                if key == 'dashboard_custom_kpis':
+                    if isinstance(value, dict):
+                        clean = {}
+                        for ident, item in value.items():
+                            if not isinstance(ident, str) or not isinstance(item, dict) or not isinstance(item.get('name'), str):
+                                continue
+                            entries = item.get('values', {})
+                            if not isinstance(entries, dict):
+                                continue
+                            clean[ident] = {'name': item['name'], 'unit': str(item.get('unit', '')),
+                                'values': {n: float(v) for n, v in entries.items() if isinstance(n, str)
+                                           and isinstance(v, (int, float)) and not isinstance(v, bool) and np.isfinite(v)}}
+                        values[key] = clean
+                    continue
+                if key in {'dashboard_table_objectives', 'dashboard_scenario_descriptions'}:
+                    if isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+                        values[key] = value
+                    continue
+                is_list = key in {'dashboard_table_kpis', 'dashboard_top_kpis', 'dashboard_scenarios_v3', 'dashboard_energy_uses'} or key.startswith('dashboard_radar_')
                 if (is_list and isinstance(value,list) and all(isinstance(v,str) for v in value)) or (
                     not is_list and (isinstance(value,str) or (key=='dashboard_focus_v3' and value is None))):
                     values[key] = value
@@ -17544,6 +17579,18 @@ def _loads_color_for(load_name: str, fallback: str = "#c02419") -> str:
         return fallback
 
 
+def _loads_ghost_opacity() -> float:
+    """One opacity value for ghost traces; avoid multiplying marker/fill alpha."""
+    return max(0.0, min(1.0, float(st.session_state.get("loads_ghost_opacity_percent", 62)) / 100.0))
+
+
+def _loads_ghost_color(ghost_load: Optional[str]) -> str:
+    """Resolve the overlay colour consistently for every Loads Analysis diagram."""
+    if st.session_state.get("loads_ghost_colour_mode", "Grey") == "Original colour" and ghost_load:
+        return _loads_color_for(ghost_load)
+    return LOAD_GHOST_COLOR
+
+
 def _loads_month_label_order_frame(df_in: pd.DataFrame) -> pd.DataFrame:
     """Add robust month labels/order columns for Loads_Balance diagrams."""
     out = df_in.copy()
@@ -17633,6 +17680,124 @@ def _loads_ghost_trace_label(ghost_load: Optional[str], ghost_scenario: Optional
     if scenario_label:
         return f"{load_label} — {scenario_label} (ghost)"
     return f"{load_label} (ghost)"
+
+
+def _loads_peak_period_frame(df_in, load_col, calendar_year):
+    """Prepare one-year hourly loads without changing their original hour convention."""
+    work = _loads_month_label_order_frame(df_in).copy()
+    for col in ["doy", "hour", load_col]:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.dropna(subset=["doy", "hour", load_col]).sort_values(["doy", "hour"])
+    work = work.drop_duplicates(["doy", "hour"]).reset_index(drop=True)
+    work["_x"] = (work["doy"] - 1) * 24 + work["hour"]
+    # Prefer the simulation's weekday calendar over the project's financial start year.
+    weekday = pd.Series(np.nan, index=work.index)
+    if "weekday" in work:
+        raw = work["weekday"].astype(str).str.strip().str.lower()
+        weekday = raw.str[:3].map(dict(zip(
+            ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], range(7))))
+        numeric = pd.to_numeric(raw, errors="coerce")
+        if numeric.notna().any():
+            weekday = weekday.fillna(numeric if numeric.min() == 0 else numeric - 1)
+    valid = weekday.between(0, 6)
+    if valid.any():
+        first = valid[valid].index[0]
+        jan1_weekday = int((weekday.loc[first] - (work.loc[first, "doy"] - 1)) % 7)
+    else:
+        jan1_weekday = pd.Timestamp(int(calendar_year), 1, 1).weekday()
+    work["_week"] = work["doy"] - ((work["doy"] - 1 + jan1_weekday) % 7)
+    return work
+
+
+def _loads_select_peak_period(work, load_col, period, mode):
+    """Select a calendar period by maximum sample or total hourly energy (first tie wins)."""
+    group = "_week" if period == "Week" else "_month_idx"
+    valid = work.dropna(subset=[group, load_col])
+    if valid.empty:
+        return valid.copy()
+    if mode == "Period containing peak moment":
+        key = valid.loc[valid[load_col].idxmax(), group]
+    else:
+        key = valid.groupby(group, sort=True)[load_col].sum().idxmax()
+    return valid.loc[valid[group] == key].copy()
+
+
+def _loads_render_peak_periods(df_in, selected_load, color, ghost_df, ghost_load,
+                               ghost_label, threshold_kw, calendar_year):
+    work = _loads_peak_period_frame(df_in, selected_load, calendar_year)
+    ghost = (_loads_peak_period_frame(ghost_df, ghost_load, calendar_year)
+             if ghost_load and ghost_df is not None and not ghost_df.empty else pd.DataFrame())
+    for period in ["Week", "Month"]:
+        st.subheader(f"Peak {period} — {ui_name(selected_load)}")
+        mode = st.radio(
+            f"Peak {period.lower()} selection",
+            ["Period containing peak moment", "Period with highest total load"],
+            horizontal=True, key=f"loads_peak_{period.lower()}_mode",
+            help="Uses the selected load. Weeks run Monday–Sunday; months are calendar months. "
+                 "Totals use the available hourly samples; ties select the earliest period.")
+        profile = _loads_select_peak_period(work, selected_load, period, mode)
+        if profile.empty:
+            st.warning("No valid hourly data is available for this period.")
+            continue
+        if period == "Week":
+            start = int(profile["_week"].iloc[0]); end = start + 6
+            label = f"DOY {start}–{end} (Monday–Sunday)"
+        else:
+            month = int(profile["_month_idx"].iloc[0])
+            # Use the source DOY/month alignment, including leap-year datasets.
+            month_rows = work.loc[work["_month_idx"] == month]
+            start = int((month_rows["doy"] - pd.to_numeric(month_rows["day"], errors="coerce") + 1).median())
+            leap = bool((work["doy"].max() > 365) or
+                        ((work["_month_idx"] == 2) & (pd.to_numeric(work["day"], errors="coerce") == 29)).any())
+            days = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+            end = start + days - 1
+            label = str(profile["_month_label"].iloc[0])
+        total = float(profile[selected_load].sum())
+        peak = profile.loc[profile[selected_load].idxmax()]
+        profile["_label"] = profile["_month_label"].astype(str) + " " + profile["day"].astype(str) + " · hour " + profile["hour"].astype(str)
+        fig = go.Figure()
+        r, g, b = pcolors.hex_to_rgb(color)
+        fig.add_trace(go.Scatter(
+            x=profile["_x"], y=profile[selected_load], mode="lines+markers",
+            line=dict(width=6, color=color), marker=dict(size=6, color=color),
+            fill="tozeroy", fillcolor=f"rgba({r},{g},{b},0.25)",
+            name=ui_name(selected_load), customdata=profile["_label"],
+            hovertemplate="%{customdata}<br>Load: %{y:,.2f} kW<br>" +
+                          f"Period total: {total:,.1f} kWh<extra></extra>"))
+        stats = None
+        if threshold_kw is not None:
+            continuous = profile[["_x", selected_load]].rename(columns={"_x": "hour"})
+            stats = _loads_daily_threshold_stats(continuous, selected_load, threshold_kw)
+            for trace in [_loads_daily_threshold_excess_trace(continuous, selected_load, threshold_kw, color),
+                          _loads_daily_threshold_line_trace(continuous, threshold_kw)]:
+                if trace is not None:
+                    fig.add_trace(trace)
+        if not ghost.empty:
+            overlay = ghost.loc[ghost["doy"].between(start, end)]
+            fig.add_trace(go.Scatter(
+                x=overlay["_x"], y=overlay[ghost_load], mode="lines",
+                name=ghost_label, line=dict(color=_loads_ghost_color(ghost_load), width=4, dash="dash"), opacity=_loads_ghost_opacity(),
+                customdata=np.column_stack([overlay["doy"], overlay["hour"]]),
+                hovertemplate="DOY %{customdata[0]} · hour %{customdata[1]}<br>Load: %{y:,.2f} kW<extra></extra>"))
+        daily = profile.drop_duplicates("doy")
+        offset = 0 if (work["hour"] == 0).any() else 1
+        fig.update_layout(
+            title=f"Peak {period} Profile — {ui_name(selected_load)} | {label}",
+            height=700, showlegend=bool(ghost_load or threshold_kw is not None),
+            xaxis_title="Day / hour", yaxis_title=f"{ui_name(selected_load)} (kW)",
+            xaxis=dict(range=[(start - 1) * 24 + offset, end * 24 + offset],
+                       tickvals=(daily["doy"] - 1) * 24 + offset,
+                       ticktext=daily["_month_label"].str[:3] + " " + daily["day"].astype(str)))
+        st_plotly_chart(fig, use_container_width=True)
+        st.caption(f"Load sum of presented Peak {period}: {total:,.1f} kWh.")
+        st.caption(f"Highest hourly value in the presented {period.lower()}: {float(peak[selected_load]):,.1f} kW "
+                   f"on {peak['_month_label']} {peak['day']} at hour {float(peak['hour']):g}.")
+        if len(profile) < (end - start + 1) * 24:
+            st.caption("Partial period: some hourly data is unavailable. Totals include available samples only.")
+        if stats is not None:
+            st.caption(f"Threshold analysis ({threshold_kw:,.1f} kW): {stats['hours_above']:,.1f} h above threshold; "
+                       f"peak difference above threshold: {stats['peak_excess_kw']:,.1f} kW; "
+                       f"sum of load above threshold (hatched area): {stats['excess_energy_kwh']:,.1f} kWh.")
 
 
 def _loads_daily_total_for_doy(df_in: pd.DataFrame, doy_value, load_col: str) -> float:
@@ -17890,7 +18055,7 @@ def _loads_add_ghost_contour(
         ghost_load: Optional[str],
         ghost_scenario: Optional[str] = None,
 ) -> go.Figure:
-    """Overlay a gray contour representation of the ghost load on a heatmap-style figure."""
+    """Overlay a contour representation using the selected ghost colour mode."""
     if not ghost_load or df_loads is None or df_loads.empty or ghost_load not in df_loads.columns:
         return fig
     try:
@@ -17904,9 +18069,10 @@ def _loads_add_ghost_contour(
             z=piv.values,
             name=ghost_label,
             showscale=False,
-            opacity=0.55,
+            opacity=_loads_ghost_opacity(),
             contours=dict(coloring="lines", showlabels=False),
-            line=dict(color=LOAD_GHOST_COLOR, width=1.4),
+            colorscale=[[0, _loads_ghost_color(ghost_load)], [1, _loads_ghost_color(ghost_load)]],
+            line=dict(color=_loads_ghost_color(ghost_load), width=1.4),
             hovertemplate=(
                 f"<b>{ghost_label}</b><br>"
                 "DOY %{x}<br>Hour %{y}<br>Load %{z:.2f} kW<extra></extra>"
@@ -18012,9 +18178,9 @@ def _loads_typical_day_profile_figure(
                 name=ghost_label,
                 legendgroup=f"ghost_{ghost_scenario}_{ghost_load}",
                 showlegend=(plotted_ghost_months == 0),
-                line=dict(color=LOAD_GHOST_COLOR, width=2.6, dash="dash"),
-                marker=dict(color=LOAD_GHOST_COLOR, size=4, opacity=0.65),
-                opacity=0.62,
+                line=dict(color=_loads_ghost_color(ghost_load), width=2.6, dash="dash"),
+                marker=dict(color=_loads_ghost_color(ghost_load), size=4),
+                opacity=_loads_ghost_opacity(),
                 customdata=custom,
                 hovertemplate=(
                     f"<b>{ghost_label}</b><br>"
@@ -18599,6 +18765,206 @@ def _dashboard_card_catalog(catalog, data, currency, period):
     return {key: item for key, item in items.items() if key in data.columns}
 
 
+def _dashboard_comparison_cell_styles(values, maximize=False):
+    """Independent red/yellow/green scale; equal or unavailable values stay neutral."""
+    numeric = pd.to_numeric(values, errors='coerce').replace([np.inf, -np.inf], np.nan)
+    valid = numeric.dropna()
+    styles = pd.Series('', index=values.index)
+    if valid.empty or valid.max() == valid.min():
+        return styles
+    score = (numeric - valid.min()) / (valid.max() - valid.min())
+    if not maximize:
+        score = 1.0 - score
+    red, yellow, green = (248, 168, 160), (255, 235, 166), (145, 211, 163)
+    for index, value in score.items():
+        if pd.isna(value):
+            continue
+        left, right, fraction = (red, yellow, value * 2) if value <= .5 else (yellow, green, (value - .5) * 2)
+        rgb = tuple(round(a + (b - a) * fraction) for a, b in zip(left, right))
+        styles.loc[index] = 'background-color: #%02x%02x%02x; color: #111111' % rgb
+    return styles
+
+
+def _dashboard_comparison_table_html(data, selected, chosen, options, objectives, show_values=False, descriptions=None, description_width=25, scenario_width=12):
+    from html import escape
+    numeric = data.loc[selected, chosen].apply(pd.to_numeric, errors='coerce').replace([np.inf, -np.inf], np.nan)
+    styles = {k: _dashboard_comparison_cell_styles(numeric[k], objectives[k] == 'Maximize') for k in chosen}
+    def display(name, k):
+        value = numeric.loc[name, k]
+        if pd.isna(value):
+            return 'N/A'
+        if k in ['Carbon stranding', 'EUI stranding']:
+            return str(data.loc[name, k + ' status'])
+        return format(value, ',.5f' if k.startswith('Equivalent tariff::') else ',.1f')
+    descriptions = descriptions or {}
+    description_width = max(10, min(50, int(description_width)))
+    scenario_width = max(5, min(30, int(scenario_width)))
+    kpi_width = (100 - scenario_width - description_width) / max(1, len(chosen))
+    header = ['<th scope="col">Scenario</th><th scope="col">Description</th>']
+    for k in chosen:
+        valid = numeric[k].dropna()
+        if valid.empty:
+            range_label = 'Range: N/A'
+        else:
+            range_label = 'Min: ' + display(valid.idxmin(), k) + ' · Max: ' + display(valid.idxmax(), k)
+        objective = '↓ Minimize' if objectives[k] == 'Minimize' else '↑ Maximize'
+        header.append('<th scope="col">' + escape(options[k][1]) + '<br><small>' +
+                      escape(options[k][2]) + '<br>' + escape(range_label) + '<br>' + escape(objective) + '</small></th>')
+    rows = []
+    for name in selected:
+        cells = ['<th scope="row"><div class="bpvis-cell-text" title="' + escape(str(name), quote=True) + '">' + escape(str(name)) + '</div></th>',
+                 '<td style="text-align:left"><div class="bpvis-cell-text" title="' + escape(descriptions.get(name, ''), quote=True) + '">' + escape(descriptions.get(name, '')) + '</div></td>']
+        for k in chosen:
+            label = display(name, k)
+            content = escape(label) if show_values or label == 'N/A' else '&nbsp;'
+            cells.append('<td style="' + styles[k].loc[name] + '" title="' +
+                         escape(str(name) + ' · ' + options[k][1] + ': ' + label + ' ' + options[k][2], quote=True) +
+                         '"><div class="bpvis-kpi-value">' + content + '</div></td>')
+        rows.append('<tr>' + ''.join(cells) + '</tr>')
+    return ("<style>.bpvis-kpi-table{border-collapse:collapse;table-layout:fixed;font-size:14px;width:100%;max-width:100%}"
+            ".bpvis-kpi-table th,.bpvis-kpi-table td{border:1px solid #8886;padding:10px 4px;text-align:center;box-sizing:border-box;overflow-wrap:anywhere}"
+            ".bpvis-kpi-table th:first-child{text-align:left}"
+            ".bpvis-kpi-value{height:105px;display:flex;align-items:center;justify-content:center;text-align:center;overflow:hidden;overflow-wrap:anywhere}.bpvis-kpi-table small{font-weight:normal}.bpvis-kpi-table tbody tr{height:126px}.bpvis-cell-text{height:105px;line-height:21px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow-wrap:anywhere}</style>"
+            '<div style="overflow-y:auto;max-height:800px;width:100%"><table class="bpvis-kpi-table"><colgroup><col style="width:' + str(scenario_width) + '%"><col style="width:' + str(description_width) + '%">' + ('<col style="width:' + str(kpi_width) + '%">') * len(chosen) + '</colgroup><thead><tr>' +
+            ''.join(header) + '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div>' +
+            '<div style="margin-top:18px;max-width:430px"><div style="display:flex;justify-content:space-between">'
+            '<span>Best</span><span>Intermediate</span><span>Worst</span></div>'
+            '<div style="height:16px;border-radius:4px;background:linear-gradient(to right,#91d3a3,#ffeba6,#f8a8a0)"></div>'
+            '<small>Neutral: equal values · N/A: unavailable</small></div>')
+
+
+def _dashboard_save_description(name, widget_key):
+    descriptions = dict(st.session_state.get('dashboard_scenario_descriptions', {}))
+    descriptions[name] = str(st.session_state.get(widget_key, ''))
+    st.session_state['dashboard_scenario_descriptions'] = descriptions
+    st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
+
+
+def _dashboard_update_custom_kpi(ident, field, widget_key, scenario=None):
+    registry = st.session_state.setdefault('dashboard_custom_kpis', {})
+    if ident not in registry:
+        return
+    value = st.session_state.get(widget_key)
+    if field == 'values':
+        entries = registry[ident].setdefault('values', {})
+        if value is None:
+            entries.pop(scenario, None)
+        else:
+            entries[scenario] = float(value)
+    else:
+        text = str(value or '').strip()
+        if field == 'name' and not text:
+            st.session_state[widget_key] = registry[ident]['name']
+            return
+        registry[ident][field] = text
+    st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
+
+
+def _dashboard_custom_kpi_controls(data, selected, options):
+    registry = st.session_state.setdefault('dashboard_custom_kpis', {})
+    if st.checkbox('Manage custom KPIs', key='_dashboard_manage_custom_kpis'):
+        with st.form('dashboard_add_custom_kpi', clear_on_submit=True):
+            name = st.text_input('New custom KPI name', placeholder='Technical Challenge')
+            unit = st.text_input('Unit (optional)', placeholder='Score / 10')
+            objective = st.selectbox('New KPI objective', ['Minimize', 'Maximize'])
+            submitted = st.form_submit_button('Add custom KPI')
+        if submitted:
+            if not name.strip():
+                st.warning('Enter a KPI name.')
+            elif any(item['name'].casefold() == name.strip().casefold() for item in registry.values()):
+                st.warning('A custom KPI with this name already exists.')
+            else:
+                ident = 'custom::' + uuid.uuid4().hex
+                registry[ident] = {'name': name.strip(), 'unit': unit.strip(), 'values': {}}
+                st.session_state.setdefault('dashboard_table_objectives', {})[ident] = objective
+                initial = [k for k in ['EUI net', 'Carbon net', 'OPEX', 'LCC50 discounted', 'Coverage'] if k in options]
+                st.session_state.setdefault('dashboard_table_kpis', initial).append(ident)
+        if registry:
+            ident = st.selectbox('Custom KPI to edit', list(registry),
+                                 format_func=lambda k: registry[k]['name'], key='_dashboard_custom_edit')
+            item = registry[ident]
+            for field, label in [('name', 'Custom KPI name'), ('unit', 'Custom KPI unit')]:
+                widget_key = '_dashboard_custom_' + ident + '_' + field
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = item[field]
+                st.text_input(label, key=widget_key, on_change=_dashboard_update_custom_kpi,
+                              args=(ident, field, widget_key))
+            st.caption('Enter values for the visible scenarios. Blank means unavailable. Hidden scenarios retain their values.')
+            cols = st.columns(3)
+            for i, scenario in enumerate(selected):
+                widget_key = '_dashboard_custom_value_' + ident + '_' + _scenario_ui_id(scenario)
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = item['values'].get(scenario)
+                with cols[i % 3]:
+                    st.number_input(str(scenario), value=None, step=1.0, format='%.3f', key=widget_key,
+                                    on_change=_dashboard_update_custom_kpi,
+                                    args=(ident, 'values', widget_key, scenario))
+            if st.button('Delete this custom KPI', key='_dashboard_custom_delete'):
+                registry.pop(ident)
+                st.session_state['dashboard_table_kpis'] = [k for k in st.session_state.get('dashboard_table_kpis', []) if k != ident]
+                st.session_state.get('dashboard_table_objectives', {}).pop(ident, None)
+    data, options = data.copy(), dict(options)
+    for ident, item in registry.items():
+        data[ident] = pd.Series(item['values'], dtype=float).reindex(data.index)
+        direction = st.session_state.get('dashboard_table_objectives', {}).get(ident, 'Minimize')
+        options[ident] = (ident, item['name'], item['unit'], 'high' if direction == 'Maximize' else 'low')
+    st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
+    return data, options
+
+
+def _dashboard_render_comparison_table(data, selected, options):
+    with st.expander('Scenario KPI comparison table', expanded=False):
+        st.caption('Rows follow Dashboard scenarios. Choose any number of KPI columns. '
+                   'Each column is scaled independently across the visible scenarios: green = best, red = worst. '
+                   'Equal values remain neutral; missing values show N/A. Hover over a cell for its value.')
+        data, options = _dashboard_custom_kpi_controls(data, selected, options)
+        edit_descriptions = st.checkbox('Edit scenario descriptions', key='_dashboard_edit_descriptions')
+        if edit_descriptions:
+            for name in selected:
+                description_key = '_dashboard_description_' + _scenario_ui_id(name)
+                if description_key not in st.session_state:
+                    st.session_state[description_key] = st.session_state.get('dashboard_scenario_descriptions', {}).get(name, '')
+                st.text_area('Description — ' + str(name), key=description_key,
+                             on_change=_dashboard_save_description, args=(name, description_key))
+        key = 'dashboard_table_kpis'
+        if key not in st.session_state:
+            st.session_state[key] = [k for k in ['EUI net', 'Carbon net', 'OPEX', 'LCC50 discounted', 'Coverage'] if k in options]
+        st.session_state[key] = [k for k in st.session_state[key] if k in options]
+        chosen = st.multiselect('Comparison table KPIs', list(options), key=key,
+            format_func=lambda k: options[k][1] + ' · ' + options[k][2],
+            help='Columns appear in your selection order. There is no five-KPI limit.')
+        objectives = dict(st.session_state.get('dashboard_table_objectives', {}))
+        st.caption('Objective for each KPI')
+        columns = st.columns(3)
+        for i, k in enumerate(chosen):
+            widget_key = '_dashboard_table_direction_' + k
+            default = objectives.get(k, 'Maximize' if options[k][3] == 'high' else 'Minimize')
+            if widget_key not in st.session_state:
+                st.session_state[widget_key] = default
+            with columns[i % 3]:
+                objectives[k] = st.selectbox(options[k][1] + ' · ' + options[k][2],
+                    ['Minimize', 'Maximize'], key=widget_key)
+        st.session_state['dashboard_table_objectives'] = objectives
+        st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
+        if not chosen:
+            st.info('Select at least one KPI to build the comparison table.')
+            return
+        scenario_width = st.slider('Scenario Name column width (% of table)', min_value=5, max_value=30,
+                                   value=12, step=1, key='dashboard_table_scenario_width',
+                                   help='Drag to resize the Scenario Name column. KPI columns share the remaining width equally.')
+        description_width = st.slider('Description column width (% of table)', min_value=10, max_value=50,
+                                      value=25, step=1, key='dashboard_table_description_width',
+                                      help='Drag to resize the description column. KPI columns share the remaining width equally. '
+                                           'With many KPIs, headers wrap to keep the table within the expander.')
+        show_values = st.checkbox('Show values in cells', value=False, key='dashboard_table_show_values')
+        st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
+        markup = _dashboard_comparison_table_html(data, selected, chosen, options, objectives, show_values,
+                                                   st.session_state.get('dashboard_scenario_descriptions', {}), description_width, scenario_width)
+        st.markdown(markup, unsafe_allow_html=True)
+        st.caption('↓ Minimize · ↑ Maximize. Colours indicate relative performance, not compliance thresholds. '
+                   'Cost metrics follow the dashboard period and cost basis; explicitly nominal or discounted metrics retain their stated basis.')
+
+
 def _render_project_dashboard(file_bytes, filename, comparison, area, year, currency):
     scenarios = st.session_state.get('scenarios', {})
     if not scenarios:
@@ -18845,6 +19211,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
         st.caption('For identical scope and assumptions: higher energy cost in every year with identical investment, maintenance and replacement cash flows must produce higher OPEX and LCC. A higher current-year cost alone does not establish this.')
     st.caption('Radar scaling: highest value at the outer edge; lowest value at mid-radius unless it is zero, which sits at the centre. Equal non-zero values share the outer edge. Scales use all scenarios; hover for actual values and whether higher or lower is better.')
     if not any(categories) and not any(scatter_panels):
+        _dashboard_render_comparison_table(data, selected, card_options)
         return
     visible_categories = [category if visibility[i] else [] for i, category in enumerate(categories)]
     visible_scatter = [panel if visibility[i+3] else None for i, panel in enumerate(scatter_panels)]
@@ -18872,6 +19239,7 @@ def _render_project_dashboard(file_bytes, filename, comparison, area, year, curr
     unavailable = data.loc[selected,sorted(displayed)].isna().sum().sum()
     if unavailable:
         st.caption(f'{unavailable} KPI values unavailable. Missing load columns or CRREM inputs are not plotted.')
+    _dashboard_render_comparison_table(data, selected, card_options)
 
 
 with tab5:
@@ -18917,68 +19285,89 @@ with tab4:
         if active_scenario_loads not in scenario_names_loads:
             scenario_names_loads.insert(0, active_scenario_loads)
 
-        load_select_col, ghost_scenario_col, ghost_load_col = st.columns([1, 1, 1])
-        with load_select_col:
-            _loads_selected_key = "loads_analysis_selected_load"
-            _previous_selected_load = st.session_state.get(_loads_selected_key)
-            if _previous_selected_load not in load_cols:
-                # Preserve the same logical load after a scenario switch when naming differs only by prefix/suffix.
-                _previous_match_key = _loads_energy_match_key(
-                    _previous_selected_load) if _previous_selected_load else ""
-                _matched_loads = [c for c in load_cols if
-                                  _loads_energy_match_key(c) == _previous_match_key and _previous_match_key]
-                st.session_state[_loads_selected_key] = _matched_loads[0] if _matched_loads else load_cols[0]
-            selected_load = st.selectbox(
-                "Select Load",
-                load_cols,
-                index=load_cols.index(st.session_state[_loads_selected_key]) if st.session_state.get(
-                    _loads_selected_key) in load_cols else 0,
-                format_func=ui_name,
-                key=_loads_selected_key,
-            )
+        _loads_selected_key = "loads_analysis_selected_load"
+        _previous_selected_load = st.session_state.get(_loads_selected_key)
+        if _previous_selected_load not in load_cols:
+            # Preserve the same logical load after a scenario switch when naming differs only by prefix/suffix.
+            _previous_match_key = _loads_energy_match_key(
+                _previous_selected_load) if _previous_selected_load else ""
+            _matched_loads = [c for c in load_cols if
+                              _loads_energy_match_key(c) == _previous_match_key and _previous_match_key]
+            st.session_state[_loads_selected_key] = _matched_loads[0] if _matched_loads else load_cols[0]
+        selected_load = st.selectbox(
+            "Select Load",
+            load_cols,
+            index=load_cols.index(st.session_state[_loads_selected_key]) if st.session_state.get(
+                _loads_selected_key) in load_cols else 0,
+            format_func=ui_name,
+            key=_loads_selected_key,
+        )
 
-        with ghost_scenario_col:
-            ghost_scenario_option = st.selectbox(
-                "Ghost scenario",
-                ["None"] + scenario_names_loads,
-                index=0,
-                key="loads_ghost_scenario",
-                help="Optional scenario used only as a gray/dashed comparison overlay in Loads Analysis diagrams."
-            )
+        with st.expander("Ghost load representation", expanded=False):
+            ghost_scenario_col, ghost_load_col = st.columns(2)
+            with ghost_scenario_col:
+                ghost_scenario_option = st.selectbox(
+                    "Ghost scenario",
+                    ["None"] + scenario_names_loads,
+                    index=0,
+                    key="loads_ghost_scenario",
+                    help="Optional scenario used as a comparison overlay in Loads Analysis diagrams."
+                )
 
-        ghost_load = None
-        ghost_scenario = None
-        ghost_label = ""
-        df_ghost_loads = pd.DataFrame()
-        with ghost_load_col:
-            if ghost_scenario_option != "None":
-                ghost_scenario = str(ghost_scenario_option)
-                df_ghost_loads = get_loads_balance_df(file_bytes_loads, uploaded_file.name,
-                                                      scenario_name=ghost_scenario).copy(deep=False)
-                ghost_load_options = _loads_available_load_columns(df_ghost_loads)
-                if ghost_scenario == active_scenario_loads:
-                    ghost_load_options = [c for c in ghost_load_options if c != selected_load]
-                if ghost_load_options:
-                    ghost_load = st.selectbox(
-                        "Ghost load",
-                        ghost_load_options,
-                        index=0,
-                        format_func=ui_name,
-                        help="Load from the selected ghost scenario shown in gray/dashed form for visual comparison."
-                    )
+            ghost_load = None
+            ghost_scenario = None
+            ghost_label = ""
+            df_ghost_loads = pd.DataFrame()
+            with ghost_load_col:
+                if ghost_scenario_option != "None":
+                    ghost_scenario = str(ghost_scenario_option)
+                    df_ghost_loads = get_loads_balance_df(file_bytes_loads, uploaded_file.name,
+                                                          scenario_name=ghost_scenario).copy(deep=False)
+                    ghost_load_options = _loads_available_load_columns(df_ghost_loads)
+                    if ghost_scenario == active_scenario_loads:
+                        ghost_load_options = [c for c in ghost_load_options if c != selected_load]
+                    if ghost_load_options:
+                        ghost_load = st.selectbox(
+                            "Ghost load",
+                            ghost_load_options,
+                            index=0,
+                            format_func=ui_name,
+                            help="Load from the selected ghost scenario shown as a comparison overlay."
+                        )
+                    else:
+                        st.selectbox("Ghost load", ["None"], index=0,
+                                     help="No alternative load is available for the selected ghost scenario.")
                 else:
-                    st.selectbox("Ghost load", ["None"], index=0,
-                                 help="No alternative load is available for the selected ghost scenario.")
-            else:
-                st.selectbox("Ghost load", ["None"], index=0, help="Select a ghost scenario first.")
+                    st.selectbox("Ghost load", ["None"], index=0, help="Select a ghost scenario first.")
 
+            st.radio(
+                "Ghost load colour", ["Grey", "Original colour"], horizontal=True,
+                key="loads_ghost_colour_mode",
+                help="Original colour uses the configured colour of the selected ghost load. "
+                     "Dashed lines and transparency still distinguish the comparison overlay.",
+            )
+
+            st.number_input(
+                "Ghost load opacity (%)", min_value=0, max_value=100, value=62, step=1,
+                key="loads_ghost_opacity_percent",
+                help="0% is invisible; 100% is fully opaque. Applies to all ghost overlays, "
+                     "including overlapping monthly bars. Side-by-side monthly bars always use 100%.",
+            )
+            monthly_ghost_layout = st.radio(
+                "Monthly load bars — ghost layout",
+                ["Faded overlapping", "Side-by-side"],
+                horizontal=True,
+                key="loads_monthly_ghost_layout",
+                help="Side-by-side shows ghost bars at full opacity. Overlapping fades the ghost bars. "
+                     "Both use the selected Ghost load colour.",
+            )
         if ghost_load:
             for _c in ["doy", "hour"]:
                 if _c in df_ghost_loads.columns:
                     df_ghost_loads[_c] = pd.to_numeric(df_ghost_loads[_c], errors="coerce")
             ghost_label = _loads_ghost_trace_label(ghost_load, ghost_scenario)
             st.caption(
-                f"Ghost overlay active: {ghost_label} is shown in gray on Loads Analysis diagrams where the chart type supports an overlay."
+                f"Ghost overlay active: {ghost_label} is shown in {st.session_state.get('loads_ghost_colour_mode', 'Grey').lower()} on Loads Analysis diagrams where the chart type supports an overlay."
             )
 
         load_heatmap = px.density_heatmap(
@@ -19069,13 +19458,15 @@ with tab4:
                 x=ghost_totals_by_month["month"],
                 y=ghost_totals_by_month[ghost_load],
                 name=ghost_label,
-                marker=dict(color=LOAD_GHOST_COLOR),
-                opacity=0.35,
+                marker=dict(color=_loads_ghost_color(ghost_load)),
+                opacity=1.0 if monthly_ghost_layout == "Side-by-side" else _loads_ghost_opacity(),
                 text=[f"{v:,.0f}" for v in ghost_totals_by_month[ghost_load]],
                 textposition="outside",
                 hovertemplate=f"<b>{ghost_label}</b><br>Month %{{x}}<br>Load %{{y:,.0f}} kWh<extra></extra>",
             ))
-            monthly_total_load_bar.update_layout(barmode="overlay")
+            monthly_total_load_bar.update_layout(
+                barmode="group" if monthly_ghost_layout == "Side-by-side" else "overlay"
+            )
         monthly_total_load_bar.update_layout(
             showlegend=True,
             legend=dict(
@@ -19111,8 +19502,8 @@ with tab4:
                     x=["Ghost"],
                     y=[ghost_annual_total_load],
                     name=ghost_label,
-                    marker=dict(color=LOAD_GHOST_COLOR),
-                    opacity=0.45,
+                    marker=dict(color=_loads_ghost_color(ghost_load)),
+                    opacity=_loads_ghost_opacity(),
                     text=[f"{ghost_annual_total_load:,.0f}"],
                     textposition="auto",
                     hovertemplate=(
@@ -19204,9 +19595,9 @@ with tab4:
                         y=ghost_exceed_piv.index.astype(float),
                         z=ghost_exceed_piv.values,
                         name=ghost_label,
-                        colorscale=[[0.0, "rgba(0,0,0,0)"], [1.0, "rgba(120,120,120,0.55)"]],
+                        colorscale=[[0.0, "rgba(0,0,0,0)"], [1.0, _plotly_rgba_from_color(_loads_ghost_color(ghost_load), 1.0)]],
                         showscale=False,
-                        opacity=0.40,
+                        opacity=_loads_ghost_opacity(),
                         hovertemplate=(
                             f"<b>{ghost_label}</b><br>"
                             "DOY %{x}<br>Hour %{y}<br>Above threshold: %{z}<extra></extra>"
@@ -19237,10 +19628,10 @@ with tab4:
         if _threshold_enabled_key not in st.session_state:
             st.session_state[_threshold_enabled_key] = False
         threshold_analysis_enabled = st.checkbox(
-            "Enable threshold analysis for Peak Day and Peak Moment Day",
+            "Enable threshold analysis for Peak Day, Peak Moment Day, Peak Week and Peak Month",
             key=_threshold_enabled_key,
             help=(
-                "Adds a threshold line and a hatched excess-load area to the Peak Day and Peak Moment Day profiles. "
+                "Adds a threshold line and a hatched excess-load area to the Peak Day, Peak Moment Day, Peak Week and Peak Month profiles. "
                 "The summary reports hours above threshold, maximum kW above threshold and the excess-load energy above threshold."
             ),
         )
@@ -19384,9 +19775,9 @@ with tab4:
                 y=ghost_day_profile[ghost_load],
                 mode="lines+markers",
                 name=ghost_label,
-                line=dict(color=LOAD_GHOST_COLOR, width=4, dash="dash"),
-                marker=dict(color=LOAD_GHOST_COLOR, size=8),
-                opacity=0.62,
+                line=dict(color=_loads_ghost_color(ghost_load), width=4, dash="dash"),
+                marker=dict(color=_loads_ghost_color(ghost_load), size=8),
+                opacity=_loads_ghost_opacity(),
                 customdata=_loads_daily_profile_customdata(ghost_day_profile, ghost_peak_day_total, date_label),
                 hovertemplate=(
                     f"<b>{ghost_label}</b><br>"
@@ -19564,9 +19955,9 @@ with tab4:
                     y=ghost_peak_moment_day_profile[ghost_load],
                     mode="lines+markers",
                     name=ghost_label,
-                    line=dict(color=LOAD_GHOST_COLOR, width=4, dash="dash"),
-                    marker=dict(color=LOAD_GHOST_COLOR, size=8),
-                    opacity=0.62,
+                    line=dict(color=_loads_ghost_color(ghost_load), width=4, dash="dash"),
+                    marker=dict(color=_loads_ghost_color(ghost_load), size=8),
+                    opacity=_loads_ghost_opacity(),
                     customdata=_loads_daily_profile_customdata(
                         ghost_peak_moment_day_profile,
                         ghost_peak_moment_day_total,
@@ -19598,6 +19989,12 @@ with tab4:
                     f"peak difference above threshold: {float(peak_moment_threshold_stats.get('peak_excess_kw', 0.0)):,.1f} kW; "
                     f"sum of load above threshold (hatched area): {float(peak_moment_threshold_stats.get('excess_energy_kwh', 0.0)):,.1f} kWh."
                 )
+
+        _loads_render_peak_periods(
+            df_loads, selected_load, bar_color, df_ghost_loads, ghost_load, ghost_label,
+            threshold_analysis_kw if threshold_analysis_enabled else None,
+            int(st.session_state.get("project_year", 2025)),
+        )
 
         # --- Typical day by month (average of all same-month days by hour) ---
         exclude_weekends_typical = st.checkbox(
@@ -19665,8 +20062,8 @@ with tab4:
                 y=ghost_ldc_sorted.values,
                 mode="lines",
                 name=ghost_label,
-                line=dict(width=4, color=LOAD_GHOST_COLOR, dash="dash"),
-                opacity=0.62,
+                line=dict(width=4, color=_loads_ghost_color(ghost_load), dash="dash"),
+                opacity=_loads_ghost_opacity(),
                 hovertemplate=f"<b>{ghost_label}</b><br>Hours %{{x:.1f}}%<br>Load %{{y:.2f}} kW<extra></extra>",
             ))
         # User-defined percentile of the total selected load (kW), visualized on the load duration curve.
@@ -20060,9 +20457,9 @@ with tab4:
                         y=ghost_day_profile[ghost_load],
                         mode="lines+markers",
                         name=ghost_label,
-                        line=dict(color=LOAD_GHOST_COLOR, width=4, dash="dash"),
-                        marker=dict(color=LOAD_GHOST_COLOR, size=7),
-                        opacity=0.55,
+                        line=dict(color=_loads_ghost_color(ghost_load), width=4, dash="dash"),
+                        marker=dict(color=_loads_ghost_color(ghost_load), size=7),
+                        opacity=_loads_ghost_opacity(),
                         hovertemplate=f"<b>{ghost_label}</b><br>Hour %{{x}}<br>Load %{{y:.2f}} kW<extra></extra>",
                     ))
                 fig_pv.add_trace(go.Scatter(x=pv_day["hour"], y=pv_day[pv_col], mode="lines+markers",
