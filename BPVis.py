@@ -18917,47 +18917,48 @@ def _dashboard_render_comparison_table(data, selected, options):
         st.caption('Rows follow Dashboard scenarios. Choose any number of KPI columns. '
                    'Each column is scaled independently across the visible scenarios: green = best, red = worst. '
                    'Equal values remain neutral; missing values show N/A. Hover over a cell for its value.')
-        data, options = _dashboard_custom_kpi_controls(data, selected, options)
-        edit_descriptions = st.checkbox('Edit scenario descriptions', key='_dashboard_edit_descriptions')
-        if edit_descriptions:
-            for name in selected:
-                description_key = '_dashboard_description_' + _scenario_ui_id(name)
-                if description_key not in st.session_state:
-                    st.session_state[description_key] = st.session_state.get('dashboard_scenario_descriptions', {}).get(name, '')
-                st.text_area('Description — ' + str(name), key=description_key,
-                             on_change=_dashboard_save_description, args=(name, description_key))
-        key = 'dashboard_table_kpis'
-        if key not in st.session_state:
-            st.session_state[key] = [k for k in ['EUI net', 'Carbon net', 'OPEX', 'LCC50 discounted', 'Coverage'] if k in options]
-        st.session_state[key] = [k for k in st.session_state[key] if k in options]
-        chosen = st.multiselect('Comparison table KPIs', list(options), key=key,
-            format_func=lambda k: options[k][1] + ' · ' + options[k][2],
-            help='Columns appear in your selection order. There is no five-KPI limit.')
-        objectives = dict(st.session_state.get('dashboard_table_objectives', {}))
-        st.caption('Objective for each KPI')
-        columns = st.columns(3)
-        for i, k in enumerate(chosen):
-            widget_key = '_dashboard_table_direction_' + k
-            default = objectives.get(k, 'Maximize' if options[k][3] == 'high' else 'Minimize')
-            if widget_key not in st.session_state:
-                st.session_state[widget_key] = default
-            with columns[i % 3]:
-                objectives[k] = st.selectbox(options[k][1] + ' · ' + options[k][2],
-                    ['Minimize', 'Maximize'], key=widget_key)
-        st.session_state['dashboard_table_objectives'] = objectives
-        st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
+        with st.expander('Table setup', expanded=False):
+            data, options = _dashboard_custom_kpi_controls(data, selected, options)
+            edit_descriptions = st.checkbox('Edit scenario descriptions', key='_dashboard_edit_descriptions')
+            if edit_descriptions:
+                for name in selected:
+                    description_key = '_dashboard_description_' + _scenario_ui_id(name)
+                    if description_key not in st.session_state:
+                        st.session_state[description_key] = st.session_state.get('dashboard_scenario_descriptions', {}).get(name, '')
+                    st.text_area('Description — ' + str(name), key=description_key,
+                                 on_change=_dashboard_save_description, args=(name, description_key))
+            key = 'dashboard_table_kpis'
+            if key not in st.session_state:
+                st.session_state[key] = [k for k in ['EUI net', 'Carbon net', 'OPEX', 'LCC50 discounted', 'Coverage'] if k in options]
+            st.session_state[key] = [k for k in st.session_state[key] if k in options]
+            chosen = st.multiselect('Comparison table KPIs', list(options), key=key,
+                format_func=lambda k: options[k][1] + ' · ' + options[k][2],
+                help='Columns appear in your selection order. There is no five-KPI limit.')
+            objectives = dict(st.session_state.get('dashboard_table_objectives', {}))
+            st.caption('Objective for each KPI')
+            columns = st.columns(3)
+            for i, k in enumerate(chosen):
+                widget_key = '_dashboard_table_direction_' + k
+                default = objectives.get(k, 'Maximize' if options[k][3] == 'high' else 'Minimize')
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = default
+                with columns[i % 3]:
+                    objectives[k] = st.selectbox(options[k][1] + ' · ' + options[k][2],
+                        ['Minimize', 'Maximize'], key=widget_key)
+            st.session_state['dashboard_table_objectives'] = objectives
+            st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
+            scenario_width = st.slider('Scenario Name column width (% of table)', min_value=5, max_value=30,
+                                       value=12, step=1, key='dashboard_table_scenario_width',
+                                       help='Drag to resize the Scenario Name column. KPI columns share the remaining width equally.')
+            description_width = st.slider('Description column width (% of table)', min_value=10, max_value=50,
+                                          value=25, step=1, key='dashboard_table_description_width',
+                                          help='Drag to resize the description column. KPI columns share the remaining width equally. '
+                                               'With many KPIs, headers wrap to keep the table within the expander.')
+            show_values = st.checkbox('Show values in cells', value=False, key='dashboard_table_show_values')
+            st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
         if not chosen:
             st.info('Select at least one KPI to build the comparison table.')
             return
-        scenario_width = st.slider('Scenario Name column width (% of table)', min_value=5, max_value=30,
-                                   value=12, step=1, key='dashboard_table_scenario_width',
-                                   help='Drag to resize the Scenario Name column. KPI columns share the remaining width equally.')
-        description_width = st.slider('Description column width (% of table)', min_value=10, max_value=50,
-                                      value=25, step=1, key='dashboard_table_description_width',
-                                      help='Drag to resize the description column. KPI columns share the remaining width equally. '
-                                           'With many KPIs, headers wrap to keep the table within the expander.')
-        show_values = st.checkbox('Show values in cells', value=False, key='dashboard_table_show_values')
-        st.session_state['_dashboard_saved_setup'] = _dashboard_setup_payload()
         markup = _dashboard_comparison_table_html(data, selected, chosen, options, objectives, show_values,
                                                    st.session_state.get('dashboard_scenario_descriptions', {}), description_width, scenario_width)
         st.markdown(markup, unsafe_allow_html=True)
