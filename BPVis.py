@@ -4859,6 +4859,7 @@ def _build_scenario_performance_radar_raw_df(
         apply_lcc_filter: bool = True,
         include_capex: bool = False,
         include_annual_opex: bool = False,
+        energy_basis: str = "Net",
 ) -> pd.DataFrame:
     """Build raw KPI values for the Scenarios performance radar diagrams.
 
@@ -4867,6 +4868,7 @@ def _build_scenario_performance_radar_raw_df(
     axis-scaled absolute-value radar.
     """
     rows = []
+    energy_basis = "Gross" if str(energy_basis).strip().lower() == "gross" else "Net"
     try:
         area = float(project_area or 0.0)
     except Exception:
@@ -4907,14 +4909,24 @@ def _build_scenario_performance_radar_raw_df(
         sc_name_str = str(sc_name)
         payload_sc = (scenarios or {}).get(sc_name_str, {}) or {}
 
-        # 1) End Energy /m² (prefer static scenario-comparison result; fallback to direct calculation)
+        # 1) End Energy /m² on the selected gross/net basis.
         try:
-            end_energy_m2 = float(df_cmp_idx.loc[sc_name_str, "Net EUI (kWh/m²·a)"])
+            _eui_column = f"{energy_basis} EUI (kWh/m²·a)"
+            end_energy_m2 = float(df_cmp_idx.loc[sc_name_str, _eui_column])
         except Exception:
             try:
                 df_energy_tmp = get_energy_balance_df(file_bytes, filename, scenario_name=sc_name_str)
                 rows_tmp = _report_prepare_energy_rows(df_energy_tmp, payload_sc, apply_efficiency=True)
-                end_energy_m2 = float(rows_tmp["kWh"].sum()) / area
+                _onsite_tmp = set(get_onsite_generation_enduses(rows_tmp["End_Use"].astype(str).unique()))
+                _onsite_mask_tmp = rows_tmp["End_Use"].astype(str).isin(_onsite_tmp)
+                _consumption_tmp = pd.to_numeric(rows_tmp["kWh"], errors="coerce").fillna(0.0).clip(lower=0.0)
+                if energy_basis == "Gross":
+                    end_energy_m2 = float(_consumption_tmp.loc[~_onsite_mask_tmp].sum()) / area
+                else:
+                    _generation_tmp = pd.to_numeric(rows_tmp.loc[_onsite_mask_tmp, "kWh"], errors="coerce").fillna(0.0).abs()
+                    end_energy_m2 = float(
+                        _consumption_tmp.loc[~_onsite_mask_tmp].sum() - _generation_tmp.sum()
+                    ) / area
             except Exception:
                 end_energy_m2 = np.nan
 
@@ -4942,6 +4954,19 @@ def _build_scenario_performance_radar_raw_df(
                 end_uses_sc_50,
                 apply_lcc_filter=apply_lcc_filter,
             )
+            # The default LCC operational filter intentionally excludes on-site generation.
+            # For Scenario KPIs, Net must include generation as a negative energy-cost credit;
+            # Gross must exclude it regardless of the LCC filter selection.
+            _onsite_uses_for_basis = set(get_onsite_generation_enduses(end_uses_sc_50))
+            _selected_lcc_uses = [
+                str(u) for u in radar_lcc_global_50.get("selected_operational_end_uses", [])
+                if str(u) not in _onsite_uses_for_basis
+            ]
+            if energy_basis == "Net":
+                _selected_lcc_uses = list(dict.fromkeys(_selected_lcc_uses + [
+                    str(u) for u in end_uses_sc_50 if str(u) in _onsite_uses_for_basis
+                ]))
+            radar_lcc_global_50["selected_operational_end_uses"] = _selected_lcc_uses
             radar_lcc_global_50["analysis_period"] = int(scenario_analysis_period)
             df_loads_sc_50 = get_loads_balance_df(file_bytes, filename, scenario_name=sc_name_str,
                                                   apply_master_filter=False)
@@ -4953,6 +4978,12 @@ def _build_scenario_performance_radar_raw_df(
                 lcc_global=radar_lcc_global_50,
                 df_loads=df_loads_sc_50,
             )
+            # Gross energy costs exclude on-site generation credits; net costs include them.
+            # Keep other cost types and PV-related investments/maintenance in the LCC.
+            if energy_basis == "Gross" and cf_sc_50 is not None and not cf_sc_50.empty:
+                _gross_energy_mask = cf_sc_50["Cost Type"].astype(str).eq("Energy") & cf_sc_50[
+                    "End_Use"].astype(str).isin(_onsite_uses_for_basis)
+                cf_sc_50 = cf_sc_50.loc[~_gross_energy_mask].copy()
             if cf_sc_50 is not None and not cf_sc_50.empty:
                 energy_cf_50 = cf_sc_50.loc[cf_sc_50["Cost Type"].astype(str) == "Energy"].copy()
                 if not energy_cf_50.empty:
@@ -4986,6 +5017,7 @@ def _build_scenario_performance_radar_raw_df(
                 radar_crrem,
                 int(project_year),
                 radar_years_50,
+                energy_basis=energy_basis,
             ).reindex(radar_years_50).fillna(0.0)
             annual_emissions_m2 = (float(emis_series_50_t.iloc[0]) * 1000.0) / area if len(emis_series_50_t) else np.nan
             total_emissions_50_m2 = (float(emis_series_50_t.sum()) * 1000.0) / area if len(emis_series_50_t) else np.nan
@@ -6810,6 +6842,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
 
     # Scenarios section - active scenario only per report rule
     add_section("9. Scenarios")
+    report_energy_basis = st.session_state.get("scenario_comparison_energy_basis", "Gross")
     try:
         scenarios_report = st.session_state.get("scenarios", {}) or {}
         scenario_order_report = [str(s) for s in scenarios_report.keys()]
@@ -6829,6 +6862,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                 crrem_dataset=crrem,
                 scenario_analysis_period=scenario_comparison_period_report,
                 apply_lcc_filter=scenario_comparison_apply_lcc_filter_report,
+                energy_basis=report_energy_basis,
             )
             radar_ref_report = str(
                 st.session_state.get("scenario_radar_reference_scenario", active_name) or active_name)
@@ -6872,7 +6906,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
                     "Scenario KPI bar summary",
                     _report_scenario_kpi_scatter_chart(radar_raw_report, "Benchmark-Style Scenario KPI Bar",
                                                        colors_scenarios, scenario_order_report),
-                    "The bar summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) plus scenario-period LCC and life-cycle emissions. Each KPI is shown as vertical bars on one chart with its own y-axis scale.",
+                    f"The comparison uses the {report_energy_basis.lower()} basis for energy, energy costs and emissions. Each KPI has its own axis scale.",
                 )
                 delta_ref_report = str(
                     st.session_state.get("scenario_delta_reference_scenario", radar_ref_report) or radar_ref_report)
@@ -6955,9 +6989,9 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
         try:
             analysis_period = max(1, int(scenario_comparison_period_report))
             years_sc = list(range(project_year_r, project_year_r + analysis_period))
-            annual_em_sc = compute_crrem_like_scenario_emissions_series_cached(df_energy, payload, crrem,
-                                                                               project_year_r, years_sc).reindex(
-                years_sc).fillna(0.0)
+            annual_em_sc = compute_crrem_like_scenario_emissions_series_cached(
+                df_energy, payload, crrem, project_year_r, years_sc, energy_basis=report_energy_basis
+            ).reindex(years_sc).fillna(0.0)
             target_id = "1.5C" if str(st.session_state.get("crrem_target_select", "1.5°C")).startswith("1.5") else "2C"
             carbon_limit_sc, _ = _report_crrem_limits_for_context(crrem, target_id,
                                                                   str(payload.get("crrem_use_type", "Office")),
@@ -6980,6 +7014,7 @@ def generate_bpvis_pdf_report(file_bytes: bytes, filename: str = "") -> bytes:
     add_input_table("Relevant inputs", [
         ("Active scenario", active_name),
         ("Scenario comparison analysis period", f"{int(scenario_comparison_period_report)} years"),
+        ("Energy, cost and emissions basis", report_energy_basis),
         ("Apply LCC-Analysis operational filter", "Yes" if _get_scenario_comparison_apply_lcc_filter(True) else "No"),
         ("Scenario color", scenario_color),
         ("Scenario-specific raw Energy_Balance override",
@@ -9799,6 +9834,7 @@ def compute_crrem_like_scenario_emissions_series(
         crrem: Optional[dict],
         project_year: int,
         years: list,
+        energy_basis: str = "Net",
 ) -> pd.Series:
     """Return annual total emissions in tCO₂e/a using the same decarbonization logic as CRREM.
 
@@ -9829,6 +9865,10 @@ def compute_crrem_like_scenario_emissions_series(
     df_m = df_base.melt(id_vars="Month", var_name="End_Use", value_name="kWh").copy()
     df_m["End_Use"] = df_m["End_Use"].apply(lambda x: _canon_enduse_name(str(x)))
     df_m["kWh"] = pd.to_numeric(df_m["kWh"], errors="coerce").fillna(0.0)
+    onsite_enduses = set(get_onsite_generation_enduses(df_m["End_Use"].unique()))
+    if energy_basis == "Gross":
+        # Removing the generation end uses also excludes future PV production overrides.
+        df_m = df_m.loc[~df_m["End_Use"].isin(onsite_enduses)]
 
     eff = payload.get("efficiency", {}) or {}
     mapping = payload.get("mapping", {}) or {}
@@ -9971,7 +10011,6 @@ def compute_crrem_like_scenario_emissions_series(
         df_base_calc["Efficiency_Factor"] = df_base_calc["Efficiency_Factor"].replace(0.0, 1.0)
         df_base_calc["kWh_adj"] = df_base_calc["kWh"] / df_base_calc["Efficiency_Factor"]
 
-        onsite_enduses = set(get_onsite_generation_enduses(df_base_calc["End_Use"].unique()))
         pv_mask = df_base_calc["End_Use"].isin(onsite_enduses)
         if pv_mask.any():
             pv_apply_scale = bool(pv_cfg.get("enabled", False))
@@ -10008,7 +10047,6 @@ def compute_crrem_like_scenario_emissions_series(
     # ------------------------------------------------------------------
     annual_by_enduse = df_m.groupby("End_Use", as_index=True)["kWh"].sum()
     end_uses_all = [str(u) for u in annual_by_enduse.index.tolist()]
-    onsite_enduses = set(get_onsite_generation_enduses(end_uses_all))
 
     eff_base = {u: _to_float_lcc(eff.get(u, 1.0), 1.0) for u in end_uses_all}
     src_base = {u: str(mapping.get(u, "Electricity")) for u in end_uses_all}
@@ -10088,10 +10126,11 @@ def _compute_crrem_like_scenario_emissions_series_cached_impl(
         project_year: int,
         years: list,
         onsite_signature: tuple,
+        energy_basis: str,
 ) -> pd.Series:
     """Cached scenario-emissions trajectory for repeated tab/rerun calculations."""
     return _compute_crrem_like_scenario_emissions_series_uncached(
-        df_energy, payload, crrem, project_year, years
+        df_energy, payload, crrem, project_year, years, energy_basis=energy_basis
     )
 
 
@@ -10101,9 +10140,11 @@ def compute_crrem_like_scenario_emissions_series_cached(
         crrem: Optional[dict],
         project_year: int,
         years: list,
+        energy_basis: str = "Net",
 ) -> pd.Series:
     return _compute_crrem_like_scenario_emissions_series_cached_impl(
-        df_energy, payload, crrem, int(project_year), list(years or []), _onsite_generation_cache_signature(df_energy)
+        df_energy, payload, crrem, int(project_year), list(years or []),
+        _onsite_generation_cache_signature(df_energy), energy_basis
     )
 
 
@@ -15145,6 +15186,20 @@ with tab7:
         if not scenarios:
             st.info("No scenarios found. Use the Scenario Manager in the sidebar to create scenarios.")
         else:
+            st.markdown("### Scenario KPI Comparison Setup")
+            scenario_energy_basis = st.radio(
+                "Energy, cost and emissions comparison basis",
+                options=["Gross", "Net"],
+                index=0,
+                horizontal=True,
+                key="scenario_comparison_energy_basis",
+                help=(
+                    "Gross uses consumption before on-site generation credits. Net credits generation against "
+                    "electricity consumption, energy costs and emissions. The emissions calculation uses each year's "
+                    "electricity emission factor and caps the credit at that year's electricity consumption."
+                ),
+            )
+
             # Base data is resolved per scenario so scenario-specific Energy_Balance overrides
             # are reflected in the comparison charts.
 
@@ -15270,8 +15325,8 @@ with tab7:
                             "Emissions (kgCO₂e/m²·a)": float(r["co2_kg"]) / _area,
                         })
 
-                    # Per-end-use breakdown (net, including PV) for secondary charts (intensities)
-                    grp_eu = df_src.groupby("End_Use", as_index=False).agg(
+                    # The static end-use charts are labelled Gross.
+                    grp_eu = df_src.loc[~pv_mask].groupby("End_Use", as_index=False).agg(
                         kWh=("kWh_signed", "sum"),
                         cost=("cost", "sum"),
                         co2_kg=("co2_kg", "sum"),
@@ -15482,6 +15537,7 @@ with tab7:
                     apply_lcc_filter=scenario_comparison_apply_lcc_filter,
                     include_capex=True,
                     include_annual_opex=True,
+                    energy_basis=scenario_energy_basis,
                 )
                 # Filter only the four requested comparison diagrams. Keep the full KPI
                 # dataset for delta tables, marginal-abatement-cost calculations and all other logic.
@@ -15602,18 +15658,19 @@ with tab7:
                         _radar_chart_df,
                         scenario_color_map,
                         scenario_order,
-                        title="Benchmark-style KPI bar by scenario",
+                        title=f"Benchmark-style KPI bar by scenario — {scenario_energy_basis} basis",
                         height=620,
                     )
                     st_plotly_chart(fig_scenario_kpi_scatter, use_container_width=True,
                                     key="scenario_kpi_scatter_summary")
                     st.caption(
-                        "The bar summary uses the Benchmark-tab KPI logic (EUI, annual energy cost and annual emissions) "
-                        "plus scenario-period LCC and life-cycle emissions. Each KPI is shown as vertical bars on one chart with its own y-axis scale."
+                        f"EUI, annual and life-cycle emissions, and the energy cost component of OPEX and LCC "
+                        f"use the {scenario_energy_basis.lower()} basis. Each KPI has its own axis scale."
                     )
 
                     with st.expander("Scenario Delta Analysis", expanded=True):
                         st.caption(
+                            f"Energy, cost and emissions comparisons use the {scenario_energy_basis.lower()} basis. "
                             "Compare every scenario against one selected reference scenario. Positive improvement means the scenario has "
                             "a lower/better KPI value than the reference. Marginal abatement cost is calculated from scenario-period LCC delta "
                             "and scenario-period life-cycle emissions avoided."
@@ -16013,6 +16070,7 @@ with tab7:
                                 _crrem_cmp,
                                 project_year_lcc_cmp,
                                 lcc_years_cmp,
+                                energy_basis=scenario_energy_basis,
                             ).reindex(lcc_years_cmp).fillna(0.0)
                         except Exception:
                             _annual_emissions_series_t = pd.Series({int(y): 0.0 for y in lcc_years_cmp}, dtype=float)
@@ -16037,19 +16095,19 @@ with tab7:
                         ))
                         emissions_summary_rows.append({
                             "Scenario": _sc_name,
-                            "Annual Net CO₂ first year (t/a)": float(_annual_emissions_series_t.iloc[0]) if len(
+                            f"Annual {scenario_energy_basis} CO₂e first year (t/a)": float(_annual_emissions_series_t.iloc[0]) if len(
                                 _annual_emissions_series_t) else 0.0,
-                            "Annual Net CO₂ final year (t/a)": float(_annual_emissions_series_t.iloc[-1]) if len(
+                            f"Annual {scenario_energy_basis} CO₂e final year (t/a)": float(_annual_emissions_series_t.iloc[-1]) if len(
                                 _annual_emissions_series_t) else 0.0,
-                            "Cumulative Net CO₂ (t)": float(_cum_emissions_series_t.iloc[-1]) if len(
+                            f"Cumulative {scenario_energy_basis} CO₂e (t)": float(_cum_emissions_series_t.iloc[-1]) if len(
                                 _cum_emissions_series_t) else 0.0,
                         })
                         for _y_cmp, _v_cmp in _annual_emissions_series_t.items():
                             emissions_annual_rows.append({
                                 "Scenario": _sc_name,
                                 "Year": int(_y_cmp),
-                                "Annual Net CO₂ (t/a)": float(_v_cmp),
-                                "Cumulative Net CO₂ (t)": float(_cum_emissions_series_t.loc[_y_cmp]),
+                                f"Annual {scenario_energy_basis} CO₂e (t/a)": float(_v_cmp),
+                                f"Cumulative {scenario_energy_basis} CO₂e (t)": float(_cum_emissions_series_t.loc[_y_cmp]),
                             })
 
                     # Total LCC by scenario, stacked consistently by cost type in both bases.
@@ -16134,7 +16192,7 @@ with tab7:
                             fig_emis_annual_cmp.update_layout(
                                 height=600,
                                 xaxis_title="Year",
-                                yaxis_title="Annual net emissions (tCO₂e/a)",
+                                yaxis_title=f"Annual {scenario_energy_basis.lower()} emissions (tCO₂e/a)",
                                 legend_title_text="Scenario",
                                 legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
                                 margin=dict(l=40, r=20, t=50, b=120),
@@ -16151,7 +16209,7 @@ with tab7:
                             fig_emis_cum_cmp.update_layout(
                                 height=600,
                                 xaxis_title="Year",
-                                yaxis_title="Cumulative net emissions (tCO₂e)",
+                                yaxis_title=f"Cumulative {scenario_energy_basis.lower()} emissions (tCO₂e)",
                                 legend_title_text="Scenario",
                                 legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
                                 margin=dict(l=40, r=20, t=50, b=120),
